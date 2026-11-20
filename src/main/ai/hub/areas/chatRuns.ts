@@ -205,7 +205,12 @@ export class ChatRunsPart {
    * opens one when it names a server (chatTerminal).
    */
   async startFromChat(this: HubService, input: Omit<StartAgentTask, "sessionId">, origin: ChatOrigin): Promise<AgentTask> {
-    if (input.agentId && this.getAgentsList().some((a) => a.id === input.agentId && a.runnerId)) throw new Error(CHAT_NOT_EXTERNAL);
+    if (input.agentId) {
+      const agent = this.getAgentsList().find((a) => a.id === input.agentId);
+      // Not run on the default prompt without a word: the channel's agent is not in this hub.
+      if (!agent) throw new Error("The agent chosen for this channel is not there any more. An administrator can choose another in sshs3.");
+      if (agent.runnerId) throw new Error(CHAT_NOT_EXTERNAL);
+    }
     if (this.getKnownServers().length === 0) await this.collectExtraContext().catch(() => undefined);
     const servers = this.getKnownServers();
     const allowed = allowedProfiles(origin.fence, servers);
@@ -236,6 +241,12 @@ export class ChatRunsPart {
     } catch (error) {
       if (sessionId) this.closeOwnTerminal(sessionId);
       throw error;
+    }
+    // Named by what the person asked, not by the preface before it: lists show the title.
+    const asked = input.prompt.trim().replace(/\s+/g, " ");
+    if (asked) {
+      task.title = asked.slice(0, 100);
+      this.changed();
     }
     if (sessionId && server) {
       const opened = this.terminals.get(sessionId);

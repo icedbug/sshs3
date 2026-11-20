@@ -33,6 +33,8 @@ visits.
 | `SSHS3_ADMIN_USER`, `SSHS3_ADMIN_PASSWORD` | Create the first user at start instead of in the browser. |
 | `SSHS3_MASTER_KEY` | Encrypts stored credentials. Unset, a key is generated in the data directory. |
 | `SSHS3_WEB_PORT`, `SSHS3_WEB_HOST` | Where it listens. |
+| `SSHS3_PUBLIC_URL` | The address people reach the server at, for links in notifications and in chat. See [Notifications](#notifications-and-answering-from-a-phone) and [The team's chat](#the-teams-chat). |
+| `SSHS3_MATTERMOST_ACTION_FROM` | The IP addresses Mattermost's server posts button presses from, exactly as this server sees them, separated by commas. Host names and ranges are not matched. See [The team's chat](#the-teams-chat). |
 
 Put it behind TLS and do not expose it to the internet as it is: it holds
 credentials and can run commands on your systems.
@@ -76,7 +78,10 @@ what, on which target, the risk, and a link to the item.
   it notifications carry no link.
 - The link opens the inbox on that item. The interface has a phone layout and
   can be added to the home screen. Approving needs a signed-in session; there
-  are no approve-by-link tokens.
+  are no approve-by-link tokens, and a notification cannot be answered. To
+  approve from Slack or Mattermost, people talk to the agent bot instead (see
+  [The team's chat](#the-teams-chat)), where only people who linked their
+  chat account may answer.
 - **The person whose agent asks answers it.** Each user of the server has
   their own conversations and inbox. A notification in a shared channel says
   whose answer is awaited; a teammate who opens the link sees their own inbox.
@@ -113,13 +118,73 @@ person's name, connect with a service account. Details:
 
 ## The team's chat
 
-The server is the natural home of the team's chat bot (Settings, "What the
-team says in chat"): an administrator connects a Slack app or a Mattermost bot
-account and ticks the channels to read. There is one bot and one index for
-the whole server; every account's agents can search it, and alerts that come
-in get what was said about their server put on the ticket. What is read stays
-on the server's disk (`team-chat/` in its data folder), not in the team
-bucket. Details: [the AI hub](ai-hub.md#what-the-team-says-in-chat-chatsources-chatindex-chatbridge).
+The server is the natural home of the team's two chat bots. Both are set up
+by an administrator in Settings, under "Slack and Mattermost".
+
+**The context bot** only reads: an administrator connects a Slack app or a
+Mattermost bot account and ticks the channels to read. There is one bot and
+one index for the whole server; every account's agents can search it, and
+alerts that come in get what was said about their server put on the ticket.
+What is read stays on the server's disk (`team-chat/` in its data folder),
+not in the team bucket. It posts nothing. Details:
+[the AI hub](ai-hub.md#the-context-bot-what-the-team-says-in-chat-chatsources-chatindex-chatbridge).
+
+**The agent bot** ("Agent in chat") is the one people talk to: they name it
+in a channel the administrator chose, or write to it directly, and it answers
+in the thread. It is a separate Slack app or Mattermost bot account, with
+tokens of its own. So far it is tested only against stand-ins for Slack and
+Mattermost. Details:
+[Agent in chat](ai-hub.md#agent-in-chat-the-agent-bot-chatagentservice).
+What it needs from the server:
+
+- **The chat agent's account.** A conversation asked for in a channel runs in
+  an account the server makes itself, "Chat agent". Nobody signs in as it and
+  it is not counted as a person. Its folder is `service/chat-agent/` in the
+  data folder: its conversations, its model settings, and its SSH key in
+  `.ssh/`.
+- **Its SSH key.** The chat agent signs in to the team's shared servers with a
+  key of its own. Copy the public key from the card and add it only on the
+  servers the bot may reach: where it is not, the bot cannot sign in. Nobody
+  can answer a question to trust a server's host key for the chat agent.
+  Connect to each such server once from sshs3 and trust its key there first.
+  This was not tried with real servers. "Make a new key" is used from then on, and the old key works on a server until you
+  remove it there (its line ends in `svc:chat-agent@sshs3-web`).
+- **Its model.** It has no model to use until an administrator presses "Copy
+  my model". That copies the administrator's model settings, data policy
+  included. Copy again after a change. The chat agent's model is held to the
+  rule of a shared server, even when one person uses the server. A model on
+  this machine is not called, and a model on the private network needs
+  `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`. Copy my model copies the address as it
+  is, so check that it can be reached.
+- **No public address for Slack.** The bot opens its connection to Slack
+  itself (Socket Mode), and button presses come back over it. Mattermost too
+  is reached over a connection the bot opens. Only Mattermost's buttons need
+  the server to be reachable, see the table below. Without them, people
+  answer a Mattermost card with a reaction (✅ or ❌).
+- A Mattermost server on the private network needs
+  `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`, as for the context bot, once the server
+  has more than one account.
+
+| Variable | What it does |
+| --- | --- |
+| `SSHS3_PUBLIC_URL` | The address people and Mattermost reach the server at. Where the bot sends people to sshs3, it links to this address. For Mattermost buttons, Mattermost's server posts presses to `<SSHS3_PUBLIC_URL>/api/chat/mattermost/action`. The address saved in Settings is not used for the chat. |
+| `SSHS3_MATTERMOST_ACTION_FROM` | The IP addresses Mattermost's server posts from, exactly as this server sees them, separated by commas. Host names and ranges are not matched. Presses are taken only from these, at most 60 a minute from each. Without it the route takes none, and cards are answered with reactions. Behind a reverse proxy the server sees the proxy's address, so list that, and let the proxy pass `/api/chat/mattermost/action` only from Mattermost. |
+
+What the agent bot keeps is in `chat-agent/` in the data folder, readable by
+the server's user only (0600), and never in the team bucket:
+
+| File | What is in it |
+| --- | --- |
+| `connections.json` | The agent bot's tokens (Slack's bot token and app-level token, or Mattermost's token), encrypted with the server's key (`SSHS3_MASTER_KEY`, or the key it made). Also the Mattermost server's address, who the bot is in each chat, and its last error. |
+| `links.json` | Who in chat is who in sshs3, and the hashes of link codes. A code itself is never kept. |
+| `threads.json` | Which chat thread is which conversation, its status post and its cards. Threads nobody wrote in for 30 days are forgotten. |
+| `answering.json` | The switch, the channel rows, direct messages, limits, the approval wait, the monthly budget and what was used of it. |
+| `action-secret.json` | The key the buttons are signed with, made at random and encrypted. |
+
+"Try it" keeps its own links and threads in `chat-agent-try/`. The counts per
+hour are kept in memory only, so a restart forgets them. Everything the
+administrator changes about the agent bot, and who links or unlinks, is in
+the server's audit log.
 
 ## What is on the servers, and what changed
 

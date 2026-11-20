@@ -1,5 +1,6 @@
 import { GitFork } from "lucide-react";
 import type { PanelState } from "./usePanelState";
+import { ChatOriginBadge } from "../ChatOriginBadge";
 
 /**
  * The bar over a conversation: its target, mode, budget and what waits in it.
@@ -29,6 +30,7 @@ export function TaskContextBar({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                         {activeAgent?.icon ? `${activeAgent.icon} ` : ""}
                         {task.agentName || activeAgent?.name || "Assistant"}
                       </span>
+                      <ChatOriginBadge task={task} />
                       <span
                         className="ai-badge ai-badge-success"
                         title="Command safety checks apply to every command in this conversation"

@@ -165,6 +165,8 @@ describe("following a chat run without a browser", () => {
     expect(task.tainted).toBe(true);
     expect(task.target?.label).toBe("web-1");
     expect(task.messages[0].text).toContain("Omar Lind asked you in #ops on Slack.");
+    // Lists show what was asked, not the preface before it.
+    expect(task.title).toBe("Restart nginx on web-1 please");
 
     await vi.waitFor(() => expect(events.some((e) => e.type === "asking")).toBe(true), { timeout: 10_000 });
     const asking = events.find((e) => e.type === "asking") as Extract<HubRunEvent, { type: "asking" }>;
@@ -489,6 +491,9 @@ describe("starting a run from chat", () => {
     );
     const task = hub.store.data.tasks.find((t) => t.agentId === "coder");
     expect(task?.status).not.toBe("running");
+    // An agent this hub does not have is refused, not run on the default prompt without a word.
+    await expect(hub.startFromChat({ prompt: "Fix nginx on web-1", mode: "assisted", agentId: "not-here" }, origin("ask"))).rejects.toThrow(/not there any more/);
+    expect(hub.store.data.tasks.some((t) => t.agentId === "not-here")).toBe(false);
   }, 30_000);
 
   it("keeps telling the others when one listener fails, and stops telling one that left", async () => {

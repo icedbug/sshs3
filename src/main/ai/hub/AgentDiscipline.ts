@@ -256,6 +256,8 @@ export interface RunDiscipline {
   /** The hypotheses of an investigation, as last recorded. */
   hypotheses: AgentHypothesis[];
   hypothesesAsked: boolean;
+  /** Times this run was sent back over its hypotheses, whatever the list became in between. */
+  hypothesisNudges: number;
   todos: AgentTodo[];
   /** A change was made in this run (a modifying command ran, a file was written). */
   madeChanges: boolean;
@@ -274,6 +276,7 @@ export const newDiscipline = (
 ): RunDiscipline => ({
   hypotheses: [],
   hypothesesAsked: false,
+  hypothesisNudges: 0,
   todos,
   madeChanges: false,
   verifiedSinceChange: false,
@@ -285,6 +288,14 @@ export const newDiscipline = (
 
 /** After this many returns to an unchanged list the run is allowed to stop: it is stuck, not lazy. */
 export const MAX_NUDGES_WITHOUT_PROGRESS = 2;
+
+/**
+ * How many times one run is sent back over open hypotheses. A new list after a nudge earns another
+ * look, but not forever: a hypothesis the run cannot check from where it is (another network, a server
+ * outside its reach) stays open however often it is asked, and a model told again rewrites the list
+ * under new names and asks to stop again. A real run went round this 15 times before its call limit.
+ */
+export const MAX_HYPOTHESIS_NUDGES = 2;
 
 /**
  * Called when the model ends its turn without a tool call, i.e. wants to
@@ -312,8 +323,14 @@ export function continuationMessage(state: RunDiscipline): string | undefined {
     return "[sshs3] Thorough mode is on for this request, and you have no task list. Unless the request was a plain question you have now fully answered, write the list with todo_write (what you will check, change and verify) and work through it.";
   }
   const undecided = state.hypotheses.filter((h) => h.status === "open");
-  if (state.hypotheses.length > 0 && !state.hypothesesAsked && (undecided.length > 0 || !state.hypotheses.some((h) => h.status === "confirmed"))) {
+  if (
+    state.hypotheses.length > 0 &&
+    !state.hypothesesAsked &&
+    state.hypothesisNudges < MAX_HYPOTHESIS_NUDGES &&
+    (undecided.length > 0 || !state.hypotheses.some((h) => h.status === "confirmed"))
+  ) {
     state.hypothesesAsked = true;
+    state.hypothesisNudges++;
     return [
       "[sshs3] Before you finish the investigation:",
       undecided.length

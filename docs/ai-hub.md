@@ -363,7 +363,8 @@ parts that define the same method name are refused when the file loads.
 | `areas/audit.ts` | The audit log and terminal recordings | 3 |
 | `areas/simulation.ts` | The demo lab's incidents and its scripted run | 3 |
 | `areas/schedules.ts` | Schedules | 3 |
-| `areas/chatAndAtlassian.ts` | The team's chat bot, Jira and Confluence: where a request reaches the bridges | 16 |
+| `areas/chatAndAtlassian.ts` | The context bot (what the team says in chat), Jira and Confluence: where a request reaches the bridges | 16 |
+| `areas/chatAnswering.ts` | The agent bot in chat: its settings and connection, linking a chat account, answering its changes in the app. It hands each request to the web server (`host.chatAnswering`), which checks who asks | 11 |
 | `hubShared.ts`, `hubHost.ts` | Constants and small functions the parts share; what the hub is given by whatever runs it | |
 
 **To add a request:** add it to `HubRequest` (`src/shared/types/aiHub.ts`),
@@ -624,6 +625,18 @@ because a change would wait for an answer that cannot come.
   so the second person was somebody who may approve there. A destructive
   command, one with hidden values, a change to the rules, one asked for from
   outside, and anything the plan does not list are put to both people.
+- **The chat agent's changes.** A conversation asked for in a Slack or
+  Mattermost channel runs in the chat agent's own account (see
+  [Agent in chat](#agent-in-chat-the-agent-bot-chatagentservice)). That
+  account has no owner to count as the first person, so a change or a plan
+  there that needs two people needs two different people who may approve it.
+  The chat agent is never one of them. They answer in the thread, once they
+  have linked their chat account, or in the app under Settings, Agent in
+  chat, "Waiting for your answer". The same rules decide who may: never a
+  turned off account, one person counts once, and on production only an
+  administrator or a member of an approver group. With fewer than two such
+  people on the server, the change is refused at once instead of waiting.
+  These changes are not in anybody's Inbox.
 - Checked in `peerApprovalOnServer.test.ts` over each account's own
   websocket, with a terminal that answers: a member's production change runs
   once the administrator has approved; a refusal runs nothing; another member
@@ -1075,10 +1088,23 @@ placed before the early return for a pending save); three seconds later
   or stops it.
 - A desktop notification is now also shown when an approval, a plan or a
   question starts to wait, which nothing did before.
+- **A notification only tells.** It cannot be answered. The notifications
+  card used to have a switch, "Let Approve and Deny be answered from chat".
+  It was never saved on the server, no button was ever sent, and nothing
+  took an answer: the page promised something that did not exist. The
+  switch is gone, and so are the unused action tokens in `Notifier.ts`
+  (`signChatOpsActionToken`, `chatOpsActions`). A policy kept in the browser
+  that still holds the old `chatOps` part loads and is ignored. To approve
+  from Slack or Mattermost, use the agent bot: see
+  [Agent in chat](#agent-in-chat-the-agent-bot-chatagentservice).
+- A change or a plan of a conversation asked for from chat is not sent to
+  the notification channels (`flushInbox`): its card is in the chat thread,
+  where the people who may answer it are. What waits for a second person
+  still goes.
 
 Not done: delivery through an HTTP proxy, a persistent retry queue (three
 tries in memory, then the failure is shown on the channel), approving from
-inside Slack or Teams.
+inside Microsoft Teams.
 
 ## Alerts in, and the inbox (`AlertIntake`, `InboxView`)
 
@@ -1110,7 +1136,8 @@ inside Slack or Teams.
   be listed only while the agent was still working, so a plan that waited for
   its answer was never there. On a shared server the list also has what a
   colleague's run asks a second person (`peerApprovals`, kind `peer`): see
-  "Two people".
+  "Two people". What the chat agent asks is not in the Inbox; it is answered
+  in the chat thread or under Agent in chat in the settings.
 
 Checked with real HTTP posts against the web server in tests and in a browser
 with a stand-in model. Not checked: a real Alertmanager or PagerDuty sending.
@@ -1186,12 +1213,18 @@ documentation (Cloud: `/rest/api/3` with `POST /search/jql`, `/wiki/api/v2`;
 Data Center: `/rest/api/2`, `/rest/api/content`) and are tested against a
 stand-in. Connect a test instance first.
 
-## What the team says in chat (`ChatSources`, `ChatIndex`, `ChatBridge`)
+## The context bot: what the team says in chat (`ChatSources`, `ChatIndex`, `ChatBridge`)
 
 What matters at an alert is often written only in chat: "restarted it last
 night", "that one is known, wait it out". A bot the team invites to chosen
 Slack or Mattermost channels lets agents look that up, and puts what was said
-about a server on its alert's ticket.
+about a server on its alert's ticket. This is the **context bot**. The
+settings show it under "Slack and Mattermost", titled "Context bot".
+
+It is one of two bots. People who want to talk to the agent in chat talk to
+the other one, the agent bot, which is a separate Slack app or Mattermost bot
+account: see [Agent in chat](#agent-in-chat-the-agent-bot-chatagentservice).
+Nothing about the agent bot gives the context bot a way to post.
 
 **The bot is the team's.** A Slack app's bot token (`xoxb-…`; a person's own
 token is refused), or a Mattermost bot account's access token and the
@@ -1206,7 +1239,17 @@ and `users:read`.
 
 **What it may read.** Only channels the bot is a member of are listed, and
 only those a person ticks are read. Direct messages and group chats are never
-asked for. The bot posts nothing and takes no commands.
+asked for. The context bot posts nothing and takes no commands. Its client
+has no call that writes. Tests check both that its code has none and that
+it makes none while the agent bot posts in the same channels
+(`chatBridgeReadThread.test.ts`, and "keeps the two bots apart" in
+`chatAgentOnServer.test.ts`).
+
+**One thread now, for the agent bot.** When somebody names the agent bot in a
+thread, the agent bot can ask the context bot to read that one thread at once
+(`ChatBridge.readThreadNow`), so the agent sees what was said before it was
+asked. This works only in a channel the context bot already reads, and it
+only reads.
 
 **The index.** A chosen channel is read every two minutes for what is new;
 the first time, ninety days back, and further back on request. Messages are
@@ -1259,6 +1302,505 @@ documentation and are tested against stand-ins. Slack has tightened its rate
 limits on reading history for some kinds of apps; an app made for your own
 workspace should not be affected, and the reader waits when Slack asks it to,
 but confirm it on the first real connection.
+
+## Agent in chat: the agent bot (`ChatAgentService`)
+
+On a web server, people can talk to the agent from Slack or Mattermost. They
+name the agent bot in a channel an administrator chose, or write to it in a
+direct message, and it answers in the thread. A change the agent wants to make
+is posted as a card with Approve and Deny, and it runs only when a person who
+may approve it says yes. Each thread is one conversation in sshs3.
+
+An administrator sets it up in Settings, under "Slack and Mattermost", in the
+card "Agent in chat". It is a web server feature: the desktop app does not
+have it, and its requests say so there (`areas/chatAnswering.ts`).
+
+**So far it is tested only against stand-ins for Slack and Mattermost**, not
+against a real workspace. See "What is tested and what is not" at the end of
+this section.
+
+### Two bots, and why
+
+| | Context bot | Agent bot |
+| --- | --- | --- |
+| What it does | Reads the channels an administrator ticks, so agents can search what the team wrote, and alert tickets get "Said in chat" | Takes questions, answers in the thread, posts changes and plans as cards |
+| What it posts | Nothing. It takes no commands | Answers, a status line, cards and short replies |
+| Slack | An app of its own, with scopes that read channel history | An app of its own: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `channels:read`, `groups:read`, `users:read`, and Socket Mode with an app-level token. No scope that reads a channel's history |
+| Mattermost | A bot account of its own | A bot account of its own |
+| Tokens | `team-chat/connections.json` | `chat-agent/connections.json` |
+| Set up in | The card "Context bot" | The card "Agent in chat" |
+
+Why two: a bot that reads whole channels should not also post and take
+commands, and the bot people talk to should not read whole channels. Kept
+apart, each token does one job, and a token that leaks gives only that job.
+So the agent bot's form refuses the context bot's token (`ChatBridge.usesToken`
+compares hashes), and the context bot's client has no call that writes.
+
+### How the two work together
+
+- The agent bot sees only what is written to it: a message that names it in
+  a channel, and direct messages. In Mattermost a bot account is sent every
+  post of the channels it is in. The agent bot looks in those only for a link
+  code to turn off, answers only when it is named, and keeps none of them.
+- When it is named in a thread of a channel the context bot reads, it asks the
+  context bot to read that thread now. The earlier messages (at most 50, and
+  at most 8,000 characters) are given to the agent as what the team wrote,
+  marked as data from the chat and not instructions. Named again later in the
+  same thread, the agent gets only what was written since it last answered.
+- When the context bot does not read the channel, the agent sees only what
+  was written to the agent bot.
+- The agent can search the context bot's index with `sshs3_chat_history`, but
+  only in the channels the channel's row allows. By default that is only the
+  channel it was asked in. A direct message searches no team chat.
+
+### The chat agent's account
+
+A conversation asked for in a channel runs in the chat agent's own account
+(`svc_chat-agent`, shown as "Chat agent"), never in the account of whoever
+asked. The server makes it itself, in `service/chat-agent/` of its data
+folder.
+
+- Nobody can sign in as it, invite it or remove it. It is not counted as a
+  person anywhere: not for the two person rule, not among who is signed in,
+  not in the administrator's list.
+- It is a member, so the rules for members hold for it, and so do the rules
+  an administrator set for everyone. It proposes no memories and does no
+  learning for the team.
+- The servers it knows are the ones shared with everyone on the server. It
+  signs in to them with an SSH key of its own. The administrator copies the
+  public key from the card and adds it only on the servers the bot may reach.
+  That is the outer fence: where the key is not, the bot cannot sign in.
+  Nobody can answer a question to trust a server's host key for the chat
+  agent. Connect to each such server once from sshs3 and trust its key there
+  first. This was not tried with real servers. The key is made when the bot
+  is first connected. "Make a new key" is used for
+  new terminals from then on; the old key keeps working on a server until it
+  is removed there (its line ends in `svc:chat-agent@sshs3-web`).
+- What an administrator changes about the agent bot, and who links or
+  unlinks, goes into the server's audit log.
+
+### Setting up Slack
+
+1. In the card, open "The agent bot", then Slack, and copy the manifest.
+2. In Slack, make a new app from that manifest and install it to the
+   workspace. Copy its bot token (`xoxb-`).
+3. Under Basic Information, make an app-level token with the scope
+   `connections:write` (`xapp-`).
+4. Paste both tokens and press Connect. sshs3 tries both before it saves them:
+   the bot token with `auth.test`, the app-level token by asking Slack for a
+   Socket Mode address (`apps.connections.open`). The socket itself is opened
+   after saving, and the card shows whether it connected. The context bot's
+   token is refused.
+5. Invite the bot to each channel it should answer in, and add a row for the
+   channel (below).
+
+The manifest turns on Socket Mode, subscribes to the bot events
+`app_mention` and `message.im`, turns on interactivity (for the buttons) and
+the messages tab (so people can write to the bot), and asks for the scopes in
+the table above and no others.
+
+**No public address is needed for Slack.** Socket Mode is a connection the
+server opens outward to Slack, and button presses come back over it. The
+socket's address must be a `wss` address under `.slack.com`.
+
+### Setting up Mattermost
+
+1. In Mattermost, make a bot account (System Console, Integrations, Bot
+   Accounts), give it an access token, and add it to the team and to the
+   channels it should answer in.
+2. In the card, open "The agent bot", then Mattermost. Give the Mattermost
+   server's address and the token, and press Connect. sshs3 checks the token
+   (`/api/v4/users/me`) before it saves it. The context bot's token is
+   refused.
+3. The agent bot opens a websocket to the Mattermost server
+   (`/api/v4/websocket`) with the token in the `Authorization` header. When
+   the header is not taken, it sends the token once more as an
+   authentication challenge, the way Mattermost's own apps do.
+
+On a server with more than one account, a Mattermost server on the private
+network is reached only with `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`, the same rule
+as for the context bot.
+
+**Reactions, or buttons.** By default people answer a card with a reaction:
+✅ approves, ❌ denies. The bot puts both on the card, so they are one click
+away. Cards get Approve and Deny buttons only when both of these are set on
+the server:
+
+- `SSHS3_PUBLIC_URL`: Mattermost's server posts each press to
+  `<SSHS3_PUBLIC_URL>/api/chat/mattermost/action`, so it must reach that
+  address.
+- `SSHS3_MATTERMOST_ACTION_FROM`: the IP addresses Mattermost's server posts
+  from, exactly as this server sees them, separated by commas. Host names and
+  ranges are not matched.
+
+The press route needs no session. Mattermost says who pressed, and only the
+address the press comes from shows that it was Mattermost that said so. So the
+route takes a press only from the listed addresses, at most 60 a minute from
+each and at most 32 kB each, and then checks the signed token in the button
+against the card, the channel and the person's link. Without the list it
+answers 403, and cards are answered with reactions, which reach the bot over
+its own socket.
+
+**Behind a reverse proxy** the server sees the proxy's address, not
+Mattermost's, so that is the address the list must hold. Then anything that
+can reach the proxy passes that check. Let the proxy pass
+`/api/chat/mattermost/action` only from the Mattermost server, or keep
+reactions.
+
+When sshs3 is on a private network, Mattermost may also refuse to post to it
+until its setting for untrusted internal connections names sshs3's host. This
+was not tried.
+
+### Channels, and how far the agent may go
+
+Each channel the agent bot answers in is a row in the card. The rows of both
+services are saved together.
+
+| Field | What it holds |
+| --- | --- |
+| Channel | Its id (in Slack like `C0123ABCD`) and a name to show. The bot answers in no channel without a row |
+| Servers | Names, ids or hosts, or all of the chat agent's servers |
+| Clusters | Every server in them |
+| What it may do | Read only, Ask before changes, or Plan first |
+| Agent | The chat agent's default agent, or another of the chat agent's own agents. Its hub runs the conversation, so an agent of the administrator's own is not offered, and saving one is refused. External runners are not offered: a conversation from chat runs on the chat agent's model |
+| Who may approve | Anyone who may approve it, or administrators only. In chat only people who linked their chat account can answer |
+| What it may search | Which of the context bot's channels `sshs3_chat_history` may search. None chosen: only this channel |
+
+- **Servers are matched exactly**, by id, name or host, or by cluster.
+  `web-1` never lets in `web-10`. A row with no servers and no clusters
+  reaches nothing.
+- **Read only:** commands that only look run, and anything that would change
+  something is refused. No card is posted. **Ask before changes:** each
+  change waits until a person who may approve it says yes. **Plan first:**
+  the agent proposes a plan and changes nothing until it is approved. A
+  conversation from chat never runs in Auto.
+- **In a channel the bot answers only when it is named**, in its own thread
+  too. A later message in the thread that names it goes on with the same
+  conversation, given to the agent as `Omar Lind wrote: …`. One answer at a
+  time per thread.
+- **A conversation keeps the rule it started with.** When an administrator
+  changes a channel's row, the next message there starts a new conversation,
+  and the bot says so. A card in a channel that was turned off, removed or
+  set to read only can no longer be answered in chat, only in sshs3.
+- **Conversations do not see each other.** The chat agent's account holds
+  every channel's conversations. A run asked for in one channel searches only
+  that channel's earlier conversations (in a direct message, only that
+  person's), uses only its own terminals, sees only the servers inside its
+  fence in its inventory, its map of servers and its memories, and keeps no
+  notes. The fence is `chatFence.ts`; the hub holds a run to it
+  (`areas/chatRuns.ts`, `ToolBroker`, `AppActions`, `ContextService`).
+- **What is posted.** A status post, edited at most every 15 seconds. Then
+  the answer: the conversation's stored and masked text, never pieces of the
+  model's stream. It is split at paragraphs without breaking a code block,
+  and after about 12,000 characters the rest is left in sshs3. `@channel`,
+  `@here` and the like are made harmless. Attachments are not read, and the
+  bot says so. With `SSHS3_PUBLIC_URL` set, a link to sshs3 is added where
+  the chat sends people there: an answer cut short, a card that is answered
+  only in sshs3 or has ended, and a card that could not be posted. The link
+  opens sshs3, not the conversation itself.
+- **A card** shows what the change does, where, the risk and why, the whole
+  command, the check, how it is taken back, the approvals so far and who may
+  approve. A card that does not fit whole gets no buttons and says to answer
+  in sshs3: nothing is approved from a part of it.
+
+### Who may approve
+
+- **In chat, only people who linked their chat account** (below). In the
+  app, under "Waiting for your answer", no link is needed. Somebody who did not
+  link and presses a button is told how to link: in Slack in a message only
+  they see, in Mattermost in the answer to the press, and for a reaction by
+  name in the thread.
+- **Only what their sshs3 account may approve in the app.** An answer from
+  chat is checked as a second person's answer is in the app
+  (`answerForChatAgent`, `authorizePeerApproval`): never a turned off account,
+  one answer per person, and on production only an administrator of the
+  server or a member of one of its approver groups. With "Administrators
+  only" on the channel, only administrators. The stricter of the rule the
+  conversation started with and the channel's rule now holds.
+- **Production, two people and change freezes hold.** A change that needs two
+  people takes two different people, in the thread or in the app (see
+  [Two people](#two-people-peer-approve-approveaspeer-approveplanaspeer)). A
+  change freeze stops a change before any card is posted, the thread is told,
+  and the freeze is checked again just before a change runs.
+- **sshs3's own rules only in the app.** A change to sshs3's own settings or
+  rules is never answered from chat.
+- **A button is signed.** It carries a token bound to the channel, the
+  thread, the card, the conversation, the change or plan, and the answer. It
+  is good for a day (`chatActionToken.ts`). A person answers a card once; a
+  press that was refused does not use that up. In Slack, Approve asks to
+  confirm on production and for a command that can remove data.
+- **In the app.** Under Agent in chat, and at the top of the Inbox, "Waiting
+  for your answer" lists the chat agent's changes and plans this person may
+  answer, with the target, the risk, Approve and Deny
+  (`chat-answering-answer`). The Inbox count includes them. An answer in the
+  app needs no linked chat account: the same rules hold as for one given in
+  chat. It is needed: the chat agent has no owner, so its changes are in
+  nobody's own Inbox items. An administrator also has "Conversations from
+  chat", which reads each conversation, a whole plan too, and answers what
+  waits in it (`chat-answering-runs`, `chat-answering-task`).
+- **A direct message from a linked person** is the exception: its cards are
+  answered only by that person, by their own account's rules, as in the app.
+
+### Linking a chat account
+
+- Under Settings, Agent in chat, "Your chat account", a person gets a link
+  code for Slack or for Mattermost. The section is there once the agent bot
+  is connected and answering is on, and for anybody who already linked. A
+  code is offered only for a service the agent bot is connected to. It is 8
+  letters and digits, works once, and works for 10 minutes. There is one at a time per account and service,
+  and only its hash is kept.
+- They send `link <code>` to the agent bot **in a direct message**. `unlink`
+  ends the link, and `help` says what the bot does.
+- A code the bot sees in a channel is turned off at once, and the bot says
+  so. In Slack the bot sees a channel message only when it is named, so a
+  code pasted in a Slack channel without naming the bot stays good until it
+  runs out. That is why the card says to send it only in a direct message.
+  In Mattermost a code in a channel the bot is in is turned off, named or
+  not.
+- After five wrong codes in 10 minutes from one chat account, its codes are
+  not looked at until those 10 minutes have passed.
+- One chat account per sshs3 account and service. A turned off or removed
+  account counts as not linked, everywhere, and removing an account removes
+  its links. An administrator sees everybody who linked under "Linked
+  people", and can unlink anybody.
+
+### Direct messages
+
+- Off until an administrator turns them on.
+- **From a linked person**, a direct message runs in that person's own sshs3
+  account: on their own servers, under their own safety rules, model and data
+  policy, and it may ask for changes. It is in their conversation list in the
+  app, marked "from Slack" or "from Mattermost" (`ChatOriginBadge`). Only that
+  person answers its cards. Where a second person is needed, that person
+  answers in their Inbox as usual.
+- **From somebody who did not link:** read only, or not answered, as the
+  administrator chose. Read only runs in the chat agent's account, only on the
+  servers and clusters set for direct messages, and the bot says it can only
+  look. Not answered: the bot says how to link.
+- Each message in a direct message goes on with the same conversation.
+
+### Model, limits and budget
+
+- **The model.** The chat agent has model settings of its own, and none at
+  first. "Copy my model" copies the administrator's whole model settings to
+  it, with keys still encrypted and the data policy too. Later changes are
+  not followed: copy again. The card says which model the chat agent has, or
+  that it has none; with none, the bot answers every question with "No model
+  is set up". A direct message from a linked person uses that person's own
+  model.
+- **The model must be reachable as from a shared server.** The chat agent's
+  model is held to the rule of a shared server, even when one person uses
+  the server. A model on this machine is not called, and a model on the
+  private network needs `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`. Copy my model
+  copies the address as it is, so check that it can be reached.
+- **How long a change waits** for an answer in the chat agent's
+  conversations: 60 minutes at first, and from 1 to 1,440 (a button is good
+  for a day). After that the change counts as denied, its card says it ran
+  out, and the agent goes on without it. A linked person's direct message
+  waits as long as that person's own settings say.
+- **A monthly budget** in tokens for every answer in chat, direct messages
+  too: 2,000,000 at first, and at least 10,000. A month is a calendar month in
+  UTC. What a run used is counted when it ends, with the background runs it
+  asked for (a plan's reviewer, investigators). When it is spent, the bot says
+  so and takes no more questions until the next month; a card that waits can
+  still be answered. A run somebody goes on with in the app is not counted.
+  The card shows what was used.
+- **Limits per hour**, kept in memory, so a restart forgets them:
+
+| Limit | At first | Can be set from 1 to |
+| --- | --- | --- |
+| New conversations one person starts | 10 | 100 |
+| Messages one person sends | 30 | 500 |
+| Messages in one channel | 30 | 1,000 |
+| Answers worked on at the same time, over the whole server | 4 | 16 |
+
+One answer is worked on at a time per thread. Short replies ("I am still
+working in this thread", "I am answering other questions right now", "I do
+not answer direct messages") go to one person at most 5 times an hour for
+each kind. "You sent me too many" is said once an hour per person or channel,
+and "I do not answer in this channel yet" and "the budget is spent" at most
+once an hour per channel. So a person who writes again and again cannot fill
+a channel's queue ahead of the cards and answers.
+
+Posts keep to each service's pace (`ChatOutbox.ts`): one queue per channel,
+in Slack posts at least 1.1 seconds apart and edits 3 seconds apart, in
+Mattermost 0.25 and 0.5 seconds. When a service asks the bot to wait, it
+waits.
+
+### Data policy
+
+The chat is a place data goes, like a model's provider. The check is
+`validateChatEgress` in `src/shared/dataDestination.ts`.
+
+| Where data may go | Slack | Mattermost |
+| --- | --- | --- |
+| Any service I set up | Allowed | Allowed. Without https, a warning |
+| Only services in the EU | Stopped | Only a host on the EU list, the private network or this machine |
+| Only this machine and my own network | Stopped | Only the private network or this machine |
+
+- It is checked when answering is switched on: answering stays off while the
+  chat agent's policy stops a connected service, and the card says why. It is
+  checked when the bot is connected while answering is on.
+- It is checked again before every post or edit that carries what a run did,
+  with the policy of the account the conversation runs in: the chat agent's
+  for channels and for people who did not link, the person's own for their
+  direct messages. A run can wait a day, and a policy can change meanwhile.
+  When the policy stops a post, the thread is told once an hour and the
+  conversation is left to be answered in sshs3.
+- The chat agent's policy is part of its model settings, so "Copy my model"
+  copies the administrator's. It has no setting of its own: to change it,
+  change yours under "What leaves this machine", then press Copy my model.
+  The card says so when the policy stops a service, and says whether
+  answering cannot be switched on or, when it is on, that answers are not
+  posted there.
+- Everything posted is masked again before it goes.
+- Not done: the settings card "What leaves this machine" does not list the
+  chat yet.
+
+### When the server restarts
+
+- The settings, links, threads, cards and the month's budget are on disk. The
+  counts per hour are not.
+- When the server starts, threads nobody wrote in for 30 days are forgotten.
+  Then, in the background, the status posts and cards of runs the restart cut
+  off are edited to say "Stopped: the server restarted. Reply to go on." A
+  plan card keeps its buttons, since a plan waits without a run. A press on
+  an old button of a stopped card is turned away. Writing in the thread goes
+  on with the same conversation. What could not be posted because the chat
+  was out of reach is tried again at the next start.
+- The lines to Slack and Mattermost come back by themselves. The wait grows
+  from 1 second to a minute, and a wait the service asks for is kept. The
+  card shows each line as connecting, open, waiting (with the error and when
+  it tries again) or stopped. A Mattermost line resumes where it was and asks
+  for what it missed.
+
+### Try it
+
+"Try it" in the card is a simulated chat inside the server (`simChat.ts`).
+Nothing goes to Slack or Mattermost. An administrator writes as themselves,
+linked, or as somebody who did not link, in a channel that has a row or in a
+direct message, and can go on in the same thread. Only the chat is simulated:
+the agent really runs, with the chat agent's model, on the servers the
+channel reaches, under the administrator's rules, limits and budget. A
+direct message as yourself runs in your own account. A change it asks for is
+real too, and waits for an approval in the app. The tried chat keeps links
+and threads of its own (`chat-agent-try/` in the data folder), never a real
+chat's. It is offered in the demo, and before the agent bot is connected;
+once the bot is connected, the card says to ask it in the chat. It needs a
+model: press Copy my model first, in the demo too. The demo's scripted
+answers do not reach the chat agent. A card is shown as Slack shows it, with
+its command, check, how it is taken back and who may approve. A channel can
+be gone on with only in a thread of that same channel. It waits up to
+20 seconds for the answer, then shows what was posted so far.
+
+### Requests and where the code is
+
+The requests go through the hub (`areas/chatAnswering.ts`) to the web server
+(`ChatAnswering.ts`), which checks who asks.
+
+- An administrator: `chat-answering-save` (the switch, channel rows, direct
+  messages, limits, budget, wait), `chat-answering-connect`,
+  `chat-answering-disconnect`, `chat-answering-rotate-key`,
+  `chat-answering-copy-model`, `chat-answering-runs`, `chat-answering-task`
+  and `chat-answering-try`.
+- Anybody: `chat-link-code`, `chat-unlink` (their own; an administrator
+  anybody's) and `chat-answering-answer` (checked as above).
+- The snapshot's `chatAnswering` carries, for everybody, whether answering
+  is on, their own links and what waits for their answer; for an
+  administrator also the settings, the bot's connection and status, the
+  linked people, the public key, the data policy check, whether Mattermost
+  cards have buttons, the chat agent's own agents, and whether it has a model
+  (its name only). It never carries a token or a key.
+
+| File | What is in it |
+| --- | --- |
+| `src/main/web/chatAgent/ChatAgentService.ts` | Hears mentions, direct messages, presses and reactions; starts or goes on with a conversation; follows the run; posts the status, cards and answer |
+| `ChatAnswering.ts` | The agent bot as the web server keeps it: the requests from the app, connecting, the read view, "Try it" |
+| `ChatAnsweringStore.ts` | Channel rows, direct messages, limits and budget (`answering.json`) |
+| `ChatAgentStore.ts` | Links, link codes, threads and cards (`links.json`, `threads.json`) |
+| `AgentBotStore.ts`, `AgentBotApi.ts` | The agent bot's tokens, encrypted (`connections.json`), and its calls to Slack and Mattermost |
+| `SlackSocket.ts`, `MattermostSocket.ts`, `agentSocket.ts` | The lines to Slack's Socket Mode and Mattermost's websocket: answer each event, drop repeats, come back after a drop |
+| `ChatOutbox.ts`, `chatFormat.ts` | One queue per channel at the service's pace; cards, answers and short replies in each service's format |
+| `chatActionToken.ts` | The signed buttons and their key (`action-secret.json`) |
+| `simChat.ts` | The simulated chat for "Try it" and for tests |
+| `src/main/net/wsClient.ts` | A small websocket client over the connection the address guard checked (there is no `ws` package) |
+| `src/main/ai/hub/chatFence.ts`, `areas/chatRuns.ts` | The fence a chat conversation runs in, and how the hub starts it, goes on with it and follows it without a browser |
+| `src/main/web/WebTenantManager.ts` | The chat agent's account (`CHAT_AGENT_ID`), `answerForChatAgent`, `chatAgentWaitingFor` |
+| `src/main/web/WebServer.ts` | The press route `/api/chat/mattermost/action` |
+| `src/renderer/src/components/AiHub/AgentInChatCard.tsx`, `ChatOriginBadge.tsx` | The card in Settings, and the "from Slack" badge |
+
+Tests in `tests/main/`: `chatAgentService`, `chatAgentOnServer`,
+`chatAnsweringRequests`, `chatAnsweringStore`, `chatAgentStore`,
+`chatAgentAccount`, `chatActionToken`, `chatFormat`, `chatOutbox`,
+`chatEgress`, `chatFence`, `hubRunEvents`, `agentBotApi`, `agentBotStore`,
+`slackSocket`, `mattermostSocket`, `wsClient` and `chatBridgeReadThread`, and
+`chatAgentRealModel` (opt in, it runs only with `SSHS3_CHAT_REAL_MODEL=1`,
+`SSHS3_SIM_API_KEY` and `SSHS3_SIM_BASE_URL` set). The stand-ins are `tests/helpers/fakeSlack.ts`, `fakeMattermost.ts` and
+`wsServer.ts`. The card: `tests/renderer/agentInChatCard.test.tsx` and
+`chatOriginBadge.test.tsx`.
+
+### What is tested and what is not
+
+**Tested only against stand-ins.** `tests/helpers/fakeSlack.ts` and
+`fakeMattermost.ts` play Slack's Web API and Socket Mode, and Mattermost's API
+and websocket, on 127.0.0.1. Each can play two apps or two bot accounts at
+once. `chatAgentOnServer.test.ts` runs the real web server with three accounts
+(an administrator who linked, a member who did not, a member who did) and a
+stand-in model. It checks a change asked for in a channel posted as a card,
+the member who did not link told to link, and the administrator's approval
+running it; production with two people; a freeze stopping a change before any
+card; a read only channel; a plan channel; a linked person's direct message
+in their own account; that no channel sees another channel's conversations,
+terminals or chat; the two bots kept apart; a restart; link codes written in
+a channel; "Try it"; and in Mattermost, reactions and buttons.
+
+**With a real model, against the Slack stand-in.**
+`tests/main/chatAgentRealModel.test.ts` runs one incident of the demo lab
+with a real model, through the real web server and the Slack stand-in. The
+servers are the lab's simulated ones. It runs only when
+`SSHS3_CHAT_REAL_MODEL=1`, `SSHS3_SIM_API_KEY` and `SSHS3_SIM_BASE_URL` are
+set, so a normal test run never spends model calls. Its caps are 40 commands,
+60 model calls, 1,000,000 tokens and 12 minutes, and reaching one fails it. It
+checks that a card was approved from Slack, that the run completed, that every
+check of the incident passes, and that the thread shows the answer. It was
+run three times with a real model (gpt-6-luna) on the demo lab's
+`nginx-bad-config`. The first run found the cause, the change was approved in
+the thread, and all 4 checks passed (15 model calls). The second run found the
+cause too, then went round on a hypothesis it could not check from its only
+server ("the outside network path fails") until it hit the 60 call cap: each
+time it rewrote the hypothesis list, sshs3 sent it back to check the list
+again. A run is now sent back over its hypotheses at most twice
+(`MAX_HYPOTHESIS_NUDGES` in `AgentDiscipline.ts`). The third run, with that
+fix, passed all 4 checks (28 model calls, about 0.02 USD).
+
+**Not tried.** A real Slack workspace, a real Mattermost server, and a real
+model with Mattermost.
+
+**Not known yet**, because only the stand-ins have seen them:
+
+- The exact fields of Socket Mode events and of button presses.
+- Slack's and Mattermost's real rate limits.
+- Whether Mattermost takes the token in the websocket's `Authorization`
+  header. The authentication challenge is there in case it does not.
+- Mattermost's largest post. Answers are split at 15,000 characters.
+- Whether Mattermost keeps a button's context from other clients. If it does
+  not, people in the channel can read a card's token. The press route takes
+  presses only from the listed addresses, so a token is of no use from
+  anywhere else, unless a reverse proxy is listed (see above).
+- How Slack shows the text and the cards.
+
+**Known limits.**
+
+- A link code pasted in a Slack channel without naming the bot is not seen,
+  so it stays good for its 10 minutes.
+- Answers carry the app's command references, like `[c1] [c2]`. In chat they
+  point at nothing.
+- A new card shows without buttons for a moment ("Answer it in sshs3."),
+  before it is edited to have them: the signed button needs the card's own
+  post.
+
+To try it for real, make two Slack apps (or two Mattermost bot accounts) in a
+test workspace: one for the context bot, one for the agent bot.
 
 ## The demo lab's incidents (`src/main/sim/`)
 
@@ -1878,7 +2420,14 @@ The chat panel keeps its shared state in `usePanelState`. The terminal hook rece
     starts a fresh interval.
   - `SettingsView`: sections for model, team, safety (`SafetyPolicyCard`),
     MCP access (`McpKeysPanel`), limits, app and data (including inline status
-    for "Restore built-in agents, runbooks and skills").
+    for "Restore built-in agents, runbooks and skills"). Its section "Slack
+    and Mattermost" has the two bots: the context bot (`TeamChatCard`) and
+    Agent in chat (`AgentInChatCard`). The settings get the panel's last
+    error, so the agent bot's card can show a refusal next to the form that
+    failed.
+- A conversation that came from a direct message in Slack or Mattermost
+  carries a "from Slack" or "from Mattermost" badge (`ChatOriginBadge`) in
+  the history list, the sidebar and the bar over the conversation.
 - Anything that cannot be undone goes through `ConfirmButton` (first click
   asks for 10 seconds, pauses while hovered or focused, offers `Cancel` and
   `Escape`, and the second click does it).
@@ -2244,7 +2793,8 @@ remaining platform/product work.
 - `src/main/ai/hub/`: AI Hub services (HubService, createHub, DirectAgentRuntime, KnowledgeBaseService, SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, HubStore, privacy, builtins, demoWorkspace).
 - `src/main/ai/hub/areas/`: the hub's own methods, a file per area, and `routes.ts`, the table of which part answers which request (see "Where the hub's code is").
 - `src/main/ai/desktop/`: native Hermes host views, authenticated control IPC and NativeToolBridge.
-- `src/main/ai/hub/ChatSources.ts`, `ChatIndex.ts`, `ChatBridge.ts`: the team's bot in Slack and Mattermost, the index of what was said, and the search over it.
+- `src/main/ai/hub/ChatSources.ts`, `ChatIndex.ts`, `ChatBridge.ts`: the context bot in Slack and Mattermost, the index of what was said, and the search over it. It only reads.
+- `src/main/web/chatAgent/`, `src/main/net/wsClient.ts`, `src/main/ai/hub/chatFence.ts`, `src/main/ai/hub/areas/chatRuns.ts`, `areas/chatAnswering.ts`: the agent bot that answers in Slack and Mattermost (see "Agent in chat").
 - `src/main/ai/hub/Atlassian.ts`, `AtlassianBridge.ts`, `AtlassianStore.ts`: Jira on the board and Confluence in the knowledge base.
 - `src/main/demo/`: launch-time demo mode, outward sync guard, demo PTY and storage provider.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.
@@ -2257,5 +2807,9 @@ remaining platform/product work.
 - `tests/main/workspaceAi.test.ts`, `tests/main/aiHub*.test.ts`, `tests/main/s3WorkspaceSync.test.ts`,
   `tests/main/webServerMultiUser.test.ts`, `tests/main/demo*.test.ts`, `tests/renderer/aiHub.test.tsx`:
   AI Hub, web tenant and demo-mode behavior.
+- `tests/main/chat*.test.ts`, `tests/main/agentBot*.test.ts`, `tests/main/slackSocket.test.ts`,
+  `tests/main/mattermostSocket.test.ts`, `tests/main/wsClient.test.ts`, `tests/main/hubRunEvents.test.ts`,
+  `tests/helpers/fakeSlack.ts`, `tests/helpers/fakeMattermost.ts`, `tests/renderer/agentInChatCard.test.tsx`,
+  `tests/renderer/chatOriginBadge.test.tsx`: both bots in chat, against stand-ins for Slack and Mattermost.
 - `tests/main/nativeHermes*.test.ts`, `tests/main/nativeDesktopShell.test.ts`:
   host and actual native engine contracts.

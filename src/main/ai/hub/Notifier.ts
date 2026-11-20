@@ -24,8 +24,6 @@ export interface NotifyChannel {
   /** Whether the command text itself may leave the installation. */
   includeCommand: boolean;
   alertMinSeverity?: "info" | "warning" | "critical";
-  /** Attach signed ChatOps approve/deny action tokens on webhook payloads. Never set by the app: nothing takes the tokens. */
-  chatOpsActions?: boolean;
   last?: { at: number; ok: boolean; status?: number; error?: string };
 }
 
@@ -59,12 +57,6 @@ export interface NotifyContext {
   /** The person whose installation this is: on a shared server, only they can approve. */
   owner?: string;
   inboxLink?: string;
-  /** Optional ChatOps signed approve/deny action token settings for webhook deliveries. */
-  chatOps?: {
-    enabled?: boolean;
-    ttlSeconds?: number;
-    callbackUrl?: string;
-  };
 }
 
 const SEVERITY = { info: 0, warning: 1, critical: 2 } as const;
@@ -370,90 +362,6 @@ export function evaluateEscalations(
   return { due, escalations: nextEscalations, reminded };
 }
 
-export type ChatOpsAction = "approve" | "deny";
-
-export interface ChatOpsActionTokenPayload {
-  v: 1;
-  itemId: string;
-  action: ChatOpsAction;
-  target?: string;
-  iat: number;
-  exp: number;
-  nonce: string;
-}
-
-const DEFAULT_CHATOPS_TTL_SECONDS = 30 * 60;
-
-/**
- * Signs an HMAC-SHA256 ChatOps action token (`approve` or `deny`) bound to
- * an inbox item id and expiration timestamp.
- *
- * Not used by the app: nothing sets a channel's `chatOpsActions` or passes `chatOps`, and no
- * endpoint takes these tokens (the nonce is not recorded either). An approval needs a person
- * signed in to sshs3; a link in a chat message is not that.
- */
-export function signChatOpsActionToken(
-  secret: string,
-  input: { itemId: string; action: ChatOpsAction; target?: string },
-  nowSeconds = Math.floor(Date.now() / 1000),
-  ttlSeconds = DEFAULT_CHATOPS_TTL_SECONDS,
-): string {
-  const payload: ChatOpsActionTokenPayload = {
-    v: 1,
-    itemId: input.itemId,
-    action: input.action,
-    ...(input.target ? { target: input.target } : {}),
-    iat: nowSeconds,
-    exp: nowSeconds + Math.max(1, ttlSeconds),
-    nonce: crypto.randomBytes(12).toString("base64url"),
-  };
-  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const sig = crypto
-    .createHmac("sha256", webhookKey(secret))
-    .update(`sshs3-chatops-v1.${encoded}`)
-    .digest("base64url");
-  return `${encoded}.${sig}`;
-}
-
-/**
- * Verifies a signed ChatOps action token, checking HMAC integrity and expiry.
- * Not used by the app (see signChatOpsActionToken); it does not stop a token being used twice.
- */
-export function verifyChatOpsActionToken(
-  secret: string,
-  token: string,
-  nowSeconds = Math.floor(Date.now() / 1000),
-): { ok: true; payload: ChatOpsActionTokenPayload } | { ok: false; reason: string } {
-  const dot = token.indexOf(".");
-  if (dot <= 0 || dot === token.length - 1) {
-    return { ok: false, reason: "Malformed ChatOps action token." };
-  }
-  const encoded = token.slice(0, dot);
-  const sig = token.slice(dot + 1);
-  const expected = crypto
-    .createHmac("sha256", webhookKey(secret))
-    .update(`sshs3-chatops-v1.${encoded}`)
-    .digest("base64url");
-  const sigBuf = Buffer.from(sig, "utf8");
-  const expBuf = Buffer.from(expected, "utf8");
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-    return { ok: false, reason: "Invalid ChatOps action token signature." };
-  }
-  let payload: ChatOpsActionTokenPayload;
-  try {
-    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as ChatOpsActionTokenPayload;
-  } catch {
-    return { ok: false, reason: "Unreadable ChatOps action token payload." };
-  }
-  if (payload.v !== 1 || !payload.itemId || (payload.action !== "approve" && payload.action !== "deny")) {
-    return { ok: false, reason: "Unsupported ChatOps action token payload." };
-  }
-  if (nowSeconds > payload.exp) {
-    return { ok: false, reason: "ChatOps action token has expired." };
-  }
-  return { ok: true, payload };
-}
-
 const HEADLINE: Record<InboxKind, string> = {
   approval: "Approval needed",
   peer: "A teammate's change needs a second person",
@@ -585,11 +493,6 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     };
   }
 
-  const includeChatOps = Boolean(channel.secret && (context.chatOps?.enabled || channel.chatOpsActions));
-  const nowSec = Math.floor(Date.now() / 1000);
-  const ttlSec = context.chatOps?.ttlSeconds;
-  const callbackBase = context.chatOps?.callbackUrl;
-
   const body = JSON.stringify({
     version: 1,
     event: "inbox",
@@ -598,21 +501,6 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     owner: context.owner,
     link,
     items: items.map((item) => {
-      const canAct = includeChatOps && (item.kind === "approval" || item.kind === "plan");
-      const actions = canAct && channel.secret
-        ? {
-            approve: {
-              action: "approve" as const,
-              token: signChatOpsActionToken(channel.secret, { itemId: item.id, action: "approve", target: item.target }, nowSec, ttlSec),
-              ...(callbackBase ? { url: callbackBase } : {}),
-            },
-            deny: {
-              action: "deny" as const,
-              token: signChatOpsActionToken(channel.secret, { itemId: item.id, action: "deny", target: item.target }, nowSec, ttlSec),
-              ...(callbackBase ? { url: callbackBase } : {}),
-            },
-          }
-        : undefined;
       return {
         id: item.id,
         kind: item.kind,
@@ -625,7 +513,6 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
         link: item.link,
         reminder: item.reminder || undefined,
         ...(item.escalationTier !== undefined ? { escalationTier: item.escalationTier } : {}),
-        ...(actions ? { actions } : {}),
       };
     }),
   });

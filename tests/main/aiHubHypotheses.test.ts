@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentTask } from "../../src/shared/types/aiHub";
 import {
   HYPOTHESIS_TOOL,
+  MAX_HYPOTHESIS_NUDGES,
   continuationMessage,
   newDiscipline,
   operatingInstructions,
@@ -50,6 +51,25 @@ describe("the hypotheses of an investigation", () => {
     const settled = newDiscipline();
     settled.hypotheses = [{ id: "h1", text: "Scrub", status: "confirmed", evidence: [{ supports: true, text: "seen" }] }];
     expect(continuationMessage(settled)).toBeUndefined();
+  });
+
+  it("stops sending the agent back after a few rounds, however often it rewrites a list it cannot settle", () => {
+    // What a real run did: one hypothesis it could not check from its only server. Each nudge made it
+    // write the list again (under a new id), which used to earn a new nudge, round and round.
+    const state = newDiscipline();
+    let nudges = 0;
+    for (let round = 0; round < 10; round++) {
+      // The runtime marks a fresh list as not asked about yet, as it does after every sshs3_hypotheses call.
+      state.hypotheses = [
+        { id: "h1", text: "nginx fails on a wrong zone name", status: "confirmed", evidence: [{ supports: true, text: "nginx -t" }] },
+        { id: `h2-${round}`, text: "The outside network path fails too", status: "open", evidence: [] },
+      ];
+      state.hypothesesAsked = false;
+      if (continuationMessage(state) === undefined) break;
+      nudges++;
+    }
+    expect(nudges).toBe(MAX_HYPOTHESIS_NUDGES);
+    expect(continuationMessage(state)).toBeUndefined();
   });
 
   it("gives every normal run the list, and an investigator a terminal only for looking", () => {

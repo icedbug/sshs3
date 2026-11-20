@@ -55,6 +55,7 @@ export function SettingsOverlay({ p }: { p: PanelState }): JSX.Element {
               <Settings
                 hub={hub}
                 act={act}
+                error={error}
                 labsEnabled={labsEnabled}
                 onToggleLabs={handleToggleLabs}
               />

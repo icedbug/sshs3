@@ -251,7 +251,7 @@ export class SimChat {
 }
 
 /** The text a person reads in Slack blocks. */
-function blockTexts(blocks: SlackBlock[] | undefined): string[] {
+export function blockTexts(blocks: SlackBlock[] | undefined): string[] {
   const out: string[] = [];
   for (const block of blocks ?? []) {
     const text = (block.text as { text?: unknown } | undefined)?.text;

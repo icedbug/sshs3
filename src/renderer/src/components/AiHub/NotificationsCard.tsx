@@ -26,17 +26,9 @@ export interface QuietHoursConfig {
   bypassCritical: boolean;
 }
 
-export interface ChatOpsCallbackConfig {
-  enabled: boolean;
-  callbackUrl: string;
-  ttlSeconds: number;
-  requireSignedWebhook: boolean;
-}
-
 export interface NotificationPolicyConfig {
   escalationChain: EscalationStep[];
   quietHours: QuietHoursConfig;
-  chatOps: ChatOpsCallbackConfig;
 }
 
 type ExtendedNotifySettings = NonNullable<HubSnapshot["notifications"]> &
@@ -52,12 +44,6 @@ const DEFAULT_POLICY: NotificationPolicyConfig = {
     end: "07:00",
     timezone: "UTC",
     bypassCritical: true,
-  },
-  chatOps: {
-    enabled: false,
-    callbackUrl: "",
-    ttlSeconds: 600,
-    requireSignedWebhook: true,
   },
 };
 
@@ -119,11 +105,6 @@ function loadInitialPolicy(settings: ExtendedNotifySettings): NotificationPolicy
       ...DEFAULT_POLICY.quietHours,
       ...stored.quietHours,
       ...settings.quietHours,
-    },
-    chatOps: {
-      ...DEFAULT_POLICY.chatOps,
-      ...stored.chatOps,
-      ...settings.chatOps,
     },
   };
 }
@@ -323,7 +304,6 @@ export function NotificationsCard({
       action: "notify-settings-save",
       escalationChain: policy.escalationChain,
       quietHours: policy.quietHours,
-      chatOps: policy.chatOps,
     } as unknown as HubRequest;
     const next = await act(payload);
     if (next) {
@@ -634,12 +614,10 @@ export function NotificationsCard({
       >
         <div className="ai-card-head">
           <div>
-            <strong>Who is told next, quiet hours, and answers from chat</strong>
+            <strong>Who is told next, and quiet hours</strong>
             <small>
-              Who is told next when an approval or an alert gets no answer, the
-              hours when only urgent things are sent, and whether a button
-              pressed in chat counts as an answer (each one is signed, so it
-              cannot be faked).
+              Who is told next when an approval or an alert gets no answer, and
+              the hours when only urgent things are sent.
             </small>
           </div>
           <div className="ai-tags">
@@ -649,14 +627,6 @@ export function NotificationsCard({
                 data-testid="quiet-hours-badge"
               >
                 {quietNow ? "Quiet hours active" : "Quiet hours scheduled"}
-              </span>
-            )}
-            {policy.chatOps.enabled && (
-              <span
-                className="ai-badge ai-badge-success"
-                data-testid="chatops-signed-badge"
-              >
-                Answers from chat are on
               </span>
             )}
           </div>
@@ -868,88 +838,13 @@ export function NotificationsCard({
           )}
         </div>
 
-        <div data-testid="chatops-callback-config">
-          <label className="ai-check">
-            <input
-              type="checkbox"
-              aria-label="Let Approve and Deny be answered from chat"
-              checked={policy.chatOps.enabled}
-              onChange={(e) =>
-                setPolicy((p) => ({
-                  ...p,
-                  chatOps: { ...p.chatOps, enabled: e.target.checked },
-                }))
-              }
-            />
-            <span>
-              Let Approve and Deny be answered from chat
-              <small>
-                A webhook notification then carries an Approve and a Deny
-                button. Each works once and is signed (HMAC-SHA256, the
-                Standard Webhooks way), so an answer cannot be faked or used
-                twice.
-              </small>
-            </span>
-          </label>
-          {policy.chatOps.enabled && (
-            <div className="ai-form-row">
-              <label>
-                Address the answers are sent to
-                <input
-                  aria-label="Address the answers are sent to"
-                  placeholder={
-                    settings.publicUrl
-                      ? `${settings.publicUrl}/api/ai/chatops/callback`
-                      : "https://sshs3.example.com/api/ai/chatops/callback"
-                  }
-                  value={policy.chatOps.callbackUrl}
-                  onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      chatOps: { ...p.chatOps, callbackUrl: e.target.value },
-                    }))
-                  }
-                />
-              </label>
-              <label>
-                How long a button works (seconds)
-                <input
-                  type="number"
-                  aria-label="How long a button works (seconds)"
-                  min={60}
-                  max={3600}
-                  value={policy.chatOps.ttlSeconds}
-                  onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      chatOps: {
-                        ...p.chatOps,
-                        ttlSeconds: Math.max(60, Number(e.target.value) || 600),
-                      },
-                    }))
-                  }
-                />
-              </label>
-              <label className="ai-check">
-                <input
-                  type="checkbox"
-                  aria-label="Require Standard Webhooks signature verification"
-                  checked={policy.chatOps.requireSignedWebhook}
-                  onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      chatOps: {
-                        ...p.chatOps,
-                        requireSignedWebhook: e.target.checked,
-                      },
-                    }))
-                  }
-                />
-                <span>Require Standard Webhooks v1 signature verification</span>
-              </label>
-            </div>
-          )}
-        </div>
+        <p className="ai-hint" data-testid="notify-answer-in-chat">
+          A notification only tells people. It cannot be answered.
+          {/* Agent in chat is only on a web server: the desktop app has no such card to point to. */}
+          {hub.chatAnswering
+            ? " A change in a conversation started in Slack or Mattermost is posted in its thread there, and people who linked their chat account can answer it. See Agent in chat."
+            : ""}
+        </p>
 
         <div className="ai-card-actions">
           <button

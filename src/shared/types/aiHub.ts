@@ -1533,6 +1533,10 @@ export interface ChatAnsweringSnapshot {
     dataPolicy: Array<{ service: ChatServiceName; allowed: boolean; errors: string[]; warnings: string[] }>;
     /** Whether "try it" can be used: in the demo, or while no agent bot is connected. */
     canTry: boolean;
+    /** The chat agent's own agents a channel row can choose: the ones its hub has, external runners left out. */
+    agents: Array<{ id: string; name: string }>;
+    /** Whether the chat agent has a model it can run on, and its name. Never a key. */
+    model: { set: boolean; name?: string };
   };
 }
 

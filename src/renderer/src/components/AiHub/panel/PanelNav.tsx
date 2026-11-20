@@ -2,6 +2,7 @@ import { countWaitingInboxItems } from "@shared/aiHubInbox";
 import { FlaskConical, MessageSquare, Plus, X } from "lucide-react";
 import { getHubViewLabel } from "../panelShared";
 import { isConversation } from "../workforceModel";
+import { ChatOriginBadge } from "../ChatOriginBadge";
 import { View, isModelSetupMessage } from "./panelHelpers";
 import type { PanelState } from "./usePanelState";
 
@@ -53,6 +54,7 @@ export function PanelNav({ p }: { p: PanelState }): JSX.Element {
               <MessageSquare size={14} />
               <span>
                 {t.title}
+                <ChatOriginBadge task={t} />
                 <small>{new Date(t.updatedAt).toLocaleDateString()}</small>
               </span>
             </button>
@@ -67,7 +69,8 @@ export function PanelNav({ p }: { p: PanelState }): JSX.Element {
           const badgeCount =
             name === "Inbox"
               ? // What still waits for somebody: an alert that was acknowledged stays listed and is not counted.
-                (hub ? countWaitingInboxItems(hub) : 0)
+                // A change from chat that this person may answer waits too: it is in nobody's own Inbox items.
+                (hub ? countWaitingInboxItems(hub) + (hub.chatAnswering?.waiting.length ?? 0) : 0)
               : name === "Workforce"
               ? (hub?.workTickets ?? []).filter((t) => t.status === "review" || t.status === "in_progress").length
               : name === "Agents & MCP"

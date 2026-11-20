@@ -276,6 +276,11 @@ describe('change card', () => {
     const approved = changeCard(change(), { approvers: 'linked', buttons, final: { state: 'approved', by: ['Maria', 'Lina'], via: 'slack' } });
     expect(JSON.stringify(approved.slack.blocks)).toContain('Approved by Maria and Lina in Slack.');
     expect(approved.slack.blocks!.some((b) => b.type === 'actions')).toBe(false);
+    // Who approved it is said once, not in an approvals line and again below it.
+    expect(JSON.stringify(approved.slack.blocks).match(/Approved by/g)).toHaveLength(1);
+    expect(approved.mattermost.message.match(/Approved by/g)).toHaveLength(1);
+    // A denied card still shows who approved before somebody denied it.
+    expect(JSON.stringify(changeCard(change(), { approvers: 'linked', final: { state: 'denied', by: ['Omar'], via: 'slack' } }).slack.blocks)).toContain('Approvals: 1 of 2');
     const restarted = changeCard(change(), { approvers: 'linked', final: { state: 'restarted' } });
     expect(restarted.mattermost.message).toContain(RESTARTED_TEXT);
     expect(restarted.mattermost.attachments).toEqual([]);

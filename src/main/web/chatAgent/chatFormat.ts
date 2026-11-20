@@ -664,7 +664,8 @@ export function changeCard(change: CardChange, options: CardOptions): CardOut {
   if (change.check)
     parts.push({ label: 'Check', segments: [{ code: change.check.command }, { text: `It should show: ${change.check.expected || 'not said'}` }] });
   parts.push({ label: 'Taken back with', segments: change.rollback ? [{ code: change.rollback }] : [{ text: 'No way to take it back was given.' }] });
-  parts.push({ segments: [{ text: approvalsText(change.requiredApprovals, change.approvals) }] });
+  // An approved card's last line already says who approved it.
+  if (options.final?.state !== 'approved') parts.push({ segments: [{ text: approvalsText(change.requiredApprovals, change.approvals) }] });
   const short: Part[] = [
     { label: 'What', segments: [{ text: shorten(change.description || 'No description was given.', 300) }] },
     where,
@@ -714,7 +715,7 @@ export function planCard(plan: CardPlan, options: CardOptions): CardOut {
   const review: Segment[] = [{ text: VERDICT[verdict] ?? VERDICT.unreviewed }];
   if (verdict === 'revise') for (const f of plan.review.findings ?? []) review.push({ text: `• ${f}` });
   parts.push({ label: 'Review', segments: review });
-  parts.push({ segments: [{ text: approvalsText(plan.requiredApprovals, plan.approvals) }] });
+  if (options.final?.state !== 'approved') parts.push({ segments: [{ text: approvalsText(plan.requiredApprovals, plan.approvals) }] });
   const short: Part[] = [
     { label: 'Goal', segments: [{ text: shorten(plan.goal || 'No goal was given.', 300) }] },
     { segments: [{ text: `${plan.steps.length} ${plan.steps.length === 1 ? 'step' : 'steps'}.` }] },

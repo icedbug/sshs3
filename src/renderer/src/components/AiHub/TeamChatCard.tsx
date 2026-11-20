@@ -208,8 +208,9 @@ export function ChatThread({ hit, act }: { hit: Pick<ChatThreadView, "service" |
 }
 
 /**
- * The team's chat as context for the agents: a bot in Slack or Mattermost,
- * the channels it reads, and a way to try what an agent would find.
+ * The context bot: the team's chat as context for the agents. A bot in Slack or Mattermost, the channels
+ * it reads, and a way to try what an agent would find. It only reads; the agent bot (AgentInChatCard) is
+ * a separate app that answers.
  */
 export function TeamChatCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
   const chat = hub.chatSources;
@@ -226,8 +227,13 @@ export function TeamChatCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.
       <div className="ai-card-head">
         <div>
           <strong>
-            Team chat <span className="ai-count">{(chat?.total ?? 0).toLocaleString()}</span>
+            Context bot <span className="ai-count">{(chat?.total ?? 0).toLocaleString()}</span>
           </strong>
+          <small data-testid="context-bot-line">
+            It only reads the channels you pick, so agents can search what the team wrote.
+            {/* The agent bot is only on a web server: the desktop app has no Agent in chat card to point to. */}
+            {hub.chatAnswering ? " Talking to the agent goes through the agent bot: see Agent in chat." : ""}
+          </small>
           <small>
             What the team says in chat is often the only place something is written down: &ldquo;restarted it last night&rdquo;,
             &ldquo;that alert is known&rdquo;. A bot the team invites to chosen channels lets agents look that up, and puts what

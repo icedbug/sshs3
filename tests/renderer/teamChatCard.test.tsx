@@ -23,9 +23,22 @@ const hub = (chatSources?: HubSnapshot["chatSources"], extra: Partial<HubSnapsho
 
 describe("the team chat card", () => {
   it("says what the bot may read and what is kept, and never shows a stored token", () => {
-    render(<TeamChatCard hub={hub({ connections: [slack], canChange: true, total: 1234 })} act={vi.fn(async () => undefined)} />);
+    const view = render(<TeamChatCard hub={hub({ connections: [slack], canChange: true, total: 1234 })} act={vi.fn(async () => undefined)} />);
     const card = screen.getByTestId("team-chat-card");
     expect(card).toHaveTextContent("The bot only reads, and only the channels chosen here; never direct messages.");
+    expect(card).toHaveTextContent("Context bot");
+    // The desktop app has no Agent in chat card: the line does not point to one.
+    expect(screen.getByTestId("context-bot-line")).toHaveTextContent("It only reads the channels you pick, so agents can search what the team wrote.");
+    expect(screen.getByTestId("context-bot-line")).not.toHaveTextContent("Agent in chat");
+    view.rerender(
+      <TeamChatCard
+        hub={hub({ connections: [slack], canChange: true, total: 1234 }, { chatAnswering: { enabled: false, services: [], links: [], waiting: [] } })}
+        act={vi.fn(async () => undefined)}
+      />,
+    );
+    expect(screen.getByTestId("context-bot-line")).toHaveTextContent(
+      "It only reads the channels you pick, so agents can search what the team wrote. Talking to the agent goes through the agent bot: see Agent in chat.",
+    );
     expect(within(card).getByTestId("chat-slack")).toHaveTextContent("Slack · sshs3-bot, reading 1 channel");
     expect(within(card).getByTestId("chat-mattermost")).toHaveTextContent("Mattermost · not connected");
     const token = within(screen.getByTestId("chat-slack")).getByLabelText(/Bot token of the Slack app/);

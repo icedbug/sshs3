@@ -7,6 +7,7 @@ Run commands from the repository root. Use Node.js 24.15 or later in the 24.x se
 - For an AI Hub action, find its name in the [route table](src/main/ai/hub/areas/routes.ts). Its value names the file in the same directory that handles it. A new action also needs a [shared request type](src/shared/types/aiHub.ts).
 - For the chat UI, start at the [panel](src/renderer/src/components/AiHub/AiHubPanel.tsx). For account isolation and team features, start at the [web tenant manager](src/main/web/WebTenantManager.ts). The [AI Hub guide](docs/ai-hub.md) maps these parts and their tests.
 - For terminal drafts from chat, start with [the terminal handoff hook](src/renderer/src/components/AiHub/panel/useTerminalHandoff.ts). For memory matching, merging and history, start with [the memory rules](src/main/ai/hub/memory/mergeMemory.ts) and [their tests](src/main/ai/hub/memory/mergeMemory.test.ts).
+- For the agent bot that answers in Slack and Mattermost, start at [the chat agent service](src/main/web/chatAgent/ChatAgentService.ts). [Agent in chat](docs/ai-hub.md#agent-in-chat-the-agent-bot-chatagentservice) in the AI Hub guide says how it works with the context bot, what it keeps and which tests cover it.
 - For changes across the desktop process, preload bridge and renderer, follow the [architecture guide](ARCHITECTURE.md).
 
 ## Check a change

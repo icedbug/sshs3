@@ -610,7 +610,7 @@ describe("SchedulesView overhaul", () => {
 });
 
 describe("NotificationsCard overhaul", () => {
-  it("evaluates quiet hours accurately and lets users configure escalation chain, quiet hours, and signed ChatOps callbacks", async () => {
+  it("evaluates quiet hours accurately and lets users configure escalation chain and quiet hours, with no answers from a notification", async () => {
     expect(
       isInQuietHours(
         {
@@ -652,14 +652,12 @@ describe("NotificationsCard overhaul", () => {
       target: { value: "21:00" },
     });
 
-    // Enable signed ChatOps callbacks
-    fireEvent.click(screen.getByLabelText("Let Approve and Deny be answered from chat"));
-    expect(screen.getByTestId("chatops-signed-badge")).toHaveTextContent(
-      "Answers from chat are on",
-    );
-    fireEvent.change(screen.getByLabelText("Address the answers are sent to"), {
-      target: { value: "https://sshs3.example.com/api/ai/chatops/callback" },
-    });
+    // A notification cannot be answered: answering from chat is the agent bot's, in Agent in chat.
+    expect(screen.queryByLabelText("Let Approve and Deny be answered from chat")).toBeNull();
+    expect(screen.queryByTestId("chatops-signed-badge")).toBeNull();
+    // On the desktop app there is no Agent in chat card to point to.
+    expect(screen.getByTestId("notify-answer-in-chat")).toHaveTextContent("A notification only tells people. It cannot be answered.");
+    expect(screen.getByTestId("notify-answer-in-chat")).not.toHaveTextContent("Agent in chat");
 
     fireEvent.click(screen.getByTestId("save-notify-policy-btn"));
     await waitFor(() =>
@@ -670,12 +668,39 @@ describe("NotificationsCard overhaul", () => {
             enabled: true,
             start: "21:00",
           }),
-          chatOps: expect.objectContaining({
-            enabled: true,
-            callbackUrl: "https://sshs3.example.com/api/ai/chatops/callback",
-          }),
         }),
       ),
+    );
+    expect(JSON.stringify(act.mock.calls)).not.toContain("chatOps");
+  });
+
+  it("loads a policy kept from before, with answers from chat in it, and saves it without them", async () => {
+    window.localStorage.setItem(
+      "sshs3.notifyPolicy.v1",
+      JSON.stringify({ chatOps: { enabled: true, callbackUrl: "https://old.example.com/cb", ttlSeconds: 600, requireSignedWebhook: true } }),
+    );
+    try {
+      const hub = makeHub();
+      const withOld = { ...hub, notifications: { ...hub.notifications, chatOps: { enabled: true } } } as unknown as HubSnapshot;
+      const act = vi.fn(async () => withOld);
+      render(<NotificationsCard hub={withOld} act={act} />);
+      expect(screen.getByTestId("notify-policy-section")).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId("save-notify-policy-btn"));
+      await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "notify-settings-save" })));
+      // The old answers from chat are dropped: not sent to the server, not written back to this browser.
+      expect(JSON.stringify(act.mock.calls)).not.toContain("chatOps");
+      expect(window.localStorage.getItem("sshs3.notifyPolicy.v1")).not.toContain("chatOps");
+    } finally {
+      window.localStorage.removeItem("sshs3.notifyPolicy.v1");
+    }
+  });
+
+  it("points to Agent in chat only where there is one, on a web server", () => {
+    const hub = makeHub();
+    const onWeb = { ...hub, chatAnswering: { enabled: false, services: [], links: [], waiting: [] } } as unknown as HubSnapshot;
+    render(<NotificationsCard hub={onWeb} act={vi.fn(async () => undefined)} />);
+    expect(screen.getByTestId("notify-answer-in-chat")).toHaveTextContent(
+      "A change in a conversation started in Slack or Mattermost is posted in its thread there, and people who linked their chat account can answer it. See Agent in chat.",
     );
   });
 });

@@ -262,6 +262,35 @@ describe('the agent bot in chat, asked through the web server', () => {
     expect(agent.hub.store.data.preferences.approvalWaitMinutes).toBe(30);
   }, 30_000);
 
+  it('says whether the chat agent has a model, and offers only its own agents for a channel', async () => {
+    const { maria } = await team(false);
+    const agentDir = path.join(tmpDir, 'service', 'chat-agent');
+    await fs.mkdir(agentDir, { recursive: true });
+    await fs.writeFile(path.join(agentDir, 'ai-config.json'), JSON.stringify({ egressPolicy: 'standard' }));
+    let admin = (await maria.ask({ action: 'snapshot' })).chatAnswering?.admin;
+    expect(admin?.model).toEqual({ set: false });
+    await fs.writeFile(
+      path.join(agentDir, 'ai-config.json'),
+      JSON.stringify({ enabled: true, provider: 'openai-compatible', model: 'team-model-1', baseUrl: 'https://model.example.com/v1' }),
+    );
+    admin = (await maria.ask({ action: 'snapshot' })).chatAnswering?.admin;
+    expect(admin?.model).toEqual({ set: true, name: 'team-model-1' });
+
+    // The agents offered are the chat agent's own, not Maria's: an agent she made is not there.
+    (maria.hub.store.data.agents ??= []).push({ id: 'marias-own', name: 'Maria own agent', role: 'r', mission: 'm', systemPrompt: 's', defaultMode: 'assisted', updatedAt: 1 } as never);
+    const offered = admin?.agents ?? [];
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.some((a) => a.id === 'marias-own')).toBe(false);
+    expect(offered.every((a) => !('runnerId' in a))).toBe(true);
+    const row = { channelId: 'COPS', channelName: 'ops', servers: ['web-dev-01'], clusters: [], reach: 'ask' as const, approvers: 'linked' as const, historyFrom: [] };
+    await expect(maria.ask({ action: 'chat-answering-save', input: { channels: { slack: [{ ...row, agentId: 'marias-own' }] } } })).rejects.toThrow(
+      'For #ops, that agent is not one the chat agent has.',
+    );
+    expect(server.chatAnswering.answering.settings().channels.slack).toEqual([]);
+    await maria.ask({ action: 'chat-answering-save', input: { channels: { slack: [{ ...row, agentId: offered[0].id }] } } });
+    expect(server.chatAnswering.answering.settings().channels.slack[0]?.agentId).toBe(offered[0].id);
+  }, 30_000);
+
   it('lists the chat agent\'s conversations for an administrator, and reads one without writing', async () => {
     const { maria } = await team(false);
     expect(READ_ONLY_ACTIONS.has('chat-answering-task')).toBe(true);

@@ -14,6 +14,7 @@ import type {
 import type { AiEgressPolicy } from '../../../shared/types/ai';
 import { validateChatEgress } from '../../../shared/dataDestination';
 import { AiConfigStore } from '../../ai/AiConfigStore';
+import { getBuiltinAgents } from '../../ai/hub/demoWorkspace';
 import type { HubService } from '../../ai/hub/HubService';
 import type { GuardOptions } from '../../ai/hub/Notifier';
 import { clip, safeError } from '../../ai/hub/privacy';
@@ -27,7 +28,7 @@ import { ChatAgentService, DM_THREAD, socketTransports, type ChatTransportFactor
 import { ChatAgentStore } from './ChatAgentStore';
 import { ChatAnsweringStore } from './ChatAnsweringStore';
 import { loadChatActionSecret } from './chatActionToken';
-import { SimChat } from './simChat';
+import { SimChat, blockTexts } from './simChat';
 
 /**
  * The agent bot in chat as the web server keeps it, for everybody on the server: its settings, its
@@ -290,8 +291,32 @@ export class ChatAnswering implements ChatAnsweringBackend {
       mattermostAnswers: this.mattermostButtons() ? 'buttons' : 'reactions',
       dataPolicy: await this.policyChecks(bots.map((b) => b.service)),
       canTry: this.mayTry(),
+      agents: this.chatAgentAgents().map((a) => ({ id: a.id, name: a.name })),
+      model: await this.chatAgentModel(),
     };
     return snapshot;
+  }
+
+  /**
+   * The agents a channel row may choose: the chat agent's own, since its hub runs the conversation.
+   * Read without starting it: before it was started it has only the built-in ones. External runners
+   * are left out, as a conversation from chat runs on the chat agent's model.
+   */
+  private chatAgentAgents(): Array<{ id: string; name: string; runnerId?: string }> {
+    const hub = this.o.tenants.chatAgentIfStarted()?.hub;
+    return (hub ? hub.getAgentsList() : getBuiltinAgents()).filter((a) => !a.runnerId);
+  }
+
+  /** Whether the chat agent has a model, from its own settings file. Its name only, never a key. */
+  private async chatAgentModel(): Promise<{ set: boolean; name?: string }> {
+    try {
+      const config = await this.agentConfig.getConfig('primary');
+      if (!config.enabled || !config.model) return { set: false };
+      const profile = config.profileId ? config.profiles?.find((p) => p.id === config.profileId) : undefined;
+      return { set: true, name: clip(profile?.name ? `${profile.name} (${config.model})` : config.model, 120) };
+    } catch {
+      return { set: false };
+    }
   }
 
   private mayTry(): boolean {
@@ -392,6 +417,18 @@ export class ChatAnswering implements ChatAnsweringBackend {
       const refused = (await this.policyChecks(services)).filter((c) => !c.allowed);
       if (refused.length)
         throw new Error(`Answering in chat stays off. ${refused.map((c) => `${chatServiceLabel(c.service)}: ${c.errors.join(' ')}`).join(' ')}`);
+    }
+    // A channel row's agent is one of the chat agent's own: its hub runs the conversation, and an agent it
+    // does not have would leave the run on the default prompt without a word.
+    for (const service of SERVICES) {
+      for (const rule of input.channels?.[service] ?? []) {
+        const agentId = typeof rule?.agentId === 'string' ? rule.agentId.trim() : '';
+        if (!agentId) continue;
+        const known = (await this.agentTenant()).hub.getAgentsList().find((a) => a.id === agentId);
+        const where = `#${String(rule.channelName || rule.channelId || '').replace(/^#/, '')}`;
+        if (!known) throw new Error(`For ${where}, that agent is not one the chat agent has.`);
+        if (known.runnerId) throw new Error(`For ${where}, that agent runs outside sshs3. A conversation from chat runs on the chat agent's model.`);
+      }
     }
     const view = await this.answering.save(input, name);
     const agent = this.o.tenants.chatAgentIfStarted();
@@ -633,7 +670,9 @@ export class ChatAnswering implements ChatAnsweringBackend {
       const p = trial.chat.posts.get(id);
       if (!p) return [];
       const buttons = (p.blocks ?? []).some((b) => b.type === 'actions') || (p.attachments ?? []).some((a) => Array.isArray(a.actions) && a.actions.length > 0);
-      return [{ id: p.id, ...(p.threadId ? { threadId: p.threadId } : {}), text: p.text, edits: p.edits, buttons }];
+      // What a person reads: in Slack the blocks, as the post's own text is only the short line a notification shows.
+      const text = p.blocks?.length ? blockTexts(p.blocks).join('\n\n') || p.text : p.text;
+      return [{ id: p.id, ...(p.threadId ? { threadId: p.threadId } : {}), text, edits: p.edits, buttons }];
     });
     return { channelId: channel, thread: dm ? DM_THREAD : (thread ?? said), settled, posts, privateNotes };
   }

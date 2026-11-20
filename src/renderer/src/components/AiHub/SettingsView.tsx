@@ -26,6 +26,7 @@ import { DEMO_MODE_SET_BY_SERVER, LABS_ENABLED_STORAGE_KEY, type Act } from "./p
 import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
 import { TeamChatCard } from "./TeamChatCard";
+import { AgentInChatCard } from "./AgentInChatCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 import { sharingText } from "@shared/sharingText";
 
@@ -51,6 +52,8 @@ export interface SettingsProps {
   act: Act;
   labsEnabled?: boolean;
   onToggleLabs?: (enabled: boolean) => void;
+  /** The last request that failed, as the settings show it at the top: a card can show it next to what was pressed. */
+  error?: string;
 }
 
 const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
@@ -130,6 +133,7 @@ export function Settings({
   act,
   labsEnabled: controlledLabs,
   onToggleLabs,
+  error,
 }: SettingsProps): JSX.Element {
   // The keys panel is written against the team server's HTTP API; on this app the same
   // calls are the hub's own requests.
@@ -1044,8 +1048,9 @@ export function Settings({
       </section>
 
       <section className="ai-set">
-        <h3>What the team says in chat</h3>
+        <h3>Slack and Mattermost</h3>
         <TeamChatCard hub={hub} act={act} />
+        <AgentInChatCard hub={hub} act={act} error={error} />
       </section>
 
       {/* The app answering this person's own agent: desktop starts a local listener; web server already serves /api/mcp. */}

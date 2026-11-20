@@ -712,6 +712,11 @@ describe('the agent bot in chat, from end to end through the web server', () => 
     const change = (await maria.ask({ action: 'chat-answering-try', channel: 'COPS', as: 'me', text: 'restart the ledger job on db-1' })).reply!.chatTry!;
     expect(change.settled).toBe(false);
     expect(change.posts.filter((p) => p.buttons)).toHaveLength(1);
+    // What a person reads in Slack: the card's blocks, not the short line a notification shows.
+    const card = change.posts.find((p) => p.buttons)!;
+    expect(card.text).toContain('sudo systemctl restart ledger');
+    expect(card.text).toContain('Taken back with');
+    expect(card.text).toContain('Who may approve');
     expect(ranOn('db-1', 'systemctl restart ledger')).toBe(false);
     // Nothing went to a real chat, and the tried link is not a real one.
     expect(slack.calls).toEqual([]);

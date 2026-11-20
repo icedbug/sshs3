@@ -32,8 +32,6 @@ import {
   evaluateNoiseBudget,
   isQuietHours,
   renderNotification,
-  signChatOpsActionToken,
-  verifyChatOpsActionToken,
   verifyStandardWebhook,
   type NotifyChannel,
   type NotifyItem,
@@ -352,9 +350,10 @@ describe("Notifier & NotifyStore overhaul", () => {
     expect(reloaded.data.pushHistory).toHaveLength(1);
   });
 
-  it("generates and verifies signed ChatOps Approve/Deny action payload tokens in webhook payloads", () => {
+  it("signs a webhook payload and puts no answer buttons in it, also for a channel kept with them switched on", () => {
     const secret = "whsec_" + Buffer.from("super-secret-signing-key").toString("base64");
-    const hookChannel: NotifyChannel = {
+    // A channel saved before answers from a notification were taken out may still carry the old switch.
+    const hookChannel = {
       id: "w1",
       kind: "webhook",
       name: "chatops",
@@ -364,7 +363,7 @@ describe("Notifier & NotifyStore overhaul", () => {
       events: ["approval", "alert"],
       includeCommand: true,
       chatOpsActions: true,
-    };
+    } as NotifyChannel;
     const item: NotifyItem = {
       id: "approval:c1",
       kind: "approval",
@@ -376,34 +375,12 @@ describe("Notifier & NotifyStore overhaul", () => {
     };
     const req = renderNotification(hookChannel, [item], {
       chatOps: { enabled: true, ttlSeconds: 600, callbackUrl: "https://sshs3.example.com/api/chatops/act" },
-    });
-    const parsed = JSON.parse(req.body) as {
-      title: string;
-      items: Array<{
-        id: string;
-        escalationTier?: number;
-        actions?: {
-          approve: { action: string; token: string; url?: string };
-          deny: { action: string; token: string; url?: string };
-        };
-      }>;
-    };
+    } as Parameters<typeof renderNotification>[2]);
+    const parsed = JSON.parse(req.body) as { title: string; items: Array<{ id: string; escalationTier?: number; actions?: unknown }> };
     expect(parsed.title).toContain("Still waiting (tier 2):");
-    const actions = parsed.items[0].actions!;
-    expect(actions.approve.url).toBe("https://sshs3.example.com/api/chatops/act");
-    expect(verifyChatOpsActionToken(secret, actions.approve.token)).toMatchObject({
-      ok: true,
-      payload: { itemId: "approval:c1", action: "approve", target: "pg-01" },
-    });
-    expect(verifyChatOpsActionToken(secret, actions.deny.token)).toMatchObject({
-      ok: true,
-      payload: { itemId: "approval:c1", action: "deny", target: "pg-01" },
-    });
-
-    // Tampered and expired tokens fail verification
-    const tok = signChatOpsActionToken(secret, { itemId: "approval:c1", action: "approve" }, 1_000, 60);
-    expect(verifyChatOpsActionToken(secret, tok, 1_061).ok).toBe(false);
-    expect(verifyChatOpsActionToken(secret, `${tok.slice(0, -1)}X`, 1_010).ok).toBe(false);
+    expect(parsed.items[0]).toMatchObject({ id: "approval:c1", escalationTier: 2 });
+    expect(parsed.items[0].actions).toBeUndefined();
+    expect(req.body).not.toContain("token");
     expect(verifyStandardWebhook(secret, {
       id: req.headers["webhook-id"],
       timestamp: req.headers["webhook-timestamp"],

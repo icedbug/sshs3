@@ -12,6 +12,7 @@ import {
 import type { HubSnapshot } from "@shared/types/aiHub";
 import { copyToClipboard } from "../../lib/clipboard";
 import { ChangeProof } from "./ChangeProof";
+import { ChatWaitingList } from "./AgentInChatCard";
 import { TABULAR_NUMS_CLASS, TABULAR_NUMS_STYLE, type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 
@@ -143,6 +144,7 @@ export function InboxView({
   const focused = useRef<HTMLElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLElement | null>>({});
 
+  const chatWaiting = hub.chatAnswering?.waiting ?? [];
   const allItems = useMemo(
     () => inboxItems(hub, { snoozeFilter: "all", now }),
     [hub, now],
@@ -856,7 +858,18 @@ export function InboxView({
           Press <kbd>e</kbd> again to mark it done, or <kbd>Esc</kbd> to cancel.
         </p>
       )}
-      {allItems.length === 0 && (
+      {chatWaiting.length > 0 && (
+        // The chat agent's changes and plans have no owner, so they are in nobody's Inbox items: the ones this
+        // person may answer are listed here, as under Settings, Agent in chat.
+        <section className="ai-card" data-testid="inbox-chat-waiting" style={{ marginBottom: 12 }}>
+          <p className="ai-hint">
+            {chatWaiting.length === 1 ? "1 change from chat waits" : `${chatWaiting.length} changes from chat wait`} for your
+            answer. You can answer here, without a linked chat account.
+          </p>
+          <ChatWaitingList items={chatWaiting} act={dispatch} admin={Boolean(hub.chatAnswering?.admin)} />
+        </section>
+      )}
+      {allItems.length === 0 && chatWaiting.length === 0 && (
         <p className="ai-empty" data-testid="inbox-empty">
           Nothing is waiting for you.
         </p>

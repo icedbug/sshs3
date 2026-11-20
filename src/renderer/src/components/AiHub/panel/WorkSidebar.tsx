@@ -1,6 +1,7 @@
 import { MessageSquare, Plus, Terminal } from "lucide-react";
 import { selectAiTerminal } from "../../../lib/aiHub";
 import { isConversation } from "../workforceModel";
+import { ChatOriginBadge } from "../ChatOriginBadge";
 import type { PanelState } from "./usePanelState";
 
 /**
@@ -52,7 +53,10 @@ export function WorkSidebar({ p, hub }: { p: PanelState; hub: NonNullable<PanelS
                         >
                           <MessageSquare size={13} />
                           <div>
-                            <span>{t.title}</span>
+                            <span>
+                              {t.title}
+                              <ChatOriginBadge task={t} />
+                            </span>
                             <small>
                               {t.target?.label ?? "Workspace"} ·{" "}
                               {new Date(t.updatedAt).toLocaleTimeString([], {
