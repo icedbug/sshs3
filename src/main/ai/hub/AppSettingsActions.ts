@@ -9,9 +9,12 @@ import type {
   McpToolPolicy,
   NotifyChannelInput,
   NotifyChannelKind,
+  NotifyChannelView,
   NotifyEventKind,
 } from "../../../shared/types/aiHub";
 import type { AiProfileRole, ProviderProfile } from "../../../shared/types/ai";
+import type { McpScope } from "../../web/McpTokenStore";
+import { toolsForScopes } from "../../web/mcp/mcpTools";
 import type { AppActionHost } from "./HubService";
 
 /**
@@ -143,10 +146,113 @@ const servers = (p: P, key: string): string[] | "*" | undefined => {
 };
 const same = (a: string, b: string): boolean => a.trim().toLowerCase() === b.trim().toLowerCase();
 
+/**
+ * A notification channel as the model is told of it. A channel that exists has its address saved:
+ * said in so many words, because `hasSecret` (the key that signs a webhook) reads as if the address
+ * were missing, and a model that reads it so tells the person their channel does not work.
+ */
+const channelForModel = (c: NotifyChannelView): Record<string, unknown> => ({
+  id: c.id,
+  name: c.name,
+  kind: c.kind,
+  enabled: c.enabled,
+  addressSaved: true,
+  addressHost: c.host,
+  ...(c.kind === "webhook" ? { signingSecretSaved: c.hasSecret } : {}),
+  events: c.events,
+  includeCommand: c.includeCommand,
+  ...(c.alertMinSeverity ? { alertMinSeverity: c.alertMinSeverity } : {}),
+  ...(c.last ? { lastSent: c.last } : { lastSent: "nothing was sent there yet: test_notify_channel sends a test" }),
+});
+
 const NOTIFY_KINDS: readonly NotifyChannelKind[] = ["slack", "teams", "ntfy", "webhook"];
 const NOTIFY_EVENTS: readonly NotifyEventKind[] = ["approval", "plan", "question", "blocked", "alert", "health", "review", "report"];
 const REACHES: readonly ChatReach[] = ["read", "ask", "plan"];
 const ROLES: readonly AiProfileRole[] = ["primary", "fastTriage", "backgroundDistill", "embedding"];
+
+/** What each operation cannot do without, beside what its own handler looks up. */
+const REQUIRED: Partial<Record<SettingsTool, Record<string, string[]>>> = {
+  sshs3_manage_app_and_settings: { delete_model_profile: ["idOrName"] },
+  sshs3_agent_and_mcp_manage: {
+    delete_runner: ["idOrName"],
+    test_runner: ["idOrName"],
+    set_mcp_tool_policy: ["serverIdOrName", "toolName", "policy"],
+    revoke_mcp_key: ["idOrName"],
+  },
+  sshs3_manage_team_chat: {
+    context_connect: ["service"],
+    context_test: ["service"],
+    context_disconnect: ["service"],
+    context_select_channel: ["service", "channel"],
+    context_read_back: ["service", "channel"],
+    context_forget: ["service"],
+    agent_connect: ["service"],
+    agent_disconnect: ["service"],
+    agent_set_channel: ["service", "channelId"],
+    agent_remove_channel: ["service", "channelId"],
+    agent_conversation: ["taskId"],
+    agent_try: ["channel", "text"],
+  },
+  sshs3_manage_alerts_and_integrations: {
+    delete_notify_channel: ["idOrName"],
+    test_notify_channel: ["idOrName"],
+    atlassian_connect: ["product"],
+    atlassian_test: ["product"],
+    atlassian_disconnect: ["product"],
+  },
+};
+
+const KEY_SCOPES: readonly McpScope[] = ["read", "tickets", "run"];
+
+/**
+ * What a new key may do, checked against what the MCP server really offers. The tools a key can be
+ * held to are that server's own (list_servers, kb_search, run_command ...), not the assistant's: a key
+ * held to names the server does not have could call nothing.
+ */
+function keyTools(p: P, op: string): { scopes: McpScope[]; tools?: string[] } {
+  const scopes = (list(p, "scopes") ?? ["read"]).filter((x): x is McpScope => (KEY_SCOPES as readonly string[]).includes(x));
+  if (!scopes.length) throw new Error(`${op}: "scopes" are read, tickets and run.`);
+  const tools = list(p, "tools");
+  if (!tools?.length) return { scopes };
+  const offered = toolsForScopes(scopes).map((t) => t.name);
+  const unknown = tools.filter((t) => !offered.includes(t));
+  if (unknown.length)
+    throw new Error(
+      `${op}: ${unknown.map((t) => `"${t}"`).join(", ")} ${unknown.length === 1 ? "is not a tool" : "are not tools"} a key with these scopes can call. They are: ${offered.join(", ")}. Leave "tools" out to allow all of them.`,
+    );
+  return { scopes, tools };
+}
+
+/**
+ * The chat service a person's own link is about. Named, or the only one the agent bot is connected
+ * to: with one bot there is nothing to choose.
+ */
+async function linkService(hub: AppActionHost, p: P, op: string): Promise<ChatServiceName> {
+  if (str(p, "service")) return service(p, op);
+  const connected = (await hub.request({ action: "snapshot" })).chatAnswering?.services ?? [];
+  if (connected.length === 1) return connected[0];
+  throw new Error(
+    connected.length
+      ? `${op} requires "service": slack or mattermost. The agent bot is connected to both.`
+      : "The agent bot is not connected to Slack or Mattermost here, so there is no chat account to link.",
+  );
+}
+
+/**
+ * Says what a call leaves out, before anybody is asked to approve it: a person should not be asked
+ * about a change that then cannot be made. Throws what the model is told.
+ */
+export async function precheckSettingsOp(hub: AppActionHost, tool: SettingsTool, op: string, p: P): Promise<void> {
+  const missing = (REQUIRED[tool]?.[op] ?? []).filter((key) => p[key] === undefined || p[key] === null || p[key] === "");
+  if (missing.length) throw new Error(`${op} requires ${missing.map((k) => `"${k}"`).join(" and ")}.`);
+  if (tool === "sshs3_manage_team_chat" && (op === "link_code" || op === "unlink")) await linkService(hub, p, op);
+  if (tool === "sshs3_agent_and_mcp_manage" && op === "create_mcp_key") {
+    if (!str(p, "name") && !str(p, "idOrName")) throw new Error(`${op} requires "name".`);
+    keyTools(p, op);
+  }
+  if (tool === "sshs3_agent_and_mcp_manage" && op === "set_local_mcp_server" && bool(p, "enabled") === undefined) throw new Error(`${op} requires "enabled": true or false.`);
+  if (tool === "sshs3_manage_alerts_and_integrations" && op === "alert_rules_save" && !Array.isArray(p.rules)) throw new Error(`${op} requires "rules": a list of { match, agent }. An empty list removes every rule.`);
+}
 
 export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, op: string, p: P, ctx: SettingsCtx): Promise<unknown> {
   const snapshot = (): Promise<HubSnapshot> => hub.request({ action: "snapshot" });
@@ -276,18 +382,18 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       return { ok: true, localMcp: snap.localMcp ?? null };
     }
     if (op === "create_mcp_key") {
-      const scopes = (list(p, "scopes") ?? ["read"]).filter((x) => ["read", "tickets", "run"].includes(x));
-      if (!scopes.length) throw new Error(`${op}: "scopes" are read, tickets and run.`);
+      const { scopes, tools } = keyTools(p, op);
       const serverQuery = str(p, "serverIdOrName");
       const server = serverQuery ? await hub.resolveServerTarget(serverQuery) : undefined;
       if (serverQuery && !server) throw new Error(`No server matches "${serverQuery}".`);
       const snap = await hub.request({
         action: "mcp-key-create",
-        name: need(p, "name", op),
+        // A model sometimes puts the new key's name where a thing is usually named.
+        name: str(p, "name") ?? need(p, "idOrName", op),
         scopes,
         ...(server ? { serverId: server.id } : {}),
         ...(num(p, "expiresInDays") !== undefined ? { expiresInDays: num(p, "expiresInDays") } : {}),
-        ...(list(p, "tools") ? { tools: list(p, "tools") } : {}),
+        ...(tools ? { tools } : {}),
       });
       const made = snap.reply?.mcpKey;
       if (!made?.token) throw new Error("The key was not made.");
@@ -493,7 +599,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       return { ok: true, note: "A simulated chat. Nothing was sent to Slack or Mattermost.", result: snap.reply?.chatTry ?? null };
     }
     if (op === "link_code") {
-      const svc = service(p, op);
+      const svc = await linkService(hub, p, op);
       const snap = await hub.request({ action: "chat-link-code", service: svc });
       const made = snap.reply?.chatLinkCode;
       if (!made?.code) throw new Error("No code was made.");
@@ -508,7 +614,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       };
     }
     // unlink
-    const svc = service(p, op);
+    const svc = await linkService(hub, p, op);
     await hub.request({ action: "chat-unlink", service: svc, ...(str(p, "chatUserId") ? { chatUserId: str(p, "chatUserId") } : {}) });
     return { ok: true, unlinked: str(p, "chatUserId") ?? "your own chat account", service: svc };
   }
@@ -526,7 +632,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
     return {
       ok: true,
       // Addresses and tokens are not in any of these: only whether one is saved.
-      notifications: snap.notifications ?? null,
+      notifications: snap.notifications ? { ...snap.notifications, channels: snap.notifications.channels.map(channelForModel) } : null,
       atlassian: snap.atlassian ?? null,
       serverFacts: snap.serverFacts ? { enabled: snap.serverFacts.enabled, intervalHours: snap.serverFacts.intervalHours, exclude: snap.serverFacts.exclude, watchPaths: snap.serverFacts.watchPaths } : null,
       alertIntake: snap.alertIntake ?? null,
@@ -560,7 +666,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       ...(secret ? { secret } : {}),
     };
     const snap = await hub.request({ action: "notify-channel-save", channel });
-    return { ok: true, channels: snap.notifications?.channels ?? [] };
+    return { ok: true, channels: (snap.notifications?.channels ?? []).map(channelForModel) };
   }
   if (op === "delete_notify_channel") {
     const found = await notifyChannel(op);

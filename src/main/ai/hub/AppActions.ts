@@ -52,7 +52,7 @@ import {
 import type { AppActionHost } from "./HubService";
 import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan } from "./PlanMode";
 import { guardAsk } from "./AppGuard";
-import { SETTINGS_OPS, handleSettingsOp, isSettingsOp, type SettingsCtx } from "./AppSettingsActions";
+import { SETTINGS_OPS, handleSettingsOp, isSettingsOp, precheckSettingsOp, type SettingsCtx } from "./AppSettingsActions";
 
 /**
  * The agent's sshs3 tools and MCP calls: what each `sshs3_*` tool does when a
@@ -689,6 +689,11 @@ export async function handleAppAction(
       };
     }
 
+    // A setting that is asked for with something missing is refused before a person is asked about it.
+    if (!request.action.startsWith("mcp__")) {
+      const settingsOp = typeof p.operation === "string" ? p.operation.trim() : "";
+      if (settingsOp && isSettingsOp(request.action, settingsOp)) await precheckSettingsOp(hub, request.action, settingsOp, p);
+    }
     // What moves the fence agents run inside waits for a person, in every mode (see AppGuard.ts).
     const ask = guardAsk(request.action, p, task, { agents: hub.getAgentsList(), schedules: hub.store.data.schedules });
     let guarded: AgentChange | undefined;

@@ -49,8 +49,12 @@ export function ChangeSecretInputs({
   );
 }
 
-/** What a finished change made for the person alone: asked for once, shown until the card is closed. */
-export function ChangeReveal({ taskId, change, act }: { taskId: string; change: AgentChange; act: Act }): JSX.Element | null {
+/**
+ * What a finished change made for the person alone: asked for once, shown until the card is closed.
+ * `onShown` tells the card that it now holds the value, so it stays open while the person copies it:
+ * asking for it marks the change as shown, and a card that folded away on that would hide it at once.
+ */
+export function ChangeReveal({ taskId, change, act, onShown }: { taskId: string; change: AgentChange; act: Act; onShown?: () => void }): JSX.Element | null {
   const [shown, setShown] = useState<{ label: string; value: string } | null>(null);
   const [copied, setCopied] = useState(false);
   if (!change.reveal) return null;
@@ -87,7 +91,10 @@ export function ChangeReveal({ taskId, change, act }: { taskId: string; change: 
         onClick={() => {
           void act({ action: "change-reveal", taskId, changeId: change.id }).then((snap) => {
             const got = snap?.reply?.changeReveal;
-            if (got) setShown(got);
+            if (got) {
+              setShown(got);
+              onShown?.();
+            }
           });
         }}
       >

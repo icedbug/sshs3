@@ -2232,7 +2232,12 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         policy: { type: "string", enum: ["allow", "ask", "deny"], description: "set_mcp_tool_policy: allow (runs unasked), ask (a person approves each call) or deny." },
         scopes: { type: "array", items: { type: "string", enum: ["read", "tickets", "run"] }, description: "create_mcp_key: what the key may do." },
         expiresInDays: { type: "number", description: "create_mcp_key: days until the key stops working." },
-        tools: { type: "array", items: { type: "string" }, description: "create_mcp_key: the only tools the key may call. Left out: all its scopes allow." },
+        tools: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "create_mcp_key: leave this out unless the person asked to hold the key to certain tools. The names are the MCP server's own, not yours: list_servers, server_facts, recent_changes, dependency_map, kb_search, kb_read_page (read); tickets_list, ticket_create, ticket_update (tickets); run_command, change_with_check, command_status (run).",
+        },
         enabled: { type: "boolean", description: "set_local_mcp_server: on or off." },
         port: { type: "number", description: "set_local_mcp_server: the port it listens on." },
       },

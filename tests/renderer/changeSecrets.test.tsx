@@ -136,6 +136,46 @@ describe("a setting that takes a token", () => {
   });
 });
 
+describe("a card that holds something to show", () => {
+  const made = (shown?: boolean): AgentChange =>
+    ({ ...connect, id: "c2", status: "completed", secretFields: undefined, description: "Make a key that lets another agent reach this app", reveal: { label: "The new key", ...(shown ? { shown } : {}) } }) as AgentChange;
+
+  it("stays open in the conversation until the person has seen it", async () => {
+    fixture = snapshot([made()], "completed");
+    render(<Panel />);
+    fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
+    // A finished change is folded away, but not one whose key nobody has copied yet.
+    const button = await screen.findByRole("button", { name: "Show it once" });
+    expect(button.closest("details")).toHaveAttribute("open");
+  });
+
+  it("stays open with the value in it after the person asked, though the change is then marked as shown", async () => {
+    fixture = snapshot([made()], "completed");
+    request.mockImplementation(async (r: HubRequest) => {
+      if (r.action !== "change-reveal") return fixture;
+      // As the server does: the change is marked shown in the same answer that carries the value.
+      fixture = snapshot([made(true)], "completed");
+      return { ...fixture, reply: { changeReveal: { label: "The new key", value: "sshs3_mcp_abc123" } } };
+    });
+    render(<Panel />);
+    fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show it once" }));
+    const value = await screen.findByTestId("ai-change-reveal-value-c2");
+    expect(value).toHaveTextContent("sshs3_mcp_abc123");
+    // A card that folded away here would hide the key the moment it arrived.
+    await waitFor(() => expect(screen.getByTestId("ai-change-reveal-value-c2").closest("details")).toHaveAttribute("open"));
+    expect(screen.getByTestId("ai-change-reveal-value-c2")).toBeVisible();
+  });
+
+  it("folds away like any finished change once it was shown", async () => {
+    fixture = snapshot([made(true)], "completed");
+    render(<Panel />);
+    fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
+    const note = await screen.findByText("The new key was shown once and is not kept.");
+    expect(note.closest("details")).not.toHaveAttribute("open");
+  });
+});
+
 describe("what a setting made for the person alone", () => {
   const made: AgentChange = { ...connect, id: "c2", status: "completed", secretFields: undefined, description: "Make a key that lets another agent reach this app", reveal: { label: "The new key" } } as AgentChange;
 

@@ -17,6 +17,8 @@ import type { PanelState } from "./usePanelState";
 export function Timeline({ p }: { p: PanelState }): JSX.Element {
   // What is typed for a setting's secrets, by change. Kept here only until the approval is sent.
   const [secretValues, setSecretValues] = useState<Record<string, Record<string, string>>>({});
+  // Cards that show a one-time value in this window: they stay open while the person copies it.
+  const [showing, setShowing] = useState<Record<string, true>>({});
   const {
     timeline,
     activeAgent,
@@ -240,7 +242,9 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                       className={"ai-change ai-change-" + item.change.status}
                       key={item.change.id}
                       data-ref={item.change.ref}
-                      open={item.change.status === "pending"}
+                      // Open while it waits for an answer, and while it holds something to show the person once:
+                      // a key nobody sees is a key nobody copies.
+                      open={item.change.status === "pending" || Boolean(item.change.reveal && (!item.change.reveal.shown || showing[item.change.id]))}
                     >
                       <summary>
                         <Terminal size={13} />
@@ -381,7 +385,9 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                           onChange={(next) => setSecretValues({ ...secretValues, [item.change!.id]: next })}
                         />
                       )}
-                      {item.change.status !== "pending" && <ChangeReveal taskId={task.id} change={item.change} act={act} />}
+                      {item.change.status !== "pending" && (
+                        <ChangeReveal taskId={task.id} change={item.change} act={act} onShown={() => setShowing((all) => ({ ...all, [item.change!.id]: true }))} />
+                      )}
                       {item.change.status === "pending" && (
                         <div className="ai-approval-actions">
                           <input

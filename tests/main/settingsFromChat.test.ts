@@ -219,16 +219,19 @@ describe("a secret a setting needs", () => {
     const withAddress = await run.pending();
     // An address by number: there is no name to look up where the tests run.
     await run.approve(withAddress.id, { url: "http://127.0.0.1:9/services/T000/B000/do-not-show" });
-    const made = (await second) as { channels: Array<{ id: string; name: string; host: string; includeCommand: boolean; events: string[] }> };
-    expect(made.channels).toEqual([expect.objectContaining({ name: "ops", host: expect.stringContaining("127.0.0.1"), includeCommand: false, events: ["approval", "alert"] })]);
+    const made = (await second) as { channels: Array<Record<string, unknown>> };
+    // The model is told the address is saved, in words it cannot read as "missing".
+    expect(made.channels).toEqual([expect.objectContaining({ name: "ops", addressSaved: true, addressHost: expect.stringContaining("127.0.0.1"), includeCommand: false, events: ["approval", "alert"] })]);
+    expect(made.channels[0]).not.toHaveProperty("hasSecret");
+    expect(made.channels[0]).not.toHaveProperty("signingSecretSaved");
     expect(JSON.stringify(made)).not.toContain("do-not-show");
 
     // Changed by name, with the field left empty: the address stays.
     const third = run.call("sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", idOrName: "ops", alertMinSeverity: "critical" });
     const change = await run.pending();
     await run.approve(change.id, {});
-    const changed = (await third) as { channels: Array<{ name: string; host: string; alertMinSeverity?: string }> };
-    expect(changed.channels).toEqual([expect.objectContaining({ name: "ops", host: expect.stringContaining("127.0.0.1"), alertMinSeverity: "critical" })]);
+    const changed = (await third) as { channels: Array<Record<string, unknown>> };
+    expect(changed.channels).toEqual([expect.objectContaining({ name: "ops", addressHost: expect.stringContaining("127.0.0.1"), alertMinSeverity: "critical" })]);
 
     // What is set up can be read without asking anybody, and has no address in it.
     const status = (await run.call("sshs3_manage_alerts_and_integrations", { operation: "status" })) as { notifications: { channels: unknown[] } };
@@ -306,6 +309,33 @@ describe("what belongs to a team server", () => {
     expect((await run.call("sshs3_manage_app_and_settings", { operation: "get_team_rules" })) as { teamRules: unknown }).toMatchObject({ teamRules: null });
   });
 
+  it("says what a call leaves out before anybody is asked to approve it", async () => {
+    const { hub } = await makeHub();
+    const run = await startRun(hub);
+    for (const [tool, payload, said] of [
+      ["sshs3_manage_team_chat", { operation: "agent_connect" }, 'agent_connect requires "service".'],
+      ["sshs3_manage_team_chat", { operation: "agent_set_channel", service: "slack" }, 'agent_set_channel requires "channelId".'],
+      ["sshs3_manage_team_chat", { operation: "link_code" }, "The agent bot is not connected to Slack or Mattermost here"],
+      ["sshs3_manage_alerts_and_integrations", { operation: "atlassian_connect", baseUrl: "https://acme.atlassian.net" }, 'atlassian_connect requires "product".'],
+      ["sshs3_manage_alerts_and_integrations", { operation: "delete_notify_channel" }, 'delete_notify_channel requires "idOrName".'],
+      ["sshs3_agent_and_mcp_manage", { operation: "set_mcp_tool_policy", serverIdOrName: "grafana" }, 'set_mcp_tool_policy requires "toolName" and "policy".'],
+      ["sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", scopes: ["read"] }, 'create_mcp_key requires "name".'],
+      // A key held to tools the MCP server does not have could call nothing: a real model once named its own.
+      ["sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "x", scopes: ["read"], tools: ["workspace_context", "kb_search"] }, '"workspace_context" is not a tool a key with these scopes can call. They are: list_servers'],
+      ["sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "x", scopes: ["read"], tools: ["run_command"] }, '"run_command" is not a tool a key with these scopes can call'],
+    ] as const)
+      await expect(run.call(tool, payload), JSON.stringify(payload)).rejects.toThrow(said);
+    // Nobody was asked about any of them.
+    expect(run.task.changes).toEqual([]);
+
+    // A name given where a thing is usually named is taken as the new key's name.
+    const asked = run.call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", idOrName: "laptop-agent", scopes: ["read"], tools: ["kb_search", "list_servers"] });
+    await run.approve((await run.pending()).id);
+    expect((await asked) as { ok: boolean; key: { tools?: string[] } }).toMatchObject({ ok: true, key: { tools: ["kb_search", "list_servers"] } });
+    const listed = (await run.call("sshs3_agent_and_mcp_manage", { operation: "list_mcp_keys" })) as { localMcp: { keys: Array<{ name: string }> } };
+    expect(listed.localMcp.keys.map((k) => k.name)).toEqual(["laptop-agent"]);
+  });
+
   it("does not try an address the call names when the model is tested", async () => {
     const { hub } = await makeHub();
     const probe = vi.spyOn(hub as unknown as { probeModel: (baseUrl?: string) => Promise<unknown> }, "probeModel").mockResolvedValue({ ok: true, detail: "It answers." });
@@ -354,11 +384,11 @@ describe("the chat bots, set up from a conversation on a team server", () => {
     const user = (await server.auth.listUsers()).find((u) => u.id === id)!;
     return (await server.tenants.getOrCreateTenant(user)).hub;
   }
-  async function team(): Promise<{ maria: HubService; omar: HubService; omarId: string }> {
+  async function team(): Promise<{ maria: HubService; omar: HubService; omarId: string; mariaId: string }> {
     const admin = await post("/api/auth/setup", { username: "maria", displayName: "Maria Ek", password: "maria-password-123" }); // pragma: allowlist secret
     const invite = await post("/api/admin/invites", { role: "member", maxUses: 1 }, admin.cookie);
     const made = await post("/api/auth/register-invite", { inviteToken: invite.body.invite.token, username: "omar", displayName: "Omar Lind", password: "omar-password-123" }); // pragma: allowlist secret
-    return { maria: await hubOf(admin.body.user.id), omar: await hubOf(made.body.user.id), omarId: made.body.user.id };
+    return { maria: await hubOf(admin.body.user.id), omar: await hubOf(made.body.user.id), omarId: made.body.user.id, mariaId: admin.body.user.id };
   }
 
   it("lets an administrator connect the agent bot and choose its channels, with the tokens typed on the card", async () => {
@@ -428,7 +458,7 @@ describe("the chat bots, set up from a conversation on a team server", () => {
 
   it("holds a member to what a member may do, also when a person approves it", async () => {
     await start();
-    const { omar, omarId } = await team();
+    const { omar, omarId, mariaId } = await team();
     const run = await startRun(omar);
     for (const [tool, payload, refusal] of [
       ["sshs3_manage_team_chat", { operation: "agent_settings", enabled: true }, "Only an administrator of this server can set up the agent bot."],
@@ -448,7 +478,11 @@ describe("the chat bots, set up from a conversation on a team server", () => {
     expect(server.chatAnswering.answering.settings()).toMatchObject({ enabled: false, channels: { slack: [], mattermost: [] } });
 
     // A member's own link code is theirs to ask for. It is shown on the card, not told to the model.
-    const asked = run.call("sshs3_manage_team_chat", { operation: "link_code", service: "slack" });
+    // No service is connected yet: there is nothing to link, and nobody is asked.
+    await expect(run.call("sshs3_manage_team_chat", { operation: "link_code" })).rejects.toThrow("The agent bot is not connected to Slack or Mattermost here");
+    await server.chatAnswering.request(mariaId, { action: "chat-answering-connect", input: { service: "slack", token: slack.apps.agent.botToken, appToken: slack.apps.agent.appToken } });
+    // With one bot connected, the service need not be said.
+    const asked = run.call("sshs3_manage_team_chat", { operation: "link_code" });
     const change = await run.pending();
     expect(change.description).toBe("Make a code that links a chat account to your sshs3 account");
     await run.approve(change.id);
@@ -463,7 +497,7 @@ describe("the chat bots, set up from a conversation on a team server", () => {
     expect((await server.chatAgent.redeem("slack", "U2OMAR", "Omar", code)).ok).toBe(true);
     expect(server.chatAgent.allLinks()).toEqual([expect.objectContaining({ chatUserId: "U2OMAR", accountId: omarId })]);
     // Ending his own link needs no question.
-    await run.call("sshs3_manage_team_chat", { operation: "unlink", service: "slack" });
+    await run.call("sshs3_manage_team_chat", { operation: "unlink" });
     expect(server.chatAgent.allLinks()).toEqual([]);
   });
 });

@@ -828,6 +828,14 @@ channel, taking a channel away from the agent bot, ending one's own chat link,
 syncing Jira now, and collecting server facts now. A test checks that each
 operation classed `guard` in `APP_OPS` asks, whatever the call carries.
 
+**What a call leaves out is said first.** `precheckSettingsOp` refuses a call
+that lacks what its operation cannot do without (which service, which channel,
+a name) before anybody is asked: a person is not asked to approve a change
+that then cannot be made. A new key's `tools` are checked against the MCP
+server's own tool names for its scopes, so a key cannot be held to tools that
+do not exist. With one chat service connected, `link_code` and `unlink` need
+not name it.
+
 **Who may.** The request decides, as it does from the settings card. A member
 who approves a change to the agent bot or to the rules for everyone gets the
 same refusal the card gives, and nothing is changed.
@@ -849,8 +857,9 @@ there.
 - *A secret a setting makes* (a new MCP key, a chat link code, the alert
   hook's address) is not in what the tool answers. It is kept in memory
   (`HubService.changeReveals`), the change is marked `reveal`, and the card
-  shows it once when the person asks (`change-reveal`). After a restart it is
-  gone, and the person makes a new one.
+  shows it once when the person asks (`change-reveal`). The card stays open
+  until then, and while it shows the value. After a restart it is gone, and
+  the person makes a new one.
 
 **Not from Slack or Mattermost.** A conversation asked for from chat, a
 ticket's run and a schedule's run are given none of these tools
@@ -863,6 +872,12 @@ the model that is set up, never an address the call names.
 Tests: `tests/main/settingsFromChat.test.ts` (through a real hub, and through
 the real web server with an administrator and a member) and
 `tests/renderer/changeSecrets.test.tsx`.
+
+Tried by hand with a real model (gpt-6-luna) in a browser, November 2026: a
+notification channel was asked for, its address typed on the card and saved;
+a key was asked for, approved, and shown once on the card and nowhere else on
+the page. Two things that run found are fixed: the card folded away the moment
+its key was asked for, and the model held a key to its own tool names.
 
 Not guarded, on purpose, and worth knowing: an agent can create a ticket for
 another agent, and the heartbeat runs it in that agent's mode. That is the
