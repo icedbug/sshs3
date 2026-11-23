@@ -267,6 +267,37 @@ describe("a run that is stopped while it hangs inside a tool call", () => {
   });
 });
 
+describe("a run that is stopped while a tool call is under way, and the call then comes back", () => {
+  it("stays stopped, is not said to have completed, and what it spent is still counted", async () => {
+    const hub = await makeHub();
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      sse([
+        { type: "message_start", message: { usage: { input_tokens: 700 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "sshs3_kb_search", input: {} } },
+        { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify({ query: "nginx" }) } },
+        { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 30 } },
+      ])));
+    // The workspace context is answered; the search is held until the test lets it come back.
+    let comeBack: ((value: unknown) => void) | undefined;
+    const invoke = vi.spyOn(hub.broker, "invoke").mockImplementation(((_key: string, req: { action: string }) =>
+      req.action === "context" ? Promise.resolve({}) : new Promise((resolve) => (comeBack = resolve))) as never);
+    await hub.request({ action: "start", task: { prompt: "Look at db-01", mode: "advice" } });
+    const task = hub.store.data.tasks[0];
+    await vi.waitFor(() => expect(comeBack).toBeDefined());
+
+    await inner(hub).stop(task, "Stopped by the user");
+    expect(task.status).toBe("interrupted");
+    comeBack!({ results: [] });
+    await inner(hub).whenSettled(task);
+
+    // The runtime found the run stopped before its next turn. It said so, with what the first turn cost.
+    expect(task.status).toBe("interrupted");
+    expect(task.messages.some((m) => m.role === "assistant")).toBe(false);
+    expect(task.usage).toMatchObject({ inputTokens: 700, outputTokens: 30 });
+    invoke.mockRestore();
+  });
+});
+
 describe("what an agent's runs spend", () => {
   it("is counted for every run of a conversation, not only the first", async () => {
     const hub = await makeHub();

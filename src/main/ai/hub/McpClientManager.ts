@@ -415,23 +415,6 @@ export async function discoverOAuthMetadata(
   };
 }
 
-export const MCP_SEARCH_TOOL_DEF = {
-  name: "mcp_search",
-  description:
-    "Search and filter available tools across enabled MCP servers by keyword, server, or safety hints (read-only / non-destructive).",
-  inputSchema: {
-    type: "object",
-    properties: {
-      query: { type: "string", description: "Keywords to match against tool names, descriptions, or parameters." },
-      serverId: { type: "string", description: "Optional MCP server id or name to filter to." },
-      readOnlyOnly: { type: "boolean", description: "Only return tools marked readOnly." },
-      excludeDestructive: { type: "boolean", description: "Exclude tools marked destructiveHint: true." },
-      limit: { type: "number", description: "Max tools to return (default 20, max 100)." },
-    },
-    additionalProperties: false,
-  },
-} as const;
-
 interface PooledStdioSession {
   kind: "stdio";
   key: string;

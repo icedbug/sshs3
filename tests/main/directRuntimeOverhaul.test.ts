@@ -1,7 +1,4 @@
-import fs from "node:fs/promises";
 import http from "node:http";
-import os from "node:os";
-import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DirectAgentRuntime,
@@ -555,33 +552,18 @@ describe("DirectAgentRuntime Wave 1 Overhaul", () => {
 
   // ------------------------------------------------------------------ 4. Prompt, Safety, Rules & Reasoning
   describe("Prompt caching, KB isolation, microcompaction, masking, rules & reasoning", () => {
-    it("truncates huge tool outputs with headTailTruncate and writes spill artifact ref", async () => {
-      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-spill-"));
-      try {
-        const bigOutput =
-          "TOP_ERROR: ETIMEDOUT\n" +
-          "x".repeat(40_000) +
-          "\nAuthorization: Bearer top-secret-token-123456\nTAIL_LINE: done";
-        const formatted = await formatToolOutputForModel(bigOutput, {
-          taskId: "t1",
-          toolName: "terminal_command",
-          callId: "c1",
-          maxChars: 2_000,
-          spillDir: tmpDir,
-        });
-        expect(formatted.length).toBeLessThanOrEqual(2_000);
-        expect(formatted).toContain("TOP_ERROR: ETIMEDOUT");
-        expect(formatted).toContain("TAIL_LINE: done");
-        expect(formatted).toContain("spilled to artifact ref:");
-        expect(formatted).not.toContain("top-secret-token-123456");
-
-        const files = await fs.readdir(tmpDir);
-        expect(files).toHaveLength(1);
-        const spilled = await fs.readFile(path.join(tmpDir, files[0]), "utf8");
-        expect(spilled).not.toContain("top-secret-token-123456");
-      } finally {
-        await fs.rm(tmpDir, { recursive: true, force: true });
-      }
+    it("cuts a huge tool output in the middle: its first and its last lines are kept, and secrets are masked", async () => {
+      const bigOutput =
+        "TOP_ERROR: ETIMEDOUT\n" +
+        "x".repeat(40_000) +
+        "\nAuthorization: Bearer top-secret-token-123456\nTAIL_LINE: done";
+      const formatted = await formatToolOutputForModel(bigOutput, { maxChars: 2_000 });
+      expect(formatted.length).toBeLessThanOrEqual(2_000);
+      expect(formatted).toContain("TOP_ERROR: ETIMEDOUT");
+      expect(formatted).toContain("TAIL_LINE: done");
+      expect(formatted).not.toContain("top-secret-token-123456");
+      // One that fits is given whole.
+      expect(await formatToolOutputForModel("load average: 0.10", { maxChars: 2_000 })).toBe("load average: 0.10");
     });
 
     it("keeps untrusted KB pages/docs out of cached static system[0] prefix and tags last Anthropic tool with cache_control", async () => {

@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import {
   HermesManager,
   type HermesEndpoint,
@@ -56,6 +55,9 @@ export class HermesRuntime implements AgentRuntime {
     authBaseDir?: string,
     options?: DirectRuntimeOptions,
   ) {
+    // The app's runs go through the direct runtime. The packaged Hermes engine below is used only
+    // when SSHS3_HERMES_INTEGRATION=1 is set, or when no tool invoker is given: that is how its
+    // integration test (tests/main/aiHub.hermes.integration.test.ts) starts it.
     if (invokeTool && process.env.SSHS3_HERMES_INTEGRATION !== "1") {
       this.direct = new DirectAgentRuntime(invokeTool, authBaseDir, undefined, options);
       this.direct.replay = replay;
@@ -213,5 +215,3 @@ export class HermesRuntime implements AgentRuntime {
     return response;
   }
 }
-
-export const newMessageId = (): string => crypto.randomUUID();

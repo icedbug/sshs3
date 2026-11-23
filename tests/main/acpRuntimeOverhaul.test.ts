@@ -17,7 +17,6 @@ import {
   EXTERNAL_RUNNER_PRESETS,
   buildAcpMcpServers,
   childEnv,
-  wrapWithOsSandbox,
 } from "../../src/main/ai/hub/AcpRuntime";
 import type { RunEvent } from "../../src/main/ai/hub/AgentRuntime";
 import { LocalMcpServer } from "../../src/main/ai/hub/LocalMcpServer";
@@ -25,8 +24,6 @@ import {
   HermesManager,
   hermesBaseEnvironment,
   hermesPolicyBlocks,
-  resolveHermesAllowedDomains,
-  wrapHermesSidecarSpawn,
 } from "../../src/main/ai/HermesManager";
 import type { AgentTask, ExternalRunner } from "../../src/shared/types/aiHub";
 
@@ -332,202 +329,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   });
 });
 
-describe("wrapWithOsSandbox", () => {
-  it("passes through unchanged when not opted in", () => {
-    expect(wrapWithOsSandbox("opencode", ["acp"], { enabled: false })).toEqual({
-      command: "opencode",
-      args: ["acp"],
-      sandboxed: false,
-      backend: "none",
-    });
-  });
-
-  it("wraps with sandbox-exec on macOS when available", () => {
-    const res = wrapWithOsSandbox("opencode", ["acp"], {
-      enabled: true,
-      platform: "darwin",
-      cwd: "/Users/dev/repo",
-      writePaths: ["/tmp/work"],
-      allowedDomains: ["127.0.0.1", "localhost"],
-      hasBinary: (b) => b === "sandbox-exec",
-    });
-    expect(res.sandboxed).toBe(true);
-    expect(res.backend).toBe("sandbox-exec");
-    expect(res.command).toBe("sandbox-exec");
-    expect(res.args[0]).toBe("-p");
-    expect(res.args[1]).toContain('(allow file-write* (subpath "/Users/dev/repo"))');
-    expect(res.args[1]).toContain('(allow file-write* (subpath "/tmp/work"))');
-    expect(res.args[1]).toContain('(allow network-outbound (remote ip "127.0.0.1:*"))');
-    expect(res.args.slice(2)).toEqual(["opencode", "acp"]);
-  });
-
-  it("wraps with bwrap on Linux when available", () => {
-    const res = wrapWithOsSandbox("opencode", ["acp"], {
-      enabled: true,
-      platform: "linux",
-      cwd: "/home/dev/repo",
-      readPaths: ["/opt/runtime"],
-      writePaths: ["/home/dev/cache"],
-      allowNetwork: false,
-      hasBinary: (b) => b === "bwrap",
-    });
-    expect(res.sandboxed).toBe(true);
-    expect(res.backend).toBe("bwrap");
-    expect(res.command).toBe("bwrap");
-    expect(res.args).toContain("--die-with-parent");
-    expect(res.args).toContain("--unshare-net");
-    expect(res.args).toEqual(expect.arrayContaining(["--ro-bind", "/opt/runtime", "/opt/runtime"]));
-    expect(res.args).toEqual(expect.arrayContaining(["--bind", "/home/dev/repo", "/home/dev/repo"]));
-    expect(res.args.slice(-3)).toEqual(["--", "opencode", "acp"]);
-  });
-
-  it("falls back cleanly on Windows or missing binaries unless failIfUnavailable is true", () => {
-    expect(
-      wrapWithOsSandbox("opencode", ["acp"], {
-        enabled: true,
-        platform: "win32",
-      }),
-    ).toMatchObject({
-      command: "opencode",
-      args: ["acp"],
-      sandboxed: false,
-      backend: "none",
-    });
-
-    expect(() =>
-      wrapWithOsSandbox("opencode", ["acp"], {
-        enabled: true,
-        platform: "win32",
-        failIfUnavailable: true,
-      }),
-    ).toThrow(/OS sandbox unavailable/);
-
-    expect(
-      wrapWithOsSandbox("opencode", ["acp"], {
-        enabled: true,
-        platform: "linux",
-        hasBinary: () => false,
-      }),
-    ).toMatchObject({
-      command: "opencode",
-      args: ["acp"],
-      sandboxed: false,
-      backend: "none",
-      reason: "bwrap unavailable",
-    });
-
-    expect(() =>
-      wrapWithOsSandbox("opencode", ["acp"], {
-        enabled: true,
-        platform: "darwin",
-        hasBinary: () => false,
-        failIfUnavailable: true,
-      }),
-    ).toThrow(/sandbox-exec/);
-  });
-
-  it("runs AcpRuntime normally when sandbox falls back, and rejects if failIfUnavailable on unsupported platform", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-acp-sb-"));
-    disposals.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
-    const script = await writeFakeAgentScript(
-      dir,
-      `
-const readline = require("node:readline");
-const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
-readline.createInterface({ input: process.stdin }).on("line", (line) => {
-  const m = JSON.parse(line);
-  if (m.method === "initialize") return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: 1 } });
-  if (m.method === "session/new") return send({ jsonrpc: "2.0", id: m.id, result: { sessionId: "s-sb" } });
-  if (m.method === "session/prompt") {
-    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s-sb", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ran" } } } });
-    return send({ jsonrpc: "2.0", id: m.id, result: { stopReason: "end_turn" } });
-  }
-});
-`,
-    );
-
-    const graceful = new AcpRuntime(makeRunner(script, dir), {
-      preface: "p",
-      ask: async () => true,
-      sandbox: { enabled: true, platform: "win32", failIfUnavailable: false },
-    });
-    disposals.push(() => graceful.stop());
-    const events: RunEvent[] = [];
-    await graceful.start(makeTask("sb-ok", "hi"), undefined, (e) => events.push(e));
-    expect(events.at(-1)).toMatchObject({ type: "run.completed", output: "ran" });
-
-    const strict = new AcpRuntime(makeRunner(script, dir), {
-      preface: "p",
-      ask: async () => true,
-      sandbox: { enabled: true, platform: "win32", failIfUnavailable: true },
-    });
-    await expect(strict.start(makeTask("sb-fail", "hi"), undefined, () => {})).rejects.toThrow(
-      /OS sandbox unavailable/,
-    );
-  });
-});
-
-describe("HermesManager OS sandbox & domain-allowlist wrapper", () => {
-  it("resolves model + loopback domain allowlists cleanly", () => {
-    expect(
-      resolveHermesAllowedDomains(
-        { kind: "anthropic", model: "claude-opus-5-5", apiKey: "k" },
-        ["https://proxy.corp.internal:8443/v1"],
-        "http://127.0.0.1:41234/tool",
-      ),
-    ).toEqual(["127.0.0.1", "localhost", "api.anthropic.com", "proxy.corp.internal"]);
-
-    expect(
-      resolveHermesAllowedDomains({
-        kind: "custom",
-        model: "qwen",
-        baseUrl: "https://eu.llm.example.com/v1",
-      }),
-    ).toEqual(["127.0.0.1", "localhost", "eu.llm.example.com"]);
-  });
-
-  it("wraps sidecar spawns with OS sandbox when available and falls back gracefully unless hardened", async () => {
-    const linuxWrapped = await wrapHermesSidecarSpawn(
-      { command: "/opt/hermes/python", args: ["-I", "bootstrap.py"], cwd: "/tmp/h", env: { PATH: "/usr/bin" } },
-      {
-        enabled: true,
-        platform: "linux",
-        hasBinary: (b) => b === "bwrap",
-        allowedDomains: ["127.0.0.1", "localhost", "api.anthropic.com"],
-      },
-    );
-    expect(linuxWrapped.sandboxed).toBe(true);
-    expect(linuxWrapped.backend).toBe("bwrap");
-    expect(linuxWrapped.command).toBe("bwrap");
-    expect(linuxWrapped.env.SSHS3_ALLOWED_DOMAINS).toBe("127.0.0.1,localhost,api.anthropic.com");
-
-    const desktopFallback = await wrapHermesSidecarSpawn(
-      { command: "C:\\hermes\\python.exe", args: ["-I", "bootstrap.py"], cwd: "C:\\temp\\h", env: {} },
-      {
-        enabled: true,
-        hardened: false,
-        platform: "win32",
-        allowedDomains: ["127.0.0.1", "localhost"],
-      },
-    );
-    expect(desktopFallback.sandboxed).toBe(false);
-    expect(desktopFallback.backend).toBe("none");
-    expect(desktopFallback.command).toBe("C:\\hermes\\python.exe");
-    expect(desktopFallback.env.SSHS3_ALLOWED_DOMAINS).toBe("127.0.0.1,localhost");
-
-    await expect(
-      wrapHermesSidecarSpawn(
-        { command: "C:\\hermes\\python.exe", args: ["-I", "bootstrap.py"], cwd: "C:\\temp\\h", env: {} },
-        {
-          hardened: true,
-          platform: "win32",
-        },
-      ),
-    ).rejects.toThrow(/OS sandbox unavailable/);
-  });
-
-  it("preserves HermesManager manifest/env/policy invariants and enforces hardened sandbox on ensureRunning", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hermes-sb-"));
+describe("HermesManager", () => {
+  it("reads its manifest, starts the engine it names, and keeps its environment and policy", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hermes-"));
     disposals.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
     const runtimeDir = path.join(dir, "runtime");
     const homeDir = path.join(dir, "home");
@@ -568,12 +372,6 @@ describe("HermesManager OS sandbox & domain-allowlist wrapper", () => {
       homeDir,
       spawn: fakeSpawn,
       fetch: (async () => ({ ok: true })) as unknown as typeof fetch,
-      sandbox: {
-        enabled: true,
-        hardened: false,
-        platform: "win32",
-      },
-      allowedDomains: ["llm.internal.example"],
     });
     expect(await manager.getManifest()).toMatchObject({ tag: "v1.0.0", python: "python-bin" });
     const endpoint = await manager.ensureRunning({
@@ -583,34 +381,14 @@ describe("HermesManager OS sandbox & domain-allowlist wrapper", () => {
     });
     expect(endpoint.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/);
     expect(manager.isRunning()).toBe(true);
+    // The interpreter the manifest names, run directly, with the model's key in its environment.
     expect(spawned).toHaveLength(1);
-    expect(spawned[0].env?.SSHS3_ALLOWED_DOMAINS).toBe(
-      "127.0.0.1,localhost,api.anthropic.com,llm.internal.example",
-    );
+    expect(spawned[0].file).toBe(path.join(runtimeDir, "python-bin"));
+    expect(spawned[0].args.slice(0, 2)).toEqual(["-I", path.join(runtimeDir, "sshs3_bootstrap.py")]);
+    expect(spawned[0].env?.ANTHROPIC_API_KEY).toBe("ant-test");
     await manager.stop();
     expect(manager.isRunning()).toBe(false);
 
-    // Hardened mode rejects on unavailable OS sandbox without spawning
-    const hardenedManager = new HermesManager({
-      runtimeDir,
-      homeDir,
-      spawn: fakeSpawn,
-      fetch: (async () => ({ ok: true })) as unknown as typeof fetch,
-      sandbox: {
-        hardened: true,
-        platform: "win32",
-      },
-    });
-    await expect(
-      hardenedManager.ensureRunning({
-        kind: "anthropic",
-        model: "claude-opus-5-5",
-        apiKey: "ant-test", // pragma: allowlist secret
-      }),
-    ).rejects.toThrow(/OS sandbox unavailable/);
-    expect(spawned).toHaveLength(1);
-
-    // Existing policy/env helpers remain intact
     expect(hermesPolicyBlocks()).toContain('mode: "manual"');
     expect(
       hermesBaseEnvironment(

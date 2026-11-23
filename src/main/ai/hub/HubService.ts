@@ -308,7 +308,6 @@ export class HubService {
           .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
       },
       approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
-      // Time spent waiting for a person is not the run's: its budget moves by as much.
       // Nobody sits at a ticket's or a schedule's run: what it waits for is told at once, not on the next look.
       asking: (task, change) => {
         if (worksOnItsOwn(task)) void this.flushInbox().catch((e) => log.warn("Notifications failed", safeError(e)));
@@ -318,10 +317,6 @@ export class HubService {
         this.emitRun({ type: "answered", taskId: task.id, changeId, allowed: answer.allowed, how: answer.how, final: answer.final }),
       chatFence: (task) => this.chatFence(task),
       chatTerminal: (task, name) => this.chatTerminal(task, name),
-      waited: (task, ms) => {
-        const armed = this.runTimers.get(task.id);
-        if (armed) this.armRunTimer(task, armed.endsAt + ms);
-      },
       // Told its budget is spent, the agent asked for more anyway: the run ends here.
       budgetSpent: (task) => void this.stop(task, "Command budget exhausted"),
       // Told a command is not run again for the same answer, the agent kept asking for it: the run ends here.
@@ -1091,7 +1086,6 @@ export class HubService {
   /** What the team said in chat: the bot's connection, the channels it reads, and the search over them. */
   readonly chat: ChatBridge;
   private readonly stopChatListening: () => void;
-  readonly runTimers = new Map<string, { timer: NodeJS.Timeout; endsAt: number }>();
   inboxDirty = false;
   inboxTimer?: NodeJS.Timeout;
   flushingInbox = false;

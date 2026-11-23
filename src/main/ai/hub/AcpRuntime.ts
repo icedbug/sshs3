@@ -147,43 +147,7 @@ export const EXTERNAL_RUNNER_PRESETS: ExternalRunnerPreset[] = [
 ];
 const MAX_LINE_BYTES = 8_000_000;
 
-export interface OsSandboxOptions {
-  /** Opt-in OS sandbox wrapping. Defaults to false (pass-through). */
-  enabled?: boolean;
-  /** Working directory allowed for read/write inside the sandbox. */
-  cwd?: string;
-  /** Additional readable paths inside the sandbox. */
-  readPaths?: string[];
-  /** Additional writable paths inside the sandbox. */
-  writePaths?: string[];
-  /** Allowed outbound hostnames/domains (loopback-only or empty restricts network when supported). */
-  allowedDomains?: string[];
-  /** Whether outbound network is permitted when supported by the sandbox backend. */
-  allowNetwork?: boolean;
-  /** Throw instead of falling back to unsandboxed execution when no backend is available. */
-  failIfUnavailable?: boolean;
-  /** Injectable platform override for testing (defaults to process.platform). */
-  platform?: NodeJS.Platform;
-  /** Injectable binary availability check for testing. */
-  hasBinary?: (binary: string) => boolean;
-  /** Injectable environment for PATH lookups. */
-  env?: NodeJS.ProcessEnv;
-}
-
-export interface WrappedSpawn {
-  command: string;
-  args: string[];
-  sandboxed: boolean;
-  backend: "sandbox-exec" | "bwrap" | "none";
-  reason?: string;
-}
-
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-
-function isLoopbackOnlyList(domains: string[] | undefined): boolean {
-  if (!domains || domains.length === 0) return false;
-  return domains.every((d) => LOOPBACK_HOSTS.has(d.trim().toLowerCase()));
-}
 
 function defaultHasBinary(binary: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const checkFile = (candidate: string): boolean => {
@@ -330,120 +294,6 @@ export function probeRunner(
   });
 }
 
-/**
- * Wraps a child-process command and arguments with an OS-level sandbox
- * (`sandbox-exec` on macOS, `bwrap` on Linux) when opted in. Falls back cleanly
- * on Windows or when the sandbox binary is absent unless `failIfUnavailable` is set.
- */
-export function wrapWithOsSandbox(
-  command: string,
-  args: string[],
-  options: OsSandboxOptions = {},
-): WrappedSpawn {
-  if (!options.enabled) {
-    return { command, args, sandboxed: false, backend: "none" };
-  }
-  const platform = options.platform ?? process.platform;
-  const hasBinary = options.hasBinary ?? ((bin: string) => defaultHasBinary(bin, options.env));
-  const uniquePaths = (items: Array<string | undefined>): string[] => [
-    ...new Set(items.map((p) => p?.trim()).filter((p): p is string => Boolean(p))),
-  ];
-  const writePaths = uniquePaths([options.cwd, ...(options.writePaths ?? [])]);
-  const readPaths = uniquePaths(options.readPaths ?? []);
-
-  if (platform === "darwin") {
-    const sandboxBin = hasBinary("sandbox-exec")
-      ? "sandbox-exec"
-      : hasBinary("/usr/bin/sandbox-exec")
-        ? "/usr/bin/sandbox-exec"
-        : undefined;
-    if (!sandboxBin) {
-      if (options.failIfUnavailable) {
-        throw new Error("OS sandbox unavailable: sandbox-exec was not found.");
-      }
-      return { command, args, sandboxed: false, backend: "none", reason: "sandbox-exec unavailable" };
-    }
-    const lines = [
-      "(version 1)",
-      "(allow default)",
-      '(deny file-write* (subpath "/"))',
-      '(allow file-write* (subpath "/dev"))',
-      '(allow file-write* (subpath "/tmp"))',
-      '(allow file-write* (subpath "/private/tmp"))',
-      ...writePaths.map((p) => `(allow file-write* (subpath ${JSON.stringify(p)}))`),
-    ];
-    if (options.allowNetwork === false || (options.allowedDomains !== undefined && options.allowedDomains.length === 0)) {
-      lines.push("(deny network-outbound)");
-    } else if (isLoopbackOnlyList(options.allowedDomains)) {
-      lines.push("(deny network-outbound)");
-      lines.push('(allow network-outbound (remote ip "localhost:*"))');
-      lines.push('(allow network-outbound (remote ip "127.0.0.1:*"))');
-    }
-    return {
-      command: sandboxBin,
-      args: ["-p", lines.join("\n"), command, ...args],
-      sandboxed: true,
-      backend: "sandbox-exec",
-    };
-  }
-
-  if (platform === "linux") {
-    const bwrapBin = hasBinary("bwrap")
-      ? "bwrap"
-      : hasBinary("/usr/bin/bwrap")
-        ? "/usr/bin/bwrap"
-        : undefined;
-    if (!bwrapBin) {
-      if (options.failIfUnavailable) {
-        throw new Error("OS sandbox unavailable: bwrap was not found.");
-      }
-      return { command, args, sandboxed: false, backend: "none", reason: "bwrap unavailable" };
-    }
-    const bwrapArgs: string[] = [
-      "--die-with-parent",
-      "--new-session",
-      "--ro-bind",
-      "/",
-      "/",
-      "--dev",
-      "/dev",
-      "--proc",
-      "/proc",
-      "--tmpfs",
-      "/tmp",
-    ];
-    for (const r of readPaths) {
-      bwrapArgs.push("--ro-bind", r, r);
-    }
-    for (const w of writePaths) {
-      bwrapArgs.push("--bind", w, w);
-    }
-    // Only unshare network when network is explicitly disabled; loopback-only
-    // bridges (such as LocalMcpServer) rely on the host loopback interface.
-    if (options.allowNetwork === false || (options.allowedDomains !== undefined && options.allowedDomains.length === 0)) {
-      bwrapArgs.push("--unshare-net");
-    }
-    bwrapArgs.push("--", command, ...args);
-    return {
-      command: bwrapBin,
-      args: bwrapArgs,
-      sandboxed: true,
-      backend: "bwrap",
-    };
-  }
-
-  if (options.failIfUnavailable) {
-    throw new Error(`OS sandbox unavailable on platform "${platform}".`);
-  }
-  return {
-    command,
-    args,
-    sandboxed: false,
-    backend: "none",
-    reason: `OS sandbox unsupported on ${platform}`,
-  };
-}
-
 /** What the agent wants to do, as far as it told us. */
 export interface PermissionQuestion {
   title: string;
@@ -557,8 +407,6 @@ export interface AcpRuntimeOptions {
   localMcp?: AcpLocalMcpBridge;
   /** Additional ACP `mcpServers` entries to include alongside `localMcp`. */
   mcpServers?: AcpMcpServer[];
-  /** Opt-in OS sandbox wrapper configuration for spawning the external runner. */
-  sandbox?: OsSandboxOptions;
 }
 
 interface AcpSessionResponse {
@@ -747,10 +595,7 @@ export class AcpRuntime implements AgentRuntime {
 
     let text = "";
     try {
-      const sandboxed = this.options.sandbox?.enabled
-        ? wrapWithOsSandbox(this.runner.command, this.runner.args ?? [], { cwd, ...this.options.sandbox })
-        : { command: this.runner.command, args: this.runner.args ?? [] };
-      const plan = runnerSpawn(sandboxed.command, sandboxed.args);
+      const plan = runnerSpawn(this.runner.command, this.runner.args ?? []);
       this.child = spawn(plan.file, plan.args, {
         cwd,
         // The agent gets what a program needs to run and what its runner's settings name: no SSH

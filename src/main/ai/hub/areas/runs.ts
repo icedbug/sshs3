@@ -56,7 +56,7 @@ function cachedTokens(task: AgentTask): number {
 /**
  * A run: an agent at work in a conversation.
  *
- * Starting one, the events it sends while it works, its budget and its clock, stopping it, and letting
+ * Starting one, the events it sends while it works, what it spends, stopping it, and letting
  * go of what it held when it ends. Also runs on an external agent.
  *
  * A part of HubService. These are the hub's own methods, kept in a file of their own: `this` is the hub,
@@ -281,7 +281,7 @@ export class RunsPart {
     const launchMarker = Symbol(task.id);
     this.launches.set(task.id, launchMarker);
     task.status = "queued";
-    // Every run has the conversation's whole budget: what the last one used is not carried over.
+    // Every run counts from zero: what the last one used is not carried over.
     task.budgetStop = undefined;
     delete task.quietScheduleResult;
     task.commandsUsed = 0;
@@ -463,7 +463,6 @@ export class RunsPart {
       },
     );
     this.runtimes.set(task.id, runtime);
-    if (task.maxMinutes > 0) this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
     this.changed();
     void runtime
       .start(task, modelConfig, (event) => this.event(task, event))
@@ -478,7 +477,6 @@ export class RunsPart {
         // A run that was let go of while it hung (see `releaseStuckRun`) ends here much later, perhaps
         // beside a new run of the same conversation: it has nothing left to end.
         if (this.runtimes.get(task.id) !== runtime) return;
-        this.clearRunTimer(task.id);
         this.broker.revoke(task.id);
         this.terminals.release(task.id);
         if (active(task)) {
@@ -680,18 +678,6 @@ export class RunsPart {
         },
       });
     }
-    if (
-      event.type === "message.interim" &&
-      event.text &&
-      !task.messages.some((m) => m.text === event.text)
-    )
-      task.messages.push({
-        id: crypto.randomUUID(),
-        role: "assistant",
-        text: boundedContext(event.text),
-        ...(event.sourceCalls && { sourceCalls: event.sourceCalls }),
-        at: now,
-      });
     const outcome = finalRunStatus(event.type);
     if (outcome) {
       task.status = outcome;
@@ -860,7 +846,6 @@ export class RunsPart {
     const timer = setTimeout(() => {
       if (this.disposed || this.runtimes.get(task.id) !== runtime) return;
       log.warn("A stopped run did not end by itself; letting go of it", task.id);
-      this.clearRunTimer(task.id);
       this.broker.revoke(task.id);
       this.terminals.release(task.id);
       this.runtimes.delete(task.id);
@@ -1019,19 +1004,8 @@ export class RunsPart {
           this.changed();
           return false;
         }
-        // Counted for the person to see. No limit unless one is set (maxCommands 0 is none).
-        actions++;
-        if (task.maxCommands > 0 && actions > task.maxCommands) {
-          task.commandsUsed = task.maxCommands;
-          task.budgetStop ??= { kind: "commands", limit: task.maxCommands, at: Date.now() };
-          change.status = "denied";
-          change.decidedHow = "policy";
-          change.output = `This run may take ${task.maxCommands} actions, and has.`;
-          task.changes.push(change);
-          this.changed();
-          return false;
-        }
-        task.commandsUsed = actions;
+        // Counted for the person to see. A run has no limit on them (`launch` sets maxCommands to 0).
+        task.commandsUsed = ++actions;
         // How many people it needs. A plain command needs nobody.
         let requiredApprovals = plain ? 1 : Math.max(1, safetyCtx.clusterPolicy?.requiredApprovals ?? 1);
         const isProd = (safetyCtx.targetTags ?? []).some(isProdTag);
@@ -1079,7 +1053,6 @@ export class RunsPart {
     task.error = undefined;
     assertLaunching();
     this.runtimes.set(task.id, runtime);
-    if (task.maxMinutes > 0) this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
     this.changed();
     void runtime
       .start(task, undefined, (event) => this.event(task, event))
@@ -1097,7 +1070,6 @@ export class RunsPart {
           if (acpTokenId) await this.mcpTokens().revoke("local", acpTokenId).catch(() => undefined);
           return;
         }
-        this.clearRunTimer(task.id);
         this.broker.revoke(task.id);
         if (active(task)) {
           task.status = "interrupted";
@@ -1111,29 +1083,6 @@ export class RunsPart {
         this.changed();
         if (!task.quietScheduleResult) this.notify(task.status === "completed" ? "Task finished" : "Task needs attention", task.title);
       });
-  }
-
-  armRunTimer(this: HubService, task: AgentTask, endsAt: number): void {
-    this.clearRunTimer(task.id);
-    const timer = setTimeout(() => {
-      // A run that is waiting for a person is not out of time: the wait is given back to it when
-      // the answer comes (`waited`). Until then it looks again a little later, at the same end.
-      if (this.broker.waitingOnPerson(task.id)) {
-        const again = setTimeout(() => this.armRunTimer(task, endsAt), 15_000);
-        this.runTimers.set(task.id, { timer: again, endsAt });
-        return;
-      }
-      this.runTimers.delete(task.id);
-      task.budgetStop ??= { kind: "minutes", limit: task.maxMinutes, at: Date.now() };
-      void this.stop(task, "Run time budget exhausted");
-    }, Math.max(0, endsAt - Date.now()));
-    this.runTimers.set(task.id, { timer, endsAt });
-  }
-
-  clearRunTimer(this: HubService, taskId: string): void {
-    const armed = this.runTimers.get(taskId);
-    if (armed) clearTimeout(armed.timer);
-    this.runTimers.delete(taskId);
   }
 
   /**

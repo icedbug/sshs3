@@ -50,7 +50,10 @@ explicitly enabled presentation on top of the same terminal authority.
   providers, settings).
 - **`DirectAgentRuntime`** — the agent loop for OpenAI Codex (`/responses`),
   OpenAI-compatible (`/chat/completions`) and Anthropic (`/v1/messages`)
-  providers. `maxOutputTokens` from the AI configuration goes to every
+  providers. The app's own tools it can offer a model are listed in
+  `toolSchemas.ts`; which of them a run is given is decided here
+  (`toolsForTask`).
+  `maxOutputTokens` from the AI configuration goes to every
   provider. `reasoningEffort` does too, in each provider's own form:
   `reasoning.effort` (Responses), `reasoning_effort` (chat completions) and
   `output_config.effort` (Anthropic, the same for the whole run so that the
@@ -102,6 +105,11 @@ explicitly enabled presentation on top of the same terminal authority.
     passed since. Something was changed when a change card (`sshs3_change`)
     ran or a file was written. A plain command never counts: nothing looks at
     what a command did. Each is bounded, so a stuck run can end.
+    The three turn loops decide this in one place (`afterAnswerTurn`). A turn
+    that says nothing and calls nothing is sent back like any other with chat
+    completions and Anthropic. The Responses loop takes such a turn for a
+    failed answer ("The model finished without an answer.") before it gets
+    there.
     What the model wrote in a turn that was sent back stays part of the
     answer: the final answer is the text of every turn that ended without a
     tool call, in order (a text said twice is kept once). A report followed
@@ -475,7 +483,7 @@ parts that define the same method name are refused when the file loads.
 | `HubService.ts` | The hub's state (every field), its start and end, the snapshot, the clock (`tick`), `changed`, and the handing out of requests | none of its own |
 | `areas/routes.ts` | The table of which part answers which request, and its types | |
 | `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log | 19 |
-| `areas/runs.ts` | A run: starting it, its events, its budget and clock, stopping it; runs on an external agent | none: started by other parts |
+| `areas/runs.ts` | A run: starting it, its events, what it spends, stopping it; runs on an external agent | none: started by other parts |
 | `areas/chatRuns.ts` | Conversations asked for from a chat thread: the fence they run inside (`chatFence.ts`), starting and going on, their own terminals, and following a run without a browser (`onRun`, `runView`) | none: called by the chat agent |
 | `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 12 |
 | `areas/tickets.ts` | The board: goals and tickets, starting a ticket's agent, the board's clock | 11 |

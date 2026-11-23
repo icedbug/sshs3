@@ -86,7 +86,7 @@ describe("a person's run has no limit on commands or time", () => {
     expect(task.messages.at(-1)).toMatchObject({ role: "assistant", text: "Checked thirty files." });
   });
 
-  it("arms no timer for it, and frees a conversation from the limits it was stored with", async () => {
+  it("frees a conversation from the limits it was stored with", async () => {
     const hub = await create();
     mocks.start.current = (async () => {
       await new Promise(() => {});
@@ -94,8 +94,6 @@ describe("a person's run has no limit on commands or time", () => {
     await hub.request({ action: "start", task: { mode: "advice", prompt: "Look" } });
     const task = hub.store.data.tasks[0];
     await vi.waitFor(() => expect(task.status).toBe("running"));
-    const timers = (hub as unknown as { runTimers: Map<string, unknown> }).runTimers;
-    expect(timers.has(task.id)).toBe(false);
     await hub.request({ action: "stop", taskId: task.id });
     await vi.waitFor(() => expect(task.status).toBe("interrupted"));
 
@@ -105,7 +103,6 @@ describe("a person's run has no limit on commands or time", () => {
     await hub.request({ action: "resume", taskId: task.id });
     await vi.waitFor(() => expect(task.status).toBe("running"));
     expect(task).toMatchObject({ maxCommands: 0, maxMinutes: 0 });
-    expect(timers.has(task.id)).toBe(false);
   });
 
   it("waits for a person's answer for as long as it takes, unless a wait is set", async () => {

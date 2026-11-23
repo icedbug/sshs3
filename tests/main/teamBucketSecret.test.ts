@@ -202,7 +202,7 @@ describe("the team bucket's secret key", () => {
 
     // The request is the interface's. Nothing that answers a tool call names it.
     const hubDir = path.join(__dirname, "../../src/main/ai/hub");
-    for (const file of ["AppActions.ts", "AppSettingsActions.ts", "AppGuard.ts", "ToolBroker.ts", "DirectAgentRuntime.ts", "../../web/mcp/mcpTools.ts"]) {
+    for (const file of ["AppActions.ts", "AppSettingsActions.ts", "AppGuard.ts", "ToolBroker.ts", "DirectAgentRuntime.ts", "toolSchemas.ts", "../../web/mcp/mcpTools.ts"]) {
       expect(await fs.readFile(path.join(hubDir, file), "utf8"), file).not.toContain("workspace-s3-invite");
     }
   }, 60_000);

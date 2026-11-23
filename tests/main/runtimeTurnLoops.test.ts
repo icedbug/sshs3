@@ -289,6 +289,65 @@ describe.each(PROTOCOLS)("a report, then the run is sent back to its task list, 
   });
 });
 
+describe.each(PROTOCOLS)("a turn that says nothing and calls nothing, with the task list still open (%s)", (protocol) => {
+  const todo = (status: string): ScriptedStep => ({
+    calls: [{ name: "todo_write", args: { todos: [{ id: "t1", content: "Find why nginx is slow", status, ...(status === "completed" ? { note: "error log showed it" } : {}) }] } }],
+  });
+
+  it("is sent back to work like a turn that said something", async () => {
+    const { end, model } = await run(protocol, (request) => {
+      if (request.toolResults === 0) return todo("in_progress");
+      if (!request.raw.includes("item(s) of your task list are still open")) return {};
+      if (request.toolResults === 1) return todo("completed");
+      return { text: "It was the upstream pool." };
+    });
+    if (protocol === "responses") {
+      // The Responses loop takes a turn with nothing in it for a failed answer before it looks at the
+      // task list (ResponsesTurn.finish). Left as it is here; the other two go on.
+      expect(model.requests).toHaveLength(2);
+      expect(end?.type).toBe("run.failed");
+      expect(end?.error).toBe("The model finished without an answer.");
+      return;
+    }
+    expect(model.requests).toHaveLength(4);
+    // The third request ends with the message that sends it back to work.
+    expect(model.requests[2].last).toContain("item(s) of your task list are still open");
+    expect(model.requests[2].items.at(-1)?.role).toBe("user");
+    expect(end?.type).toBe("run.completed");
+    expect(end?.output).toBe("It was the upstream pool.");
+  });
+});
+
+describe.each(PROTOCOLS)("the same call again and again, counted for each run on its own (%s)", (protocol) => {
+  it("starts the count over when a runtime is started again", async () => {
+    let second = false;
+    const model = scriptedModel(protocol, (request) => {
+      if (!second) return request.toolResults < 3 ? look() : { text: "Load is fine." };
+      return request.toolResults === 0 ? look() : { text: "Still fine." };
+    });
+    const commands: string[] = [];
+    const broker = async (req: Record<string, unknown>) => {
+      if (req.action === "context") return {};
+      commands.push(String(req.command));
+      return { exitCode: 0, output: "load average: 0.10" };
+    };
+    const runtime = new DirectAgentRuntime(broker as never, undefined, model.fetch);
+    const first: RunEvent[] = [];
+    await runtime.start(task(), model.config(), (event) => first.push(event));
+    expect(first.at(-1)).toMatchObject({ type: "run.completed", output: "Load is fine." });
+    // Three times with the same result: one more in this run would not be made.
+    expect(commands).toEqual(["uptime", "uptime", "uptime"]);
+
+    second = true;
+    const again: RunEvent[] = [];
+    await runtime.start(task({ id: "t2" }), model.config(), (event) => again.push(event));
+    expect(again.at(-1)).toMatchObject({ type: "run.completed", output: "Still fine." });
+    // The new run's first call is its first: it is made.
+    expect(commands).toHaveLength(4);
+    expect(again.filter((e) => e.type === "tool.result").map((e) => e.tool?.output ?? "").join("")).not.toContain("repeated_call");
+  });
+});
+
 describe.each(PROTOCOLS)("a message the person sends while the agent works (%s)", (protocol) => {
   it("reaches the model when it is sent while the last turn is being written, and is answered before the run ends", async () => {
     const { end, model } = await run(protocol, async (request, runtime) => {
@@ -364,6 +423,22 @@ describe.each(PROTOCOLS)("a message the person sends while the agent works (%s)"
     expect(after.length).toBeGreaterThan(2);
     for (const request of after) expect(request.raw).toContain("STEERED: do not restart nginx, it serves checkout");
     expect(after[0].last).toContain("What the user wrote to you while you worked, word for word. It still applies:");
+  });
+});
+
+describe.each(PROTOCOLS)("a run that is stopped between two turns (%s)", (protocol) => {
+  it("ends as stopped, with what it spent, and does not say it completed", async () => {
+    // Stopped while its command runs: the command comes back, and the loop finds the run stopped before the next turn.
+    const { events, end, model } = await run(protocol, (request) => (request.toolResults === 0 ? look() : { text: "Load is fine." }), {
+      onEvent: (event, runtime) => {
+        if (event.type === "tool.result") void runtime.stop();
+      },
+    });
+    expect(model.requests).toHaveLength(1);
+    expect(events.filter((e) => /^run\./.test(e.type)).map((e) => e.type)).toEqual(["run.cancelled"]);
+    // The tokens of the turn that was made are told: the hub counts a stopped run's spending too.
+    expect(end?.usage).toMatchObject({ input_tokens: 1000, output_tokens: 20 });
+    expect(end?.output).toBeUndefined();
   });
 });
 

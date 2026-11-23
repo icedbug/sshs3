@@ -503,14 +503,12 @@ describe("waiting for a person", () => {
   it("gives the time spent waiting back to the run, so a late approval still finds it alive", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { ToolBroker } = await import("../../src/main/ai/hub/ToolBroker");
-    const waited: number[] = [];
     const broker = new ToolBroker({} as never, {
       context: async () => ({ ok: true }),
       memory: async () => ({}),
       file: async () => ({}),
       changed: () => {},
       approvalWaitMs: () => 30 * MIN,
-      waited: (_task, ms) => waited.push(ms),
     });
     disposals.push(() => (broker as unknown as { dispose?: () => unknown }).dispose?.());
     const task = { ...waiting("b1"), status: "running", changes: [] } as unknown as AgentTask;
@@ -520,7 +518,6 @@ describe("waiting for a person", () => {
     await vi.advanceTimersByTimeAsync(20 * MIN); // longer than the run's 15 minutes
     broker.approve(task.id, "x1", true);
     expect(await asked).toBe(true);
-    expect(waited).toEqual([20 * MIN]);
     // The capability moved with the wait: it is still good.
     expect(await broker.invoke(key, { action: "context" } as never)).toEqual({ ok: true });
 

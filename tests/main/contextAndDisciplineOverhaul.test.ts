@@ -2,11 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ContextService,
   createUntrustedNonce,
-  partitionContextSnapshot,
   partitionMemoriesByTierAndBudget,
   resolveWorkspaceRules,
   scopedMemory,
-  serializePartitionedSnapshot,
   spotlightUntrustedData,
   spotlightUntrustedDataWithMeta,
   summarizeSkillTrigger,
@@ -178,10 +176,6 @@ describe("ContextService snapshot partitioning & prompt caching", () => {
     expect(keys.indexOf("inventory")).toBeLessThan(keys.indexOf("observedAt"));
     expect(keys.indexOf("workspaceRules")).toBeLessThan(keys.indexOf("terminals"));
     expect(keys.indexOf("kbDocuments")).toBeLessThan(keys.indexOf("recentTeamActivity"));
-
-    const repartitioned = partitionContextSnapshot(full);
-    expect(repartitioned.stablePrefix.observedAt).toBeUndefined();
-    expect(repartitioned.volatileDelta.observedAt).toBe(full.observedAt);
   });
 
   it("bounds volatile fields before serialization so spotlight delimiters are never sliced mid-JSON", () => {
@@ -215,9 +209,9 @@ describe("ContextService snapshot partitioning & prompt caching", () => {
       ],
     });
 
-    const serialized = serializePartitionedSnapshot(partitioned, { maxVolatileChars: 3500 });
-    const parsedPrefix = JSON.parse(serialized.stablePrefixJson);
-    const parsedDelta = JSON.parse(serialized.volatileDeltaJson);
+    // As it is sent: through JSON and back.
+    const parsedPrefix = JSON.parse(JSON.stringify(partitioned.stablePrefix));
+    const parsedDelta = JSON.parse(JSON.stringify(partitioned.volatileDelta));
 
     expect(parsedPrefix.inventory).toHaveLength(2);
     expect(parsedDelta.target.output).toContain('<untrusted_data source="terminal:web01" nonce="fixednonce1">');

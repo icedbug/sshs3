@@ -163,22 +163,6 @@ export function extractErrorSignature(
 }
 
 /**
- * Checks whether a skill's normalized `errorSignature` matches an observed failure.
- */
-export function matchesErrorSignature(
-  skill: Pick<MemoryEntry, "errorSignature">,
-  failedCommand: string,
-  outputSnippet: string,
-): boolean {
-  if (!skill.errorSignature) return false;
-  const skillSig = normalizeErrorSignature(skill.errorSignature);
-  const observedSig = normalizeErrorSignature(
-    extractErrorSignature(failedCommand, outputSnippet),
-  );
-  return Boolean(skillSig && observedSig && skillSig === observedSig);
-}
-
-/**
  * Whether a command only made sense for the file or the moment it was written for: guarded by a
  * checksum of the file as it was, an edit of one numbered line, a text written in place, or a name
  * with that day's date in it. Run again later it is refused or changes the wrong line, so it is a

@@ -3,7 +3,7 @@ import { usesResponsesApi } from "../../src/shared/types/ai";
 import type { AgentTask } from "../../src/shared/types/aiHub";
 import type { HermesModelConfig } from "../../src/main/ai/HermesManager";
 import type { RunEvent } from "../../src/main/ai/hub/AgentRuntime";
-import { DirectAgentRuntime, EndpointCircuitBreakerRegistry, formatToolOutputForModel, type DirectRuntimeOptions } from "../../src/main/ai/hub/DirectAgentRuntime";
+import { DirectAgentRuntime, EndpointCircuitBreakerRegistry, type DirectRuntimeOptions } from "../../src/main/ai/hub/DirectAgentRuntime";
 
 const task: AgentTask = {
   id: "test", mode: "advice", status: "running", title: "Read", messages: [{ id: "q", role: "user", text: "Read", at: 1 }],
@@ -111,15 +111,6 @@ describe("provider protocol boundaries", () => {
     expect(history).not.toContain("fixture-credential-value");
     expect(history.includes("203.0.113.84")).toBe(mode === "off");
     expect(history.includes("person@example.invalid")).toBe(mode === "off");
-  });
-
-  it("keeps the existing disk mask when an oversized model tool result spills", async () => {
-    const content = "Address 203.0.113.84 at the front\n" + "padding\n".repeat(100) + " end";
-    const spillArtifact = vi.fn(() => ({ id: "test-report" }));
-    const prompt = await formatToolOutputForModel(content, { piiMode: "standard", maxChars: 256, spillArtifact });
-    expect(prompt).toContain("203.0.113.84");
-    expect(spillArtifact).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("[ip redacted]") }));
-    expect(spillArtifact).toHaveBeenCalledWith(expect.objectContaining({ content: expect.not.stringContaining("203.0.113.84") }));
   });
 
   it("reads the spare key outside model-visible context", async () => {

@@ -56,13 +56,6 @@ export function freshnessThresholdDays(
   return STALE_AFTER_DAYS;
 }
 
-/** Days since a page was last edited or proven in a verified run. */
-export function pageFreshnessAgeDays(page: KbPage, use?: KbPageUse, now = Date.now()): number {
-  const lastProvenAt = Math.max(use?.lastProvenAt ?? 0, page.lastProvenAt ?? 0);
-  const verifiedAt = Math.max(page.updatedAt, lastProvenAt);
-  return Math.max(0, (now - verifiedAt) / DAY);
-}
-
 export function lintKnowledgeBase(input: {
   pages: KbPage[];
   docs: KbDocument[];

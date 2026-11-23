@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { createLogger } from "../log";
-import { wrapWithOsSandbox, type OsSandboxOptions } from "./hub/AcpRuntime";
 import { boundedContext } from "./hub/privacy";
 const hermesLog = createLogger("hermes");
 
@@ -48,45 +47,6 @@ export interface HermesEndpoint {
 type SpawnFn = typeof nodeSpawn;
 type FetchFn = typeof fetch;
 
-export interface HermesSandboxOptions {
-  /** Opt-in OS sandbox wrapping for the local Hermes sidecar process. */
-  enabled?: boolean;
-  /**
-   * Hardened mode: refuse to start unsandboxed when no OS sandbox backend
-   * (`sandbox-exec` / `bwrap`) is available. When false (default), desktop
-   * dev environments gracefully fall back to unsandboxed execution.
-   */
-  hardened?: boolean;
-  /** Outbound domain allowlist enforced/propagated to the sidecar spawn. */
-  allowedDomains?: string[];
-  /** Additional readable paths inside the OS sandbox. */
-  readPaths?: string[];
-  /** Additional writable paths inside the OS sandbox. */
-  writePaths?: string[];
-  /** Injectable platform override for unit tests. */
-  platform?: NodeJS.Platform;
-  /** Injectable binary availability check for unit tests. */
-  hasBinary?: (binary: string) => boolean;
-}
-
-export interface HermesSpawnInput {
-  command: string;
-  args: string[];
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-}
-
-export interface HermesSpawnPlan extends HermesSpawnInput {
-  sandboxed: boolean;
-  backend: "sandbox-exec" | "bwrap" | "custom" | "none";
-  allowedDomains: string[];
-  reason?: string;
-}
-
-export type HermesSpawnWrapper = (
-  plan: HermesSpawnPlan,
-) => HermesSpawnPlan | Promise<HermesSpawnPlan>;
-
 export interface HermesManagerOptions {
   toolEndpoint?: { url: string; key: string };
   runtimeDir?: string;
@@ -95,103 +55,9 @@ export interface HermesManagerOptions {
   fetch?: FetchFn;
   /** How long to wait for /health after starting. */
   startTimeoutMs?: number;
-  /** Optional OS sandbox / domain-allowlist configuration for the sidecar spawn. */
-  sandbox?: HermesSandboxOptions;
-  /** Convenience outbound domain allowlist for the sidecar spawn. */
-  allowedDomains?: string[];
-  /** Optional custom wrapper hook for sidecar spawns (e.g. proxy or custom sandbox). */
-  spawnWrapper?: HermesSpawnWrapper;
 }
 
 const HEALTH_POLL_MS = 250;
-
-function normalizeDomainEntry(raw: string): string | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  try {
-    if (trimmed.includes("://")) return new URL(trimmed).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
-  const withoutPort = trimmed.replace(/:\d+$/, "").toLowerCase();
-  return withoutPort || undefined;
-}
-
-/**
- * Computes the normalized outbound domain allowlist for a Hermes sidecar run:
- * always permits loopback for local API / ToolBroker calls, plus the active
- * model endpoint host and any explicitly configured domains.
- */
-export function resolveHermesAllowedDomains(
-  model?: HermesModelConfig,
-  extraDomains?: string[],
-  toolEndpointUrl?: string,
-): string[] {
-  const domains = new Set<string>(["127.0.0.1", "localhost"]);
-  const add = (value: string | undefined): void => {
-    if (!value) return;
-    const normalized = normalizeDomainEntry(value);
-    if (normalized) domains.add(normalized);
-  };
-  add(toolEndpointUrl);
-  if (model) {
-    if ("baseUrl" in model && model.baseUrl) {
-      add(model.baseUrl);
-    } else if (model.kind === "anthropic") {
-      domains.add("api.anthropic.com");
-    } else if (model.kind === "openai-codex") {
-      domains.add("chatgpt.com");
-      domains.add("api.openai.com");
-    }
-  }
-  for (const entry of extraDomains ?? []) add(entry);
-  return [...domains];
-}
-
-/**
- * Wraps a Hermes sidecar spawn with an OS sandbox (`sandbox-exec` / `bwrap`)
- * and domain-allowlist metadata. Falls back gracefully on desktop dev
- * environments when an OS sandbox is unavailable unless `hardened` is true.
- */
-export async function wrapHermesSidecarSpawn(
-  input: HermesSpawnInput,
-  options: HermesSandboxOptions & { spawnWrapper?: HermesSpawnWrapper } = {},
-): Promise<HermesSpawnPlan> {
-  const sandboxRequested = Boolean(options.enabled || options.hardened);
-  const allowedDomains = options.allowedDomains ?? ["127.0.0.1", "localhost"];
-  const env: NodeJS.ProcessEnv = { ...input.env };
-  if (sandboxRequested || (options.allowedDomains && options.allowedDomains.length > 0)) {
-    env.SSHS3_ALLOWED_DOMAINS = allowedDomains.join(",");
-  }
-
-  const sandboxOpts: OsSandboxOptions = {
-    enabled: sandboxRequested,
-    failIfUnavailable: Boolean(options.hardened),
-    cwd: input.cwd,
-    readPaths: options.readPaths,
-    writePaths: options.writePaths,
-    allowedDomains,
-    allowNetwork: allowedDomains.length > 0 || !options.hardened,
-    platform: options.platform,
-    hasBinary: options.hasBinary,
-    env,
-  };
-  const wrapped = wrapWithOsSandbox(input.command, input.args, sandboxOpts);
-  let plan: HermesSpawnPlan = {
-    command: wrapped.command,
-    args: wrapped.args,
-    cwd: input.cwd,
-    env,
-    sandboxed: wrapped.sandboxed,
-    backend: wrapped.backend,
-    allowedDomains,
-    reason: wrapped.reason,
-  };
-  if (options.spawnWrapper) {
-    plan = await options.spawnWrapper(plan);
-  }
-  return plan;
-}
 
 export class HermesManager {
   private readonly runtimeDir: string;
@@ -199,9 +65,6 @@ export class HermesManager {
   private readonly spawnImpl: SpawnFn;
   private readonly fetchImpl: FetchFn;
   private readonly startTimeoutMs: number;
-  private readonly sandbox?: HermesSandboxOptions;
-  private readonly allowedDomains?: string[];
-  private readonly spawnWrapper?: HermesSpawnWrapper;
   private child: ChildProcess | null = null;
   private generation = 0;
   private endpoint: HermesEndpoint | null = null;
@@ -217,9 +80,6 @@ export class HermesManager {
     this.spawnImpl = options.spawn ?? nodeSpawn;
     this.fetchImpl = options.fetch ?? fetch;
     this.startTimeoutMs = options.startTimeoutMs ?? 60_000;
-    this.sandbox = options.sandbox;
-    this.allowedDomains = options.allowedDomains;
-    this.spawnWrapper = options.spawnWrapper;
   }
 
   /** The bundled runtime, or null when this build doesn't include one (e.g. a dev checkout). */
@@ -333,35 +193,10 @@ export class HermesManager {
       "run",
       "--no-supervise",
     ];
-    const configuredDomains = this.sandbox?.allowedDomains ?? this.allowedDomains;
-    const effectiveDomains =
-      this.sandbox?.enabled || this.sandbox?.hardened || configuredDomains || this.spawnWrapper
-        ? resolveHermesAllowedDomains(model, configuredDomains, this.toolEndpoint?.url)
-        : undefined;
-    const spawnPlan = await wrapHermesSidecarSpawn(
-      { command: python, args: baseArgs, cwd: this.homeDir, env },
-      {
-        ...this.sandbox,
-        ...(effectiveDomains ? { allowedDomains: effectiveDomains } : {}),
-        readPaths: [this.runtimeDir, ...(this.sandbox?.readPaths ?? [])],
-        writePaths: [this.homeDir, ...(this.sandbox?.writePaths ?? [])],
-        spawnWrapper: this.spawnWrapper,
-      },
-    );
-    if (!spawnPlan.sandboxed && (this.sandbox?.enabled || this.sandbox?.hardened)) {
-      hermesLog.warn("Hermes OS sandbox unavailable; falling back to unsandboxed sidecar", {
-        reason: spawnPlan.reason,
-      });
-    }
-    hermesLog.info("Starting Hermes", {
-      tag: manifest.tag,
-      port,
-      sandboxed: spawnPlan.sandboxed,
-      backend: spawnPlan.backend,
-    });
-    const child = this.spawnImpl(spawnPlan.command, spawnPlan.args, {
-      cwd: spawnPlan.cwd,
-      env: spawnPlan.env,
+    hermesLog.info("Starting Hermes", { tag: manifest.tag, port });
+    const child = this.spawnImpl(python, baseArgs, {
+      cwd: this.homeDir,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });

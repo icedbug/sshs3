@@ -815,12 +815,6 @@ export interface PartitionedContextSnapshot {
   volatileDelta: ContextSnapshotVolatileDelta;
 }
 
-export interface SerializedPartitionedSnapshot {
-  stablePrefixJson: string;
-  volatileDeltaJson: string;
-  combinedText: string;
-}
-
 function deterministicSortByIdOrName<T>(items: T[]): T[] {
   return [...items].sort((a, b) => {
     const ra = (a && typeof a === "object" ? a : {}) as Record<string, unknown>;
@@ -849,100 +843,6 @@ function stripInventoryObservedAt(items: InventoryEntry[]): StableInventoryRow[]
   return [...items]
     .map(({ observedAt: _observedAt, ...rest }) => rest)
     .sort((a, b) => a.id.localeCompare(b.id) || a.label.localeCompare(b.label));
-}
-
-/**
- * Serializes a partitioned context snapshot for prompt caching:
- * `stablePrefixJson` is deterministic and free of `observedAt: Date.now()`.
- * Volatile fields are individually bounded before serialization, and if
- * `maxVolatileChars` is exceeded, optional volatile fields are dropped at
- * whole-field boundaries so spotlighted delimiters are never sliced mid-JSON.
- */
-export function serializePartitionedSnapshot(
-  partitioned: PartitionedContextSnapshot,
-  options: { maxVolatileChars?: number } = {},
-): SerializedPartitionedSnapshot {
-  const stablePrefixJson = JSON.stringify(partitioned.stablePrefix);
-  const delta: ContextSnapshotVolatileDelta = { ...partitioned.volatileDelta };
-  const maxVolatileChars = options.maxVolatileChars;
-
-  let volatileDeltaJson = JSON.stringify(delta);
-  if (
-    typeof maxVolatileChars === "number" &&
-    Number.isFinite(maxVolatileChars) &&
-    maxVolatileChars > 0 &&
-    volatileDeltaJson.length > maxVolatileChars
-  ) {
-    const trimOrder: Array<keyof ContextSnapshotVolatileDelta> = [
-      "history",
-      "attachments",
-      "recentWorkforceRuns",
-      "recentTeamActivity",
-      "terminals",
-      "workspaceMemories",
-    ];
-    const trimmed: Record<string, unknown> = { ...delta };
-    for (const key of trimOrder) {
-      if (JSON.stringify(trimmed).length <= maxVolatileChars) break;
-      if (Array.isArray(trimmed[key]) && (trimmed[key] as unknown[]).length > 0) {
-        trimmed[key] = [];
-      }
-    }
-    if (JSON.stringify(trimmed).length > maxVolatileChars && trimmed.memoryTiers) {
-      trimmed.memoryTiers = {
-        ...delta.memoryTiers,
-        episodic: [],
-        archival: [],
-        formatted: "",
-      };
-    }
-    volatileDeltaJson = JSON.stringify(trimmed);
-  }
-
-  return {
-    stablePrefixJson,
-    volatileDeltaJson,
-    combinedText: `${stablePrefixJson}\n${volatileDeltaJson}`,
-  };
-}
-
-/**
- * Partitions an already-constructed snapshot object into a deterministic
- * `stablePrefix` (stripped of `observedAt`) and a `volatileDelta` block.
- */
-export function partitionContextSnapshot(
-  snapshot: Record<string, unknown>,
-): { stablePrefix: Record<string, unknown>; volatileDelta: Record<string, unknown> } {
-  const VOLATILE_KEYS = new Set([
-    "observedAt",
-    "terminals",
-    "recentTeamActivity",
-    "recentWorkforceRuns",
-    "target",
-    "attachments",
-    "history",
-    "targetLastReading",
-    "changedRecently",
-    "memoryTiers",
-  ]);
-  const stablePrefix: Record<string, unknown> = {};
-  const volatileDelta: Record<string, unknown> = {};
-
-  for (const key of Object.keys(snapshot).sort()) {
-    const value = snapshot[key];
-    if (VOLATILE_KEYS.has(key)) {
-      volatileDelta[key] = value;
-      continue;
-    }
-    if (key === "inventory" && Array.isArray(value)) {
-      stablePrefix[key] = stripInventoryObservedAt(value as InventoryEntry[]);
-    } else if (Array.isArray(value)) {
-      stablePrefix[key] = deterministicSortByIdOrName(value);
-    } else {
-      stablePrefix[key] = sortObjectKeysDeep(value);
-    }
-  }
-  return { stablePrefix, volatileDelta };
 }
 
 const RELATION_TEXT: Record<InfraGraphEdge["relation"], string> = {

@@ -495,8 +495,6 @@ export interface ToolDependencies {
   hooks?: LifecycleHook[];
   /** A run has started to wait for a person's answer about this change. */
   asking?(task: AgentTask, change: AgentChange): void;
-  /** A run stood still this long waiting for a person: that time is not the run's own. */
-  waited?(task: AgentTask, ms: number): void;
   /** The run asked for another action after it was told its budget is spent: end it. */
   budgetSpent?(task: AgentTask): void;
   /** Told that a command is not run a fourth time for the same answer, the agent kept asking: the run ends here. */
@@ -836,8 +834,8 @@ export class ToolBroker {
     this.grants.set(key, {
       task,
       commands: 0,
-      // A person's run has no time limit (maxMinutes 0). The hub's own background calls keep theirs,
-      // so that one that hangs does not hold its queue for ever.
+      // A run the hub starts has no time limit (maxMinutes 0), its own background calls included.
+      // Only a task that still carries one (the native Hermes bridge makes such tasks) expires.
       expiresAt: task.maxMinutes > 0 ? Date.now() + task.maxMinutes * 60_000 : Number.POSITIVE_INFINITY,
       busy: false,
     });
@@ -996,9 +994,9 @@ export class ToolBroker {
 
   /**
    * Waits for a person's answer. The time spent waiting is given back to the
-   * run: its capability and its time budget are both moved by as long as it
-   * stood still, so an answer that takes twenty minutes does not find a
-   * fifteen-minute run already dead.
+   * run: a capability that expires is moved by as long as the run stood still,
+   * so an answer that takes twenty minutes does not find a fifteen-minute
+   * capability already expired.
    */
   private async waitForPerson(
     task: AgentTask,
@@ -1026,9 +1024,9 @@ export class ToolBroker {
         timer,
       });
     });
+    // The run stood still this long waiting for a person: that time is not the run's own.
     const waited = Date.now() - started;
     for (const grant of this.grants.values()) if (grant.task.id === task.id) grant.expiresAt += waited;
-    this.deps.waited?.(task, waited);
     return answer;
   }
 
