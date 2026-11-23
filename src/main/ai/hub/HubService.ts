@@ -1049,6 +1049,8 @@ export class HubService {
   lastFactsTick = 0;
   /** What the bucket says each server was last read as, by whichever installation read it. */
   readonly factsHeads = new Map<string, { collectedAt: number; hash: string }>();
+  /** Each reading's head in the bucket as it was last looked at, by the mark its listing gave: one that has not changed is not downloaded again. */
+  readonly factsHeadSeen = new Map<string, { version: string; serverId: string; done: boolean }>();
 
   private static changeLine(change: FactChange, name: string): string {
     return `${new Date(change.at).toISOString().slice(0, 16).replace("T", " ")} UTC · ${name}: ${change.text}`;

@@ -321,7 +321,7 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
     setDemoModeForTesting(false);
     const { service, bucket } = await createService({ publishPresence: false, pollIntervalMs: 5, presenceIntervalMs: 5 });
     await service.load();
-    await service.syncNow({ forcePush: true });
+    await service.syncNow();
     await service.pollOnce();
     await service.publishAndRefreshPresence();
     service.schedulePresenceUpdate();
@@ -342,7 +342,7 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
     const { service, bucket } = await createService();
     await service.load();
 
-    await service.syncNow({ forcePush: true });
+    await service.syncNow();
 
     expect(bucket.log).toEqual(expect.arrayContaining([`stat ${WORKSPACE_OBJECT}`, `writeFile ${WORKSPACE_OBJECT}`]));
     expect(service.getStatus().connected).toBe(true);
@@ -353,7 +353,7 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
     const { service, bucket, providerFactory, getLocalState } = await createService();
     await service.load();
 
-    await expect(service.syncNow({ forcePush: true })).rejects.toThrow(S3_DISABLED);
+    await expect(service.syncNow()).rejects.toThrow(S3_DISABLED);
 
     expect(providerFactory).not.toHaveBeenCalled();
     expect(getLocalState).not.toHaveBeenCalled();

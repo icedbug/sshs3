@@ -279,6 +279,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [s3Syncing, setS3Syncing] = useState(false);
   const [s3CopyFeedback, setS3CopyFeedback] = useState(false);
   const [s3StatusMsg, setS3StatusMsg] = useState<string | null>(null);
+  const [s3InviteError, setS3InviteError] = useState<string | null>(null);
 
 
   // AI Workspace Command Center & Right Column state
@@ -777,12 +778,19 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
-  const handleCopyS3Invite = () => {
-    const code = hub?.s3Workspace?.inviteCode;
-    if (!code) return;
-    void navigator.clipboard?.writeText(code);
-    setS3CopyFeedback(true);
-    setTimeout(() => setS3CopyFeedback(false), 2000);
+  // The code holds the bucket's secret key, so it is not part of the hub's state: it is asked for when
+  // the button is pressed and copied. It comes in that one answer, which the next answer replaces.
+  const handleCopyS3Invite = async () => {
+    setS3InviteError(null);
+    try {
+      const code = (await hubRequest({ action: 'workspace-s3-invite' })).reply?.s3Invite?.code;
+      if (!code) throw new Error('No invite code came back.');
+      await navigator.clipboard.writeText(code);
+      setS3CopyFeedback(true);
+      setTimeout(() => setS3CopyFeedback(false), 2000);
+    } catch (err) {
+      setS3InviteError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleCreateClusterNode = async (e: React.FormEvent) => {
@@ -2320,12 +2328,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode && (
+                  {hub?.s3Workspace?.configured && hub.s3Workspace.canInvite && (
                     <button
                       type="button"
                       data-testid="copy-s3-invite-btn"
-                      onClick={handleCopyS3Invite}
-                      title="Copy the S3 invite code (sshs3-s3://...) to send to your teammates"
+                      onClick={() => void handleCopyS3Invite()}
+                      title="Copy the invite code (sshs3-s3://...) for a teammate. It holds the bucket's secret key, so send it only to people who may use the bucket."
                       className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
                     >
                       {s3CopyFeedback ? (
@@ -2376,6 +2384,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
               {hub?.s3Workspace?.error && (
                 <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
                   S3 sync error: {hub.s3Workspace.error}
+                </div>
+              )}
+              {s3InviteError && (
+                <div data-testid="s3-invite-error" className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
+                  The invite code was not copied: {s3InviteError}
+                </div>
+              )}
+              {hub?.s3Workspace?.notice && (
+                <div data-testid="s3-notice" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
+                  {hub.s3Workspace.notice}
                 </div>
               )}
 

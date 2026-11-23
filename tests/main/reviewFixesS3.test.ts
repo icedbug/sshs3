@@ -254,10 +254,14 @@ describe("S3.2 inbox snooze and acknowledgement", () => {
     hub.store.data.tasks.push(makeTask({ id: "t-q", status: "waiting", changes: [pendingChange("c-q")] }));
     await p.flushInbox(Date.now());
     expect(send).not.toHaveBeenCalled();
+    // Held, not dropped (tests/main/heldNotifications.test.ts): it is kept to be told when the quiet is over.
+    expect((p.notifyStore.data as { held?: { id: string }[] }).held?.map((h) => h.id)).toEqual(["approval:c-q"]);
     await hub.request({ action: "notify-settings-save", quietHours: { enabled: false } } as never);
     hub.store.data.tasks.push(makeTask({ id: "t-q2", status: "waiting", changes: [pendingChange("c-q2")] }));
     await p.flushInbox(Date.now());
-    expect(send).toHaveBeenCalledTimes(1);
+    // The new one as it comes, and one message for what was held.
+    expect(send).toHaveBeenCalledTimes(2);
+    expect((p.notifyStore.data as { held?: unknown[] }).held).toEqual([]);
   });
 
   it("isQuietHours reads a named time zone and minutes", () => {
@@ -278,7 +282,8 @@ describe("S3.2 inbox snooze and acknowledgement", () => {
     expect(store.data.quietHours).toBeUndefined();
     expect(store.data.noiseBudgetPerHour).toBe(5);
     expect(store.data.flapCooldownMs).toBeUndefined();
-    expect(store.data.escalationMinutes).toEqual([5, 15]);
+    // A setting of a function nothing ever called is not carried on.
+    expect(store.data).not.toHaveProperty("escalationMinutes");
   });
 });
 
@@ -417,16 +422,17 @@ describe("S3.5 request checks", () => {
 });
 
 describe("S3.6 the main session's HubService fixes", () => {
-  it("mcp-save keeps tool policies, and trust in readOnlyHint is dropped when the address changes", async () => {
+  it("mcp-save keeps tool policies over a rename; when the address changes, trust in readOnlyHint and what was allowed are dropped, and what was denied stays", async () => {
     const hub = await createHub();
     await hub.request({ action: "mcp-save", server: { id: "m1", name: "Docs", transport: "http", url: "https://mcp.example.com/a", enabled: false } } as never);
     const list = () => hub.store.data.mcpServers ?? [];
     const first = list().find((s) => s.id === "m1")!;
-    hub.store.data.mcpServers = [{ ...first, toolPolicies: { search: "allow" }, trustReadOnlyHint: true }];
+    hub.store.data.mcpServers = [{ ...first, toolPolicies: { search: "allow", remove: "deny" }, trustReadOnlyHint: true }];
     await hub.request({ action: "mcp-save", server: { id: "m1", name: "Docs 2", transport: "http", url: "https://mcp.example.com/a", enabled: false } } as never);
-    expect(list()[0]).toMatchObject({ name: "Docs 2", toolPolicies: { search: "allow" }, trustReadOnlyHint: true });
+    expect(list()[0]).toMatchObject({ name: "Docs 2", toolPolicies: { search: "allow", remove: "deny" }, trustReadOnlyHint: true });
+    // It is another server now: "allow" was said about the old one (tests/main/mcpToolTrust.test.ts).
     await hub.request({ action: "mcp-save", server: { id: "m1", name: "Docs 2", transport: "http", url: "https://other.example.com/a", enabled: false } } as never);
-    expect(list()[0].toolPolicies).toEqual({ search: "allow" });
+    expect(list()[0].toolPolicies).toEqual({ remove: "deny" });
     expect(list()[0].trustReadOnlyHint).toBeFalsy();
   });
 

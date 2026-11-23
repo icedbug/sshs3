@@ -387,7 +387,11 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
 
     const jacobStatus = syncJacob.getStatus();
     expect(jacobStatus.configured).toBe(true);
-    expect(jacobStatus.inviteCode?.startsWith('sshs3-s3://')).toBe(true);
+    // The status never carries the invite code (it holds the secret key): it is asked for by itself.
+    expect(JSON.stringify(jacobStatus)).not.toContain('sshs3-s3://');
+    expect(JSON.stringify(jacobStatus)).not.toContain('SECRETJACOB');
+    const jacobInvite = syncJacob.inviteCode();
+    expect(jacobInvite.startsWith('sshs3-s3://')).toBe(true);
 
     // Erik joins using Jacob's 1-click invite code!
     const syncErik = new S3WorkspaceSyncService(
@@ -421,7 +425,7 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       { providerFactory }
     );
 
-    await syncErik.configure(undefined, jacobStatus.inviteCode!);
+    await syncErik.configure(undefined, jacobInvite);
     const erikStatus = syncErik.getStatus();
     expect(erikStatus.configured).toBe(true);
     expect(erikStatus.error).toBeUndefined();
@@ -444,7 +448,7 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
     // Jacob deletes node-k8s-1 and records a tombstone
     jacobServers = [];
     jacobDeletedServers['node-k8s-1'] = '2026-10-28T15:00:00.000Z';
-    await syncJacob.syncNow({ forcePush: true });
+    await syncJacob.syncNow();
 
     // Erik polls S3 and sees node-k8s-1 removed via tombstone (does not return as zombie)
     await syncErik.pollOnce();
@@ -571,14 +575,14 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
     await sara.service.configure(cfg);
 
     for (let round = 0; round < 3; round++) {
-      await anna.service.syncNow({ forcePush: true });
-      await sara.service.syncNow({ forcePush: true });
+      await anna.service.syncNow();
+      await sara.service.syncNow();
     }
     const settled = bucket.get('b/team/workspace.json')!.content.toString('utf8');
     writes = 0;
     for (let round = 0; round < 5; round++) {
-      await anna.service.syncNow({ forcePush: true });
-      await sara.service.syncNow({ forcePush: true });
+      await anna.service.syncNow();
+      await sara.service.syncNow();
       await anna.service.pollOnce();
       await sara.service.pollOnce();
     }
@@ -595,12 +599,12 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       ...anna.state.memories,
       { id: 'm-2', title: 'Disk', text: 'Alert at 90%', scope: 'workspace', kind: 'memory', updatedAt: 50 } as MemoryEntry,
     ];
-    await anna.service.syncNow({ forcePush: true });
+    await anna.service.syncNow();
     expect(writes).toBe(1);
     for (let round = 0; round < 3; round++) {
       await sara.service.pollOnce();
       await anna.service.pollOnce();
-      await sara.service.syncNow({ forcePush: true });
+      await sara.service.syncNow();
     }
     expect(writes).toBe(1);
     expect(sara.state.memories.map((m) => m.id)).toEqual(['m-1', 'm-2']);

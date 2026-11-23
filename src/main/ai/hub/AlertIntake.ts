@@ -6,7 +6,7 @@ import type {
   WorkTicket,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
-import { clip } from "./privacy";
+import { clip, oneLine, plainLines } from "./privacy";
 
 /**
  * Alerts from outside (Alertmanager, Grafana, PagerDuty, or any JSON a
@@ -14,8 +14,12 @@ import { clip } from "./privacy";
  * looking before a person is awake. Pure functions: recognising a payload,
  * finding what it is about, and deciding who gets it.
  *
- * An alert's text comes from outside and is data. It is never put where an
- * agent would read it as an instruction.
+ * An alert's text comes from outside and is data. Every field of it is made
+ * one line (`cleanAlert`), and its words go into the ticket as a quoted block
+ * that says they are data (`alertTicketText`). The title is also the ticket's
+ * title, which the agent reads as a line of its own. Nothing here checks what
+ * the words say: a model can still be misled by them, which is why a ticket
+ * from an alert is marked as coming from outside.
  */
 
 export interface IncomingAlert {
@@ -98,12 +102,43 @@ function fromAlertmanager(a: Record<string, unknown>, source: string): IncomingA
 }
 
 /**
+ * An alert with every field as a ticket may carry it. A line break in a label, a title or a source
+ * would otherwise end the quoted block the alert's words are put in, and what follows would read as
+ * the ticket's own text. Each field becomes one line; the text keeps its lines, as plain lines. The
+ * source is a system's name: letters, digits and a few marks, and short. The fingerprint is left as it
+ * was made, so an alert that is open keeps its ticket.
+ */
+export function cleanAlert(alert: IncomingAlert): IncomingAlert {
+  const labels: Record<string, string> = {};
+  for (const [k, v] of Object.entries(alert.labels ?? {})) {
+    const key = oneLine(String(k));
+    const value = oneLine(String(v));
+    if (key && value) labels[key] = value;
+  }
+  const source = oneLine(String(alert.source ?? "")).replace(/[^\p{L}\p{N} ._/-]/gu, "").trim().slice(0, 40);
+  return {
+    ...alert,
+    fingerprint: oneLine(String(alert.fingerprint ?? "")),
+    title: oneLine(String(alert.title ?? "")),
+    subjects: (alert.subjects ?? []).map((s) => oneLine(String(s))).filter(Boolean),
+    text: plainLines(String(alert.text ?? "")).join("\n"),
+    source: source || "Alert",
+    labels,
+    ...(alert.startsAt !== undefined ? { startsAt: oneLine(String(alert.startsAt)) } : {}),
+  };
+}
+
+/**
  * The alerts in a posted body. Recognises Alertmanager and Grafana (a list
  * under `alerts`), PagerDuty (an `event` with incident data), and otherwise
  * takes a title and a message from the usual field names. Returns nothing for
  * a body it can make no alert of.
  */
 export function parseAlerts(body: unknown): IncomingAlert[] {
+  return readAlerts(body).map(cleanAlert);
+}
+
+function readAlerts(body: unknown): IncomingAlert[] {
   if (!body || typeof body !== "object") return [];
   const b = body as Record<string, unknown>;
   if (Array.isArray(b.alerts)) {
@@ -548,14 +583,17 @@ export function alertName(alert: Pick<IncomingAlert, "title" | "labels">): strin
 
 /**
  * What the ticket for an alert says. The alert's own words are marked as
- * such. `pages`: the knowledge base page for it, when there is one; `known`
- * when an earlier run on the same alert worked from that page.
+ * such, and every line of them is quoted. `pages`: the knowledge base page
+ * for it, when there is one; `known` when an earlier run on the same alert
+ * worked from that page.
  */
 export function alertTicketText(
-  alert: IncomingAlert,
+  given: IncomingAlert,
   changes: string[] = [],
   pages: { id: string; title: string; known: boolean }[] = [],
 ): string {
+  // Whoever built the alert: no field of it can end the quoted block.
+  const alert = cleanAlert(given);
   const page = pages
     .map((p) =>
       p.known

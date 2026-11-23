@@ -1,10 +1,11 @@
 import type { HubReply } from "../../../../shared/types/aiHub";
-import { searchPages } from "../KbCompile";
+import { isPrivateKbPage, searchPages } from "../KbCompile";
 import {
   alertTarget,
   alertName,
   alertTicketText,
   appendCorrelatedAlert,
+  cleanAlert,
   correlateAlert,
   hookSecretMatches,
   newHookSecret,
@@ -58,9 +59,12 @@ export class AlertsPart {
    * The page for an alert: one a run on an earlier ticket for the same alert
    * worked from, else the troubleshooting page that best matches its words.
    * The ticket names it, so the agent opens it instead of starting from nothing.
+   * Only a page the team shares: the ticket is on the team's board, and a private page's title on it
+   * would tell the team what the page is about.
    */
   pagesForAlert(this: HubService, alert: IncomingAlert, target?: string): { id: string; title: string; known: boolean }[] {
-    const pages = this.pagesWithUse();
+    const privateDocs = this.privateDocumentIds();
+    const pages = this.pagesWithUse().filter((p) => !isPrivateKbPage(p, privateDocs));
     const name = alertName(alert).toLowerCase();
     const bound = pages.filter((p) => (p.alerts ?? []).some((a) => a.toLowerCase() === name));
     if (bound.length)
@@ -99,7 +103,8 @@ export class AlertsPart {
       const target = alertTarget(alert, servers);
       if (target) for (const server of servers) if (server.name === target || server.id === target || server.cluster === target) affected.add(server.id);
     };
-    for (const alert of alerts.slice(0, 50)) {
+    // Every field one line, whoever built the alert: its title, source and name go into ticket lines and notes.
+    for (const alert of alerts.slice(0, 50).map(cleanAlert)) {
       const open = live(this.store.data.workTickets).find(
         (t) => t.alert?.fingerprint === alert.fingerprint && t.status !== "done",
       );

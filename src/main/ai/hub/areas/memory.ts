@@ -144,21 +144,64 @@ export class MemoryPart {
   }
 
   /**
+   * Whether a conversation worked on a server marked personal, or was shown one of its terminals.
+   * What is learned from a conversation becomes team memory and shared pages, and with a team bucket
+   * the conversation itself is uploaded for a teammate's app to read. So one about a personal server
+   * is not learned from at all. Told by the terminal's own server while the terminal is open, and by
+   * the server's name or address afterwards.
+   */
+  onPersonalServer(this: HubService, task: AgentTask): boolean {
+    const personal = this.getKnownServers().filter((s) => s.shared === false);
+    if (!personal.length) return false;
+    const ids = new Set(personal.map((s) => s.id));
+    const names = new Set(
+      personal
+        .flatMap((s) => [s.name, s.host, s.username && s.host ? `${s.username}@${s.host}` : ""])
+        .filter(Boolean)
+        .map((v) => v.trim().toLowerCase()),
+    );
+    const named = (label: string | undefined): boolean => Boolean(label && names.has(label.trim().toLowerCase()));
+    const open = (sessionId: string | undefined): boolean => {
+      const profileId = sessionId ? this.terminals.get(sessionId)?.profileId : undefined;
+      return Boolean(profileId && ids.has(profileId));
+    };
+    if (open(task.target?.sessionId) || named(task.target?.label)) return true;
+    // A command or a file change on a personal server, whatever the conversation's own terminal was.
+    if (task.changes.some((c) => c.kind !== "setting" && named(c.target))) return true;
+    // No server of its own: a personal server's terminal that was put before it counts too.
+    return (task.sources ?? []).some((s) => s.id.startsWith("terminal:") && (open(s.id.slice("terminal:".length)) || named(s.label)));
+  }
+
+  /**
    * Hands a record over to be read for team memory. With a team bucket it is
    * uploaded to the shared queue at once and read later by whichever
    * teammate's app is running (this one included), so closing this computer
    * right after the work does not lose it. Without a bucket, or when the
    * upload fails, this app reads it itself now.
+   *
+   * `about`: the conversation the record is of. One about a personal server is
+   * left out: neither uploaded nor read here (see onPersonalServer).
    */
   async queueForLearning(this: HubService,
     source: DistillSource,
     query: string,
+    about?: AgentTask,
   ): Promise<void> {
     if (this.store.data.preferences.proposeMemories === false) return;
     if (isDemoMode()) return;
     const queued = this.store.data.queuedSourceIds ?? [];
     const seen = this.store.data.distilledSourceIds ?? [];
     if (queued.includes(source.id) || seen.includes(source.id)) return;
+    if (about) {
+      // Which servers are personal is asked of the app: at a start they may not have been read yet.
+      if (!this.getKnownServers().length) await this.collectExtraContext().catch(() => undefined);
+      if (this.onPersonalServer(about)) {
+        // Left out for good: it is not looked at again at the next start, when its terminal is gone
+        // and only a name is left to tell by.
+        this.store.data.distilledSourceIds = [...seen, source.id].slice(-300);
+        return;
+      }
+    }
     const queue = this.queue();
     if (queue) {
       try {
@@ -303,6 +346,7 @@ export class MemoryPart {
           transcript: taskTranscript(task),
         },
         `${task.title} ${task.target?.label ?? ""}`,
+        task,
       );
   }
 

@@ -84,6 +84,29 @@ export function decryptSecretValue(value: string): string {
   return '';
 }
 
+/**
+ * A stored secret field, read for use. One that is encrypted and cannot be
+ * decrypted on this start comes back empty, as from decryptSecretValue, and
+ * with `kept`: the ciphertext as it was stored. A store that saves the empty
+ * value back destroys the secret for good, after one start with the keyring
+ * locked or missing. It has to write `kept` back instead (sealSecretValue),
+ * until the secret is read on a later start or a person enters a new one.
+ */
+export function openSecretValue(stored: string): { value: string; kept?: string } {
+  const value = decryptSecretValue(stored);
+  return value === '' && isEncryptedSecret(stored) ? { value, kept: stored } : { value };
+}
+
+/** What a store writes for a secret field: the value encrypted, or, while there is none, the ciphertext that could not be read. */
+export function sealSecretValue(value: string | undefined, kept?: string): string {
+  return value ? encryptSecretValue(value) : (kept ?? '');
+}
+
+/** What a status says about a secret that could not be read on this start. `what` begins the sentence: "The bot's token". */
+export function unreadSecretNote(what: string): string {
+  return `${what} could not be read on this start: the keyring that protects it was not available, or it was saved on another computer. It is kept as it was stored. Start sshs3 again with the keyring unlocked, or enter it again.`;
+}
+
 export function transformSecretFields<T extends object>(
   entry: T,
   fields: Array<keyof T>,

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { ListedObject } from "./LearningQueue";
 import type { ConditionalQueueStore } from "./WorkSync";
 
 /**
@@ -74,6 +75,27 @@ export class FileQueueStore implements ConditionalQueueStore {
     }
   }
 
+  /**
+   * The listing with a mark for each file that changes when the file does. A write puts a new file in
+   * the old one's place, so the file's own number, its size and its time together tell every change.
+   */
+  async listWithMeta(dir: string): Promise<ListedObject[]> {
+    const names = await this.list(dir);
+    const folder = this.at(dir);
+    const listed = await Promise.all(
+      names.map(async (name): Promise<ListedObject | undefined> => {
+        try {
+          const stat = await fs.stat(path.join(folder, name), { bigint: true });
+          return { name, version: `${stat.ino}:${stat.size}:${stat.mtimeNs}` };
+        } catch {
+          // Removed since it was listed: it is not there.
+          return undefined;
+        }
+      }),
+    );
+    return listed.filter((entry): entry is ListedObject => Boolean(entry));
+  }
+
   async read(relative: string): Promise<Buffer | undefined> {
     return FileQueueStore.readOrNothing(this.at(relative));
   }
@@ -132,6 +154,7 @@ export class FileQueueStore implements ConditionalQueueStore {
     return {
       supportsConditionalWrite: true,
       list: (dir) => this.list(dir),
+      listWithMeta: (dir) => this.listWithMeta(dir),
       read: (relative) => this.read(relative),
       readWithMeta: (relative) => this.readWithMeta(relative),
       write: async (relative, content, options) => {

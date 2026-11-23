@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { decryptSecretValue, encryptSecretValue } from "../../crypto/SecretFieldCrypto";
+import { openSecretValue, sealSecretValue } from "../../crypto/SecretFieldCrypto";
 import type { AtlassianAuth, AtlassianVariant } from "./Atlassian";
 
 export type AtlassianProduct = "jira" | "confluence";
@@ -52,19 +52,32 @@ export class AtlassianStore {
   data: AtlassianData = { version: 1 };
   private writes: Promise<void> = Promise.resolve();
   private loaded = false;
+  /**
+   * A token that was stored encrypted and could not be decrypted on this start: the ciphertext as it
+   * was stored. In memory the token is empty; a save writes the ciphertext back unchanged, so one
+   * start without the keyring does not lose the token for good.
+   */
+  private readonly unread: Partial<Record<AtlassianProduct, string>> = {};
 
   constructor(private readonly file: string) {}
+
+  /** The connection's token is stored but could not be read on this start. */
+  tokenUnread(product: AtlassianProduct): boolean {
+    return Boolean(this.unread[product]) && !this.data[product]?.token;
+  }
 
   async load(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
     try {
       const raw = JSON.parse(await fs.readFile(this.file, "utf8")) as Partial<AtlassianData>;
-      const read = (c: AtlassianConnection | undefined): AtlassianConnection | undefined =>
-        c && typeof c === "object" && typeof c.baseUrl === "string"
-          ? { ...c, variant: c.variant === "datacenter" ? "datacenter" : "cloud", token: decryptSecretValue(c.token ?? ""), enabled: c.enabled !== false }
-          : undefined;
-      this.data = { version: 1, jira: read(raw.jira), confluence: read(raw.confluence) };
+      const read = (c: AtlassianConnection | undefined, product: AtlassianProduct): AtlassianConnection | undefined => {
+        if (!c || typeof c !== "object" || typeof c.baseUrl !== "string") return undefined;
+        const token = openSecretValue(c.token ?? "");
+        if (token.kept) this.unread[product] = token.kept;
+        return { ...c, variant: c.variant === "datacenter" ? "datacenter" : "cloud", token: token.value, enabled: c.enabled !== false };
+      };
+      this.data = { version: 1, jira: read(raw.jira, "jira"), confluence: read(raw.confluence, "confluence") };
     } catch {
       this.data = { version: 1 };
     }
@@ -79,8 +92,12 @@ export class AtlassianStore {
   }
 
   save(): Promise<void> {
-    const sealed = (c: AtlassianConnection | undefined): AtlassianConnection | undefined => (c ? { ...c, token: encryptSecretValue(c.token) } : undefined);
-    const content = JSON.stringify({ version: 1, jira: sealed(this.data.jira), confluence: sealed(this.data.confluence) });
+    const sealed = (c: AtlassianConnection | undefined, product: AtlassianProduct): AtlassianConnection | undefined => {
+      // A connection that is gone, or one with a token a person entered, has no use for the old ciphertext.
+      if (!c || c.token) delete this.unread[product];
+      return c ? { ...c, token: sealSecretValue(c.token, this.unread[product]) } : undefined;
+    };
+    const content = JSON.stringify({ version: 1, jira: sealed(this.data.jira, "jira"), confluence: sealed(this.data.confluence, "confluence") });
     const write = async (): Promise<void> => {
       await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const temporary = `${this.file}.tmp-${process.pid}-${crypto.randomUUID()}`;

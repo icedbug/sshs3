@@ -19,7 +19,9 @@ import {
   pickDoneTransition,
   siteOf,
   storageToHtml,
+  issueTextHash,
   ticketIdFor,
+  ticketTextBefore,
   ticketTextFor,
   type AtlassianAuth,
   type AtlassianTransport,
@@ -29,6 +31,7 @@ import {
 import { htmlToMarkdown, type Extracted } from "./KbExtract";
 import { AtlassianStore, type AtlassianConnection, type AtlassianProduct } from "./AtlassianStore";
 import { guardUrl, request, type GuardOptions } from "./Notifier";
+import { unreadSecretNote } from "../../crypto/SecretFieldCrypto";
 import { clip, maskContext, safeError } from "./privacy";
 
 /** What the bridge needs of the hub: the board, and the few things only the hub knows. */
@@ -117,7 +120,8 @@ export class AtlassianBridge {
       doneTransition: c.doneTransition,
       closeOnApprove: c.closeOnApprove !== false,
       lastSyncAt: c.lastSyncAt,
-      lastError: c.lastError,
+      // A token that could not be read on this start is said here, where a failed read is said.
+      lastError: this.store.tokenUnread(product) ? unreadSecretNote("The token") : c.lastError,
       watched: c.watched,
     };
   }
@@ -133,7 +137,9 @@ export class AtlassianBridge {
     const sameSite = had ? new URL(had.baseUrl).origin === target.url.origin : false;
     // A token is for one site: at another address it is not sent along.
     const token = input.token?.trim() || (sameSite ? had?.token : "") || "";
-    if (!token) throw new Error(had && !sameSite ? "The address changed, so the token has to be entered again." : "The connection needs a token.");
+    // A token for this site that is stored but could not be read on this start stays as it is stored.
+    const kept = sameSite && this.store.tokenUnread(input.product);
+    if (!token && !kept) throw new Error(had && !sameSite ? "The address changed, so the token has to be entered again." : "The connection needs a token.");
     const email = variant === "cloud" ? (input.email ?? "").trim() : undefined;
     if (variant === "cloud" && !email) throw new Error("Atlassian Cloud signs in with the account's e-mail and an API token.");
     const projects = [...new Set((input.projects ?? had?.projects ?? []).map((p) => p.trim().toUpperCase()).filter(isProjectKey))].slice(0, 50);
@@ -168,7 +174,7 @@ export class AtlassianBridge {
 
   async test(product: AtlassianProduct): Promise<NonNullable<HubReply["atlassianTest"]>> {
     const auth = this.store.auth(product, true);
-    if (!auth) return { ok: false, error: "Save the address and the token first." };
+    if (!auth) return { ok: false, error: this.store.tokenUnread(product) ? unreadSecretNote("The token") : "Save the address and the token first." };
     try {
       if (product === "jira") {
         const me = await jira.myself(this.send, auth);
@@ -197,7 +203,7 @@ export class AtlassianBridge {
       const connection = this.store.data.jira;
       const auth = this.store.auth("jira");
       if (!connection || !auth || !connection.projects?.length) {
-        if (force) throw new Error("Connect Jira and choose at least one project first.");
+        if (force) throw new Error(this.store.tokenUnread("jira") ? unreadSecretNote("The token") : "Connect Jira and choose at least one project first.");
         return undefined;
       }
       if (!force && now - this.lastJiraSync < JIRA_SYNC_INTERVAL_MS) return undefined;
@@ -251,6 +257,7 @@ export class AtlassianBridge {
     // Removed from the board by a person: it stays removed, whatever happens to the issue.
     if (had?.deleted) return "skipped";
     const text = ticketTextFor(issue);
+    const textHash = issueTextHash(issue);
     if (!had) {
       if (issue.statusCategory === "done") return "skipped";
       let ticket: WorkTicket = {
@@ -260,7 +267,7 @@ export class AtlassianBridge {
         // Text from outside the team: a person reads it and moves it before any agent works on it.
         status: "backlog",
         outside: `Jira issue ${issue.key}`,
-        external: { system: "jira", key: issue.key, url: issue.url, status: issue.status, statusCategory: issue.statusCategory, remoteUpdatedAt: issue.updatedAt },
+        external: { system: "jira", key: issue.key, url: issue.url, status: issue.status, statusCategory: issue.statusCategory, remoteUpdatedAt: issue.updatedAt, textHash },
         createdBy: "Jira",
         createdAt: now,
         updatedAt: now,
@@ -271,6 +278,12 @@ export class AtlassianBridge {
     }
     const was = had.external;
     if (was && was.remoteUpdatedAt === issue.updatedAt && was.status === issue.status && had.title === text.title) return "same";
+    // Whether what is written in the issue was changed there since it was last read. A ticket from before
+    // the mark was kept is compared by its text, as it is made now and as it was made then.
+    const before = ticketTextBefore(issue);
+    const rewritten = was?.textHash
+      ? was.textHash !== textHash
+      : !((had.title === text.title || had.title === before.title) && (had.description === text.description || had.description === before.description));
     let next: WorkTicket = {
       ...had,
       title: text.title,
@@ -282,10 +295,14 @@ export class AtlassianBridge {
         status: issue.status,
         statusCategory: issue.statusCategory,
         remoteUpdatedAt: issue.updatedAt,
+        textHash,
       },
     };
     const moved = boardStatusFor(issue.statusCategory, had.status, was?.statusCategory);
-    if (moved && !(await this.host.ticketRuns(had))) {
+    // Whether an agent runs it is asked only where the answer decides something: it may be a question to the team's store.
+    let running = moved ? await this.host.ticketRuns(had) : undefined;
+    const movedNow = Boolean(moved) && running === false;
+    if (moved && movedNow) {
       next = withNote(
         { ...next, status: moved, claim: undefined, external: { ...next.external!, ...(moved === "backlog" ? { doneSentAt: undefined } : {}) } },
         {
@@ -297,7 +314,27 @@ export class AtlassianBridge {
         },
       );
     }
+    const notesBefore = new Set((next.comments ?? []).map((c) => c.id));
     next = await this.withJiraComments(auth, next, issue);
+    const newComments = (next.comments ?? []).filter((c) => !notesBefore.has(c.id)).length;
+    // A person read the ticket and put it in front of an agent. What was written in Jira after that
+    // (the issue's text, or a comment) is new text from outside that nobody here has read: the ticket
+    // waits in Backlog again. One that an agent is running stays with the run, with a note for whoever
+    // reviews its result. Review and Blocked wait for a person already.
+    if ((rewritten || newComments > 0) && !movedNow && (had.status === "todo" || had.status === "in_progress")) {
+      running ??= await this.host.ticketRuns(had);
+      const what = [rewritten ? "its text" : "", newComments ? (newComments === 1 ? "a new comment" : `${newComments} new comments`) : ""].filter(Boolean).join(" and ");
+      const back = had.status === "todo" && !running;
+      next = withNote(back ? { ...next, status: "backlog", claim: undefined } : next, {
+        // The same on every installation that reads it: the note is made once.
+        id: `jira-changed-${issue.id}-${issue.updatedAt}`,
+        at: now,
+        author: "Jira",
+        text: back
+          ? `${issue.key} was changed in Jira after this ticket was put in To do (${what}). Moved to Backlog: read it again, and move it back when it should be worked.`
+          : `${issue.key} was changed in Jira after this run started (${what}). The run works from what the ticket said before: read the change when you review its result.`,
+      });
+    }
     this.host.putTicket({ ...next, updatedAt: Math.max(now, had.updatedAt + 1) });
     return "updated";
   }

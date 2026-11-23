@@ -928,7 +928,13 @@ export interface S3WorkspaceSyncStatus {
   error?: string;
   /** Set when this process never syncs with the bucket (demo mode): why. Also shown as `error` once a bucket is configured. */
   syncDisabledReason?: string;
-  inviteCode?: string;
+  /** Something that happened to the bucket's data and was put right, for the person to know (the workspace file could not be read and was written again). Not a fault of the sync now. */
+  notice?: string;
+  /**
+   * This person may ask for the bucket's invite code (`workspace-s3-invite`). Only in what the
+   * interface is shown. The code itself holds the bucket's secret key and is never part of the status.
+   */
+  canInvite?: boolean;
 }
 export interface WorkspaceServerSummary {
   id: string;
@@ -1170,6 +1176,8 @@ export interface NotifyChannelView {
   includeCommand: boolean;
   alertMinSeverity?: "info" | "warning" | "critical";
   last?: { at: number; ok: boolean; status?: number; error?: string };
+  /** Its address or signing secret is stored but could not be decrypted on this start. It is kept; nothing is sent until it can be read or is entered again. */
+  secretUnread?: boolean;
 }
 
 /** A channel as it is saved from the form. `url` and `secret` are sent only when they are set or changed. */
@@ -1285,6 +1293,8 @@ export interface ExternalIssueRef {
   statusCategory: "new" | "indeterminate" | "done";
   /** The issue's own time of last change, as last read. */
   remoteUpdatedAt: number;
+  /** A hash of the issue's summary and description as last read. When it changes after a person put the ticket in To do, the ticket goes back to Backlog. */
+  textHash?: string;
   /** Comments this side wrote there: not read back as news. */
   postedCommentIds?: string[];
   /** The run whose result was written there as a comment. */
@@ -1944,7 +1954,8 @@ export interface KbDocument {
   titleFromSource?: boolean;
   /** The file this text was taken from, kept beside it. */
   /** `keptLocal`: its text needed masking, so the file stayed with the person who added it and is not in the team bucket. */
-  original?: { name: string; mime?: string; size: number; keptLocal?: boolean };
+  /** `withdraw`: it was made private while no team store was connected. A copy in the team's store, if one was ever uploaded, is removed when the store is next reached. */
+  original?: { name: string; mime?: string; size: number; keptLocal?: boolean; withdraw?: boolean };
   /** Set once the document was worked into the pages: when, and how many pages it touched. */
   compiled?: { at: number; pages: number };
   /** Hash of the text, so the same material is not added twice. */
@@ -2179,6 +2190,8 @@ export interface HubReply {
   runnerProbe?: { id: string; ok: boolean; detail: string };
   /** What a setting change made for the person alone, shown this once (`change-reveal`). */
   changeReveal?: { label: string; value: string };
+  /** The team bucket's invite code (`workspace-s3-invite`). It holds the bucket's secret key: for the person who asked, never for a model. */
+  s3Invite?: { code: string };
   /** A new code to link a chat account, shown this once. */
   chatLinkCode?: { service: ChatServiceName; code: string; expiresAt: number };
   /** Who the agent bot is, as the service said when its connection was saved. */
@@ -2797,6 +2810,8 @@ export type HubRequest =
     }
   | { action: "workspace-s3-sync-now" }
   | { action: "workspace-s3-disconnect" }
+  /** The team bucket's invite code, for the person who pressed the button that copies it. Refused for a member of a team server who is not an administrator. */
+  | { action: "workspace-s3-invite" }
   | {
       action: "inline-suggest";
       prompt: string;

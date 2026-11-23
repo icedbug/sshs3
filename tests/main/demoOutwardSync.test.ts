@@ -160,7 +160,7 @@ describe('S3 team workspace sync in demo mode', () => {
     await service.reloadFromDisk();
     await settle();
 
-    await expect(service.syncNow({ forcePush: true })).rejects.toThrow(S3_DISABLED);
+    await expect(service.syncNow()).rejects.toThrow(S3_DISABLED);
     expect(providerFactory).not.toHaveBeenCalled();
     expect(getLocalState).not.toHaveBeenCalled();
     expect(remote.calls).toEqual([]);

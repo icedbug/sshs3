@@ -15,7 +15,9 @@ import {
   type NotifyChannel,
   type NotifyItem,
 } from "../Notifier";
+import type { HeldNotice } from "../NotifyStore";
 import { isDemoMode } from "../demoWorkspace";
+import { unreadSecretNote } from "../../../crypto/SecretFieldCrypto";
 import { clip, safeError } from "../privacy";
 import { live } from "../WorkBoard";
 import { requiredText, integer } from "../hubHelpers";
@@ -78,6 +80,8 @@ export class InboxPart {
         includeCommand: c.includeCommand,
         alertMinSeverity: c.alertMinSeverity,
         last: c.last,
+        // Its address or signing secret is stored and could not be decrypted on this start: nothing is sent until it can.
+        ...(this.notifyStore.unreadOf(c.id).url || this.notifyStore.unreadOf(c.id).secret ? { secretUnread: true } : {}),
       })),
       publicUrl: this.publicUrl(),
       publicUrlFixed: Boolean(process.env.SSHS3_PUBLIC_URL?.trim()),
@@ -175,10 +179,12 @@ export class InboxPart {
     this.inboxDirty = false;
     let out: NotifyItem[];
     let since: Map<string, number>;
+    // What was held back earlier and is told now, in one message.
+    let released: { notices: HeldNotice[]; more: number; waiting: Set<string> } | undefined;
     try {
       const data = this.notifyStore.data;
       const items = this.inboxNow();
-      const before = JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory]);
+      const before = JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory, data.held, data.heldMore]);
       this.pruneInboxState(now);
       const { fresh: arrived, seen } = diffInbox(items, data.seen, now);
       data.seen = seen;
@@ -242,18 +248,42 @@ export class InboxPart {
         ...fresh.filter(toChannels).map((i) => this.notifyItem(i)),
         ...reminders.filter(toChannels).map((i) => ({ ...this.notifyItem(i), reminder: true })),
       ];
-      // Quiet hours and the hourly limit hold back what goes to the channels (a critical alert still goes);
-      // what is held back stays in the inbox. This computer's own notification above is not held back.
+      since = new Map(items.map((i) => [i.id, i.since ?? i.at]));
+      // Quiet hours and the hourly limit hold back what goes to the channels (a critical alert still goes).
+      // What is held back is kept, on the disk, and told in one message when the quiet is over. It also
+      // stays in the inbox. This computer's own notification above is not held back.
+      const limits = { maxPushesPerHour: data.noiseBudgetPerHour, quietHours: data.quietHours };
+      // The quiet hours are over, or the hour has room again: what was held is told now, as one message
+      // that counts as one against the hour. What it tells is not told a second time beside it (a
+      // reminder that falls due in the same moment).
+      if (data.held?.length) {
+        const room = evaluateNoiseBudget([{ id: "held", kind: "report" as const }], data.pushHistory ?? [], now, limits);
+        if (room.allowed.length) {
+          data.pushHistory = room.nextPushHistory;
+          released = { ...this.notifyStore.takeHeld(), waiting: new Set(items.map((i) => i.id)) };
+          const told = new Set(released.notices.map((h) => h.id));
+          out = out.filter((i) => !told.has(i.id));
+        }
+      }
       if (out.length && (data.quietHours?.enabled || (data.noiseBudgetPerHour ?? 0) > 0)) {
-        const budget = evaluateNoiseBudget(out, data.pushHistory ?? [], now, {
-          maxPushesPerHour: data.noiseBudgetPerHour,
-          quietHours: data.quietHours,
-        });
+        const budget = evaluateNoiseBudget(out, data.pushHistory ?? [], now, limits);
         out = budget.allowed;
         data.pushHistory = budget.nextPushHistory;
+        this.notifyStore.hold(
+          budget.suppressed.map((i) => ({
+            id: i.id,
+            kind: i.kind,
+            title: clip(i.title, 200),
+            ...(i.from ? { from: clip(i.from, 120) } : {}),
+            ...(i.target ? { target: clip(i.target, 120) } : {}),
+            ...(i.risk ? { risk: i.risk } : {}),
+            ...(i.reminder ? { reminder: true } : {}),
+            at: now,
+            since: since.get(i.id) ?? now,
+          })),
+        );
       }
-      since = new Map(items.map((i) => [i.id, i.since ?? i.at]));
-      if (before !== JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory])) await this.notifyStore.save();
+      if (before !== JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory, data.held, data.heldMore])) await this.notifyStore.save();
     } finally {
       // Released before anything is sent: a channel that does not answer must not hold up what comes next.
       this.flushingInbox = false;
@@ -262,10 +292,28 @@ export class InboxPart {
       await this.sendToChannels(out, since);
       await this.notifyStore.save();
     }
+    if (released) {
+      const { notices, more, waiting } = released;
+      // Each as a line: what it was, and whether it still waits. The details are in the inbox.
+      await this.sendToChannels(
+        notices.map((h) => {
+          const still = waiting.has(h.id);
+          // "Still waiting" is said of one that was told before and held as a reminder, while it does wait.
+          return { id: h.id, kind: h.kind, title: still ? h.title : `${h.title} (no longer waiting)`, from: h.from, target: h.target, risk: h.risk, link: this.inboxLink(h.id), ...(h.reminder && still ? { reminder: true } : {}) };
+        }),
+        new Map(notices.map((h) => [h.id, h.since])),
+        { heading: (count) => `${count} thing${count === 1 ? "" : "s"} happened while notifications were quiet`, more },
+      );
+      await this.notifyStore.save();
+    }
     if (this.inboxDirty) this.pokeInbox();
   }
 
-  async sendToChannels(this: HubService, items: NotifyItem[], since: Map<string, number>): Promise<void> {
+  /**
+   * Tells each channel about the items it wants. `summary`: the items are what was held back earlier,
+   * told as one list under a heading that says how many there were for that channel.
+   */
+  async sendToChannels(this: HubService, items: NotifyItem[], since: Map<string, number>, summary?: { heading: (count: number) => string; more: number }): Promise<void> {
     const channels = this.notifyStore.data.channels.filter((c) => c.enabled);
     if (!channels.length) return;
     // On a shared server only the person whose installation this is can answer: the message says who.
@@ -276,6 +324,12 @@ export class InboxPart {
     await Promise.all(
       channels.map(async (channel) => {
         let mine = items.filter((item) => channelWants(channel, item));
+        const unread = this.notifyStore.unreadOf(channel.id);
+        if (mine.length && (unread.url || unread.secret)) {
+          // Not sent without its address, and not sent unsigned: the channel says why.
+          channel.last = { at: Date.now(), ok: false, error: unreadSecretNote(unread.url ? "The channel's address" : "The channel's signing secret") };
+          return;
+        }
         if (sync) {
           // A ticket is on every installation that shares the bucket: one of them tells the channel.
           const kept: NotifyItem[] = [];
@@ -292,7 +346,8 @@ export class InboxPart {
           mine = kept;
         }
         if (!mine.length) return;
-        const result = await deliver(renderNotification(channel, mine, { owner, inboxLink: this.inboxLink() }), this.outboundGuard(), {
+        const told = summary ? { heading: summary.heading(mine.length + summary.more), more: summary.more } : {};
+        const result = await deliver(renderNotification(channel, mine, { owner, inboxLink: this.inboxLink(), ...told }), this.outboundGuard(), {
           waits: this.notifyWaits,
         });
         channel.last = { at: Date.now(), ...result };
@@ -324,11 +379,18 @@ export class InboxPart {
         if (input.id && !existing) throw new Error("Channel not found");
         if (!["slack", "teams", "ntfy", "webhook"].includes(input.kind)) throw new Error("Unknown kind of channel");
         const url = (input.url ?? "").trim() || existing?.url || "";
-        if (!url) throw new Error("The channel needs an address to post to");
-        // Checked now so a wrong address is said at once, and again each time something is sent.
-        const target = await guardUrl(url, this.outboundGuard());
-        if (input.kind === "ntfy" && !target.url.pathname.split("/").filter(Boolean).length)
-          throw new Error("An ntfy address ends with the topic, like https://ntfy.sh/my-topic");
+        // An address that is stored but could not be read on this start stays as it is stored: the
+        // channel's other settings can be saved without typing it again.
+        const unread = this.notifyStore.unreadOf(existing?.id);
+        if (!url && !unread.url) throw new Error("The channel needs an address to post to");
+        if (url) {
+          // Checked now so a wrong address is said at once, and again each time something is sent.
+          const target = await guardUrl(url, this.outboundGuard());
+          if (input.kind === "ntfy" && !target.url.pathname.split("/").filter(Boolean).length)
+            throw new Error("An ntfy address ends with the topic, like https://ntfy.sh/my-topic");
+        }
+        if (existing && url) this.notifyStore.forgetUnread(existing.id, "url");
+        if (existing && input.secret !== undefined) this.notifyStore.forgetUnread(existing.id, "secret");
         const events = (input.events ?? []).filter((e) => NOTIFY_KINDS.includes(e));
         const saved: NotifyChannel = {
           id: existing?.id ?? crypto.randomUUID(),
@@ -356,6 +418,8 @@ export class InboxPart {
       case "notify-channel-test": {
         const channel = this.notifyStore.data.channels.find((c) => c.id === request.id);
         if (!channel) throw new Error("Channel not found");
+        const unread = this.notifyStore.unreadOf(channel.id);
+        if (unread.url || unread.secret) throw new Error(unreadSecretNote(unread.url ? "The channel's address" : "The channel's signing secret"));
         const link = this.inboxLink();
         const rendered = renderNotification(
           channel,

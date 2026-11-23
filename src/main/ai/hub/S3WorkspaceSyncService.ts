@@ -13,13 +13,15 @@ import type {
 import type { FileEntry, IStorageProvider } from "../../../shared/types/storage";
 import { S3StorageProvider } from "../../storage/S3StorageProvider";
 import {
-  decryptSecretValue,
-  encryptSecretValue,
+  openSecretValue,
+  sealSecretValue,
+  unreadSecretNote,
 } from "../../crypto/SecretFieldCrypto";
 import { maskContext, safeError } from "./privacy";
 import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { canonicalJson, removalStandsAt } from "./WorkBoard";
 import { createLogger } from "../../log";
+import type { ListedObject } from "./LearningQueue";
 import { writeFileAtomic } from "../../storage/atomicFile";
 import {
   assertOutwardSyncAllowed,
@@ -30,9 +32,10 @@ const log = createLogger("s3-workspace");
 const SYNC = "S3 team workspace sync";
 
 export const S3_INVITE_PREFIX = "sshs3-s3://";
-export const DEFAULT_INVITE_TTL_MS = 24 * 60 * 60_000;
 export const DEFAULT_S3_REQUEST_TIMEOUT_MS = 15_000;
 const WORKSPACE_FILENAME = "workspace.json";
+/** Where a workspace file that could not be read is kept when it is replaced. */
+const BROKEN_WORKSPACE_FILENAME = "workspace.broken.json";
 const PRESENCE_DIRNAME = "presence";
 const MAX_WORKSPACE_BYTES = 25 * 1024 * 1024;
 const PRESENCE_TTL_MS = 45_000;
@@ -65,18 +68,6 @@ interface ConditionalStorageProvider extends IStorageProvider {
 
 export interface ClientWorkspacePresenceEntry extends WorkspacePresenceEntry {
   clientId?: string;
-}
-
-export interface S3WorkspaceInviteOptions {
-  /** Short-lived revocable token replacing a static raw secretAccessKey. */
-  token?: string;
-  tokenId?: string;
-  ttlMs?: number;
-  expiresAt?: number;
-  /** Set false to emit a tokenized invite without embedding secretAccessKey. */
-  includeSecret?: boolean;
-  /** Suppresses the raw secret warning log when explicitly intended. */
-  warnOnRawSecret?: boolean;
 }
 
 export interface S3WorkspaceInviteValidationResult {
@@ -144,45 +135,11 @@ interface StoredS3WorkspaceConfig {
   lastSyncAt?: number;
 }
 
-export function encodeS3WorkspaceInviteToken(
-  config: S3WorkspaceConfig,
-  options: Omit<S3WorkspaceInviteOptions, "includeSecret"> = {},
-): string {
-  const now = Date.now();
-  const ttlMs = Math.max(1_000, options.ttlMs ?? DEFAULT_INVITE_TTL_MS);
-  const expiresAt = typeof options.expiresAt === "number" ? options.expiresAt : now + ttlMs;
-  const tokenId = options.tokenId?.trim() || `inv-${crypto.randomUUID().slice(0, 12)}`;
-  const inviteToken = options.token?.trim() || crypto.randomBytes(24).toString("base64url");
-  const payload = {
-    v: 2 as const,
-    endpoint: config.endpoint?.trim() || undefined,
-    region: config.region.trim() || "eu-north-1",
-    bucket: config.bucket.trim(),
-    prefix: (config.prefix || "sshs3-workspace").trim(),
-    accessKeyId: config.accessKeyId.trim(),
-    forcePathStyle: config.forcePathStyle ?? true,
-    tokenId,
-    inviteToken,
-    issuedAt: now,
-    expiresAt,
-    revocable: true,
-  };
-  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  return `${S3_INVITE_PREFIX}${encoded}`;
-}
-
-export function encodeS3WorkspaceInvite(
-  config: S3WorkspaceConfig,
-  options: S3WorkspaceInviteOptions = {},
-): string {
-  if (options.token || options.includeSecret === false) {
-    return encodeS3WorkspaceInviteToken(config, options);
-  }
-  if (config.secretAccessKey && options.warnOnRawSecret !== false) {
-    log.warn(
-      "S3 workspace invite embeds a raw secretAccessKey; prefer short-lived revocable invite tokens via encodeS3WorkspaceInviteToken.",
-    );
-  }
+/**
+ * The invite code of a team bucket: where it is and the key that opens it, secret key included. Whoever
+ * has the code has the bucket, so it is made only for a person who asked for it (see `inviteCode()`).
+ */
+export function encodeS3WorkspaceInvite(config: S3WorkspaceConfig): string {
   const payload = {
     v: 1,
     endpoint: config.endpoint?.trim() || undefined,
@@ -795,8 +752,14 @@ export class S3WorkspaceSyncService {
   private polling = false;
   private connected = false;
   private lastError?: string;
+  /** The secret key as it is stored, when it could not be decrypted on this start: written back unchanged. */
+  private unreadSecret?: string;
+  /** Something the person should know that is not a fault of the sync now: the workspace file was unreadable and was written again. Kept until the app closes or the bucket changes. */
+  private notice?: string;
   private lastKnownRemoteStat?: { size: number; mtime?: string } | null;
   private presenceList: ClientWorkspacePresenceEntry[] = [];
+  /** Each teammate's presence file as it was last read, by the mark its listing gave. */
+  private readonly presenceSeen = new Map<string, { version: string; entry: ClientWorkspacePresenceEntry }>();
   private pollTimer?: NodeJS.Timeout;
   private presenceTimer?: NodeJS.Timeout;
   private pushDebounceTimer?: NodeJS.Timeout;
@@ -806,7 +769,6 @@ export class S3WorkspaceSyncService {
   private consecutivePollErrors = 0;
   private nextPollAllowedAt = 0;
   private readonly fallbackClientId = crypto.randomUUID().slice(0, 12);
-  private readonly revokedInviteTokens = new Set<string>();
 
   constructor(
     private readonly configFilePath: string,
@@ -831,6 +793,8 @@ export class S3WorkspaceSyncService {
         .trim();
       if (!raw) return;
       const stored = JSON.parse(raw) as StoredS3WorkspaceConfig;
+      const secret = openSecretValue(stored.secretAccessKeyEncrypted ?? "");
+      this.unreadSecret = secret.kept;
       this.config = {
         enabled: Boolean(stored.enabled),
         endpoint: stored.endpoint?.trim() || undefined,
@@ -840,9 +804,7 @@ export class S3WorkspaceSyncService {
           .trim()
           .replace(/^\/+|\/+$/g, ""),
         accessKeyId: stored.accessKeyId?.trim() || "",
-        secretAccessKey: stored.secretAccessKeyEncrypted
-          ? decryptSecretValue(stored.secretAccessKeyEncrypted)
-          : "",
+        secretAccessKey: secret.value,
         forcePathStyle: stored.forcePathStyle ?? true,
       };
       this.lastSyncAt = stored.lastSyncAt;
@@ -854,6 +816,8 @@ export class S3WorkspaceSyncService {
   }
 
   async save(): Promise<void> {
+    // A key a person entered replaces the one that could not be read.
+    if (this.config.secretAccessKey) this.unreadSecret = undefined;
     const stored: StoredS3WorkspaceConfig = {
       enabled: this.config.enabled,
       endpoint: this.config.endpoint?.trim() || undefined,
@@ -863,9 +827,9 @@ export class S3WorkspaceSyncService {
         .trim()
         .replace(/^\/+|\/+$/g, ""),
       accessKeyId: this.config.accessKeyId.trim(),
-      secretAccessKeyEncrypted: this.config.secretAccessKey
-        ? encryptSecretValue(this.config.secretAccessKey)
-        : undefined,
+      // While the key could not be read, what was stored goes back as it was: writing nothing here
+      // would lose the key for good after one start with the keyring locked or missing.
+      secretAccessKeyEncrypted: sealSecretValue(this.config.secretAccessKey, this.unreadSecret) || undefined,
       forcePathStyle: this.config.forcePathStyle ?? true,
       lastSyncAt: this.lastSyncAt,
     };
@@ -914,11 +878,25 @@ export class S3WorkspaceSyncService {
       lastSyncAt: this.lastSyncAt,
       syncing: this.syncing,
       // A configured bucket this (demo) process will not sync with shows why where sync errors show,
-      // instead of looking connected.
-      error: (configured ? syncDisabledReason : undefined) ?? this.lastError,
+      // instead of looking connected. So does a bucket whose secret key could not be read on this start:
+      // it is not synced with, and would otherwise look as if it had never been set up.
+      error:
+        (configured ? syncDisabledReason : undefined) ??
+        (this.unreadSecret && !this.config.secretAccessKey && this.config.enabled ? unreadSecretNote("The team bucket's secret key") : undefined) ??
+        this.lastError,
       ...(syncDisabledReason ? { syncDisabledReason } : {}),
-      inviteCode: configured ? encodeS3WorkspaceInvite(this.config) : undefined,
+      ...(this.notice && configured ? { notice: this.notice } : {}),
     };
+  }
+
+  /**
+   * The code a teammate pastes to join this bucket. It holds the bucket's secret key, so it is made
+   * only when a person asks for it (the request `workspace-s3-invite`) and is never part of the status:
+   * the status goes into every conversation's snapshot and into tool answers.
+   */
+  inviteCode(): string {
+    if (!this.isConfigured()) throw new Error("Connect a team bucket first: there is nothing to invite to.");
+    return encodeS3WorkspaceInvite(this.config);
   }
 
   getPresence(): ClientWorkspacePresenceEntry[] {
@@ -933,40 +911,13 @@ export class S3WorkspaceSyncService {
     };
   }
 
-  revokeInviteToken(tokenId: string): void {
-    const clean = tokenId.trim();
-    if (clean) this.revokedInviteTokens.add(clean);
-  }
-
-  isInviteTokenRevoked(tokenId: string): boolean {
-    return this.revokedInviteTokens.has(tokenId.trim());
-  }
-
-  createInviteToken(options: { ttlMs?: number; tokenId?: string; token?: string } = {}): {
-    inviteCode: string;
-    tokenId: string;
-    expiresAt: number;
-  } {
-    const tokenId = options.tokenId?.trim() || `inv-${crypto.randomUUID().slice(0, 12)}`;
-    const ttlMs = Math.max(1_000, options.ttlMs ?? DEFAULT_INVITE_TTL_MS);
-    const expiresAt = Date.now() + ttlMs;
-    const inviteCode = encodeS3WorkspaceInviteToken(this.config, {
-      tokenId,
-      token: options.token,
-      expiresAt,
-    });
-    return { inviteCode, tokenId, expiresAt };
-  }
-
   async configure(
     update?: Partial<S3WorkspaceConfig>,
     inviteCode?: string,
   ): Promise<void> {
     // Refused up front in demo mode (nothing is saved), so connecting a team bucket fails visibly.
     assertOutwardSyncAllowed(SYNC);
-    const decoded = inviteCode
-      ? decodeS3WorkspaceInvite(inviteCode, { revokedTokenIds: this.revokedInviteTokens })
-      : {};
+    const decoded = inviteCode ? decodeS3WorkspaceInvite(inviteCode) : {};
     const merged = { ...this.config, ...update, ...decoded };
     const secret =
       decoded.secretAccessKey !== undefined
@@ -991,6 +942,7 @@ export class S3WorkspaceSyncService {
     await this.resetProvider();
     this.lastKnownRemoteStat = undefined;
     this.lastError = undefined;
+    this.notice = undefined;
     this.consecutivePollErrors = 0;
     this.nextPollAllowedAt = 0;
     await this.save();
@@ -1054,6 +1006,7 @@ export class S3WorkspaceSyncService {
       await this.resetProvider();
       this.lastKnownRemoteStat = undefined;
       this.lastError = undefined;
+      this.notice = undefined;
       this.consecutivePollErrors = 0;
       this.nextPollAllowedAt = 0;
       if (this.canReachBucket()) {
@@ -1118,7 +1071,7 @@ export class S3WorkspaceSyncService {
     }
     this.pushDebounceTimer = setTimeout(() => {
       this.pushDebounceTimer = undefined;
-      void this.syncNow({ forcePush: true }).catch((e) =>
+      void this.syncNow().catch((e) =>
         log.warn("Scheduled S3 workspace push failed", safeError(e)),
       );
     }, delayMs);
@@ -1130,7 +1083,7 @@ export class S3WorkspaceSyncService {
     void this.publishAndRefreshPresence().catch(() => {});
   }
 
-  async syncNow(_opts: { forcePush?: boolean } = {}): Promise<void> {
+  async syncNow(): Promise<void> {
     // An explicit "sync now" (button, AI tool) in demo mode fails with the reason instead of quietly
     // succeeding; the background paths never get here in demo mode (canReachBucket).
     assertOutwardSyncAllowed(SYNC);
@@ -1178,7 +1131,7 @@ export class S3WorkspaceSyncService {
           });
 
           // The bucket is written when it does not hold what the merge came to, and only then. A push
-          // asked for after a change here (`forcePush`) finds that difference; one that finds none has
+          // asked for after a change here (schedulePush) finds that difference; one that finds none has
           // nothing to send. Writing whenever the merge "changed" something made every installation
           // rewrite the whole object every few seconds for ever, each one's write being the next
           // one's reason to sync.
@@ -1186,13 +1139,24 @@ export class S3WorkspaceSyncService {
           if (!shouldWriteRemote) break;
 
           const buf = Buffer.from(JSON.stringify(merged, null, 2), "utf8");
+          // "Nothing there yet" is asked only when nothing is there: an object that is there and could
+          // not be read is replaced as the copy that was read, or plainly where the store gives no mark.
           const casOptions = remote.etag
             ? { ifMatch: remote.etag }
-            : !remote.payload
+            : !remote.stat
               ? { ifNoneMatch: "*" }
               : undefined;
           try {
+            if (remote.broken) {
+              // What was there is kept beside it, for whoever wants to know what happened to it. One
+              // copy, under one name: the newest broken file replaces the one before.
+              await this.writeProviderFile(provider, this.objectPath(BROKEN_WORKSPACE_FILENAME), remote.broken).catch((err) =>
+                log.warn("Could not keep a copy of the unreadable workspace file", safeError(err)),
+              );
+            }
             await this.writeProviderFile(provider, remotePath, buf, casOptions);
+            if (remote.broken)
+              this.notice = `The team's workspace file in the bucket could not be read on ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: it was not a valid workspace file. A copy of it was kept in the bucket as ${BROKEN_WORKSPACE_FILENAME}, and the file was written again from this installation's copy of the servers, memories and activity. What only the broken file held comes back when the installation that wrote it syncs.`;
             const stat = await this.statOrNull(provider, remotePath);
             this.lastKnownRemoteStat = stat
               ? { size: stat.size, mtime: stat.mtime }
@@ -1250,7 +1214,8 @@ export class S3WorkspaceSyncService {
       if (changedOnS3) {
         await this.syncNow();
       } else {
-        await this.publishAndRefreshPresence();
+        // Presence has a timer of its own (startTimers). It used to be written and read here as well,
+        // so every installation wrote its file and read everybody's twice as often as it was due.
         if (!this.connected || this.lastError) {
           this.connected = true;
           this.lastError = undefined;
@@ -1314,6 +1279,7 @@ export class S3WorkspaceSyncService {
 
     // List all presence files in S3
     const entries: ClientWorkspacePresenceEntry[] = [selfEntry];
+    const listedPresence = new Set<string>();
     try {
       const files = await this.withTimeout("S3 presence list", (signal) =>
         (provider as ConditionalStorageProvider).list(this.presenceDirPath(), { signal }),
@@ -1323,11 +1289,20 @@ export class S3WorkspaceSyncService {
         if (file.isDirectory || !file.name.endsWith(".json")) continue;
         if (file.name === selfFileName) continue;
         const filePath = `${this.presenceDirPath()}/${file.name}`;
+        listedPresence.add(file.name);
         try {
-          const buf = await this.readProviderFile(provider, filePath, 64_000);
-          const parsed = JSON.parse(
-            buf.toString("utf8"),
-          ) as ClientWorkspacePresenceEntry;
+          // A file whose mark in the listing is as it was has not been written since: somebody who
+          // is away. It is not downloaded again at every heartbeat.
+          const version = file.etag ? `${file.etag}:${file.size}` : undefined;
+          const known = this.presenceSeen.get(file.name);
+          let parsed: ClientWorkspacePresenceEntry;
+          if (version && known?.version === version) parsed = known.entry;
+          else {
+            const buf = await this.readProviderFile(provider, filePath, 64_000);
+            parsed = JSON.parse(buf.toString("utf8")) as ClientWorkspacePresenceEntry;
+            if (version) this.presenceSeen.set(file.name, { version, entry: parsed });
+            else this.presenceSeen.delete(file.name);
+          }
           if (
             parsed &&
             typeof parsed.actor === "string" &&
@@ -1357,6 +1332,7 @@ export class S3WorkspaceSyncService {
           // Ignore unreadable peer presence file
         }
       }
+      for (const name of [...this.presenceSeen.keys()]) if (!listedPresence.has(name)) this.presenceSeen.delete(name);
     } catch {
       // Directory may not exist yet
     }
@@ -1400,13 +1376,59 @@ export class S3WorkspaceSyncService {
     return prefix ? `${bucket}/${prefix}/${clean}` : `${bucket}/${clean}`;
   }
 
+  /** What trying the bucket's conditional writes came to: asked once for a bucket, and again after its settings change. */
+  private conditionalWritesTried?: Promise<boolean>;
+
+  /**
+   * Whether this bucket really refuses a write whose condition does not hold. Amazon S3 does. Some
+   * stores that speak the same protocol take the headers and write anyway, and then a ticket's claim
+   * or a "do once" mark that "was written" proves nothing. So it is tried, once: an object is written,
+   * then written again asking that nothing be there, and then as the copy of a version it is not.
+   * Both must be refused. A try that cannot be made (the network) counts as "no" for now, which is
+   * the careful answer, and is made again next time.
+   */
+  private checkConditionalWrites(): Promise<boolean> {
+    if (this.conditionalWritesTried) return this.conditionalWritesTried;
+    const tried = (async (): Promise<boolean> => {
+      const provider = await this.getOrCreateProvider();
+      const at = this.objectPath(`work/probe/conditional-${crypto.randomUUID()}.json`);
+      const refused = async (options: { ifMatch?: string; ifNoneMatch?: string }): Promise<boolean> => {
+        try {
+          await this.writeProviderFile(provider, at, Buffer.from('{"second":true}', "utf8"), options);
+          return false;
+        } catch (err) {
+          if (isPreconditionFailedError(err)) return true;
+          throw err;
+        }
+      };
+      try {
+        await this.writeProviderFile(provider, at, Buffer.from("{}", "utf8"));
+        return (await refused({ ifNoneMatch: "*" })) && (await refused({ ifMatch: '"not-this-objects-version"' }));
+      } finally {
+        await this.withTimeout("S3 objects delete", (signal) => (provider as ConditionalStorageProvider).delete(at, false, { signal })).catch(() => undefined);
+      }
+    })();
+    this.conditionalWritesTried = tried;
+    return tried.then(
+      (answer) => {
+        if (!answer) log.warn("The team bucket does not refuse conditional writes: ticket claims and marks are checked by reading back.");
+        return answer;
+      },
+      (err) => {
+        if (this.conditionalWritesTried === tried) this.conditionalWritesTried = undefined;
+        log.warn("Could not try the team bucket's conditional writes", safeError(err));
+        return false;
+      },
+    );
+  }
+
   /**
    * Plain object access under the workspace prefix, for data that lives in
    * the bucket beside the workspace file (the learning queue). Paths are
    * relative to the prefix.
    */
   readonly objects = {
-    supportsConditionalWrite: true,
+    conditionalWrites: (): Promise<boolean> => this.checkConditionalWrites(),
     list: async (dir: string): Promise<string[]> => {
       const provider = await this.getOrCreateProvider();
       try {
@@ -1416,6 +1438,25 @@ export class S3WorkspaceSyncService {
         return entries
           .filter((entry) => !entry.isDirectory)
           .map((entry) => entry.name);
+      } catch (err) {
+        if (this.isNotFoundError(err)) return [];
+        throw err;
+      }
+    },
+    /**
+     * The same listing, asked of the bucket afresh, with each object's mark: its ETag. A reader that
+     * kept the mark does not download an object that has not changed. A store that gives no ETag gets
+     * no mark, so its objects are read: a size and a time to the second do not tell a change apart.
+     */
+    listWithMeta: async (dir: string): Promise<ListedObject[]> => {
+      const provider = await this.getOrCreateProvider();
+      try {
+        const entries = await this.withTimeout("S3 objects list", (signal) =>
+          (provider as ConditionalStorageProvider).list(this.objectPath(dir), { force: true, signal }),
+        );
+        return entries
+          .filter((entry) => !entry.isDirectory)
+          .map((entry) => ({ name: entry.name, ...(entry.etag ? { version: `${entry.etag}:${entry.size}` } : {}) }));
       } catch (err) {
         if (this.isNotFoundError(err)) return [];
         throw err;
@@ -1563,6 +1604,8 @@ export class S3WorkspaceSyncService {
   private async resetProvider(): Promise<void> {
     const old = this.provider;
     this.provider = undefined;
+    // Another bucket, or other settings for this one: what was found out about the old one does not hold.
+    this.conditionalWritesTried = undefined;
     if (old) {
       await old.disconnect?.().catch(() => {});
     }
@@ -1575,6 +1618,8 @@ export class S3WorkspaceSyncService {
     payload: Partial<S3WorkspaceRemotePayload> | null;
     etag?: string;
     stat: FileEntry | null;
+    /** The object as it was read, when it is there and is not a workspace (not JSON, or not an object). */
+    broken?: Buffer;
   }> {
     const stat = await this.statOrNull(provider, remotePath);
     if (!stat) {
@@ -1592,11 +1637,15 @@ export class S3WorkspaceSyncService {
     this.lastKnownRemoteStat = { size: stat.size, mtime: stat.mtime };
     const text = raw.toString("utf8").replace(/^\uFEFF/, "").trim();
     if (!text) return { payload: null, etag: stat.etag, stat };
-    return {
-      payload: JSON.parse(text) as Partial<S3WorkspaceRemotePayload>,
-      etag: stat.etag,
-      stat,
-    };
+    // A file that was cut off or written over by something else must not stop the team's sync for
+    // good: every installation has its own copy of what was in it, and the merge puts them together.
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { payload: parsed as Partial<S3WorkspaceRemotePayload>, etag: stat.etag, stat };
+    } catch {
+      // Not JSON: handled below like JSON that is not a workspace.
+    }
+    return { payload: null, etag: stat.etag, stat, broken: raw };
   }
 
   private async statOrNull(

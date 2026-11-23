@@ -170,12 +170,19 @@ describe("Jira issues on the board", () => {
     expect(await sync()).toMatchObject({ added: 0, updated: 0, written: 0 });
     expect((await board())[0].updatedAt).toBe(before);
 
-    // A person moves it to To do; that is the board's own and a later read does not undo it.
+    // A person moves it to To do; that is the board's own, and a later read of an issue whose text is
+    // as it was does not undo it (here its status got another name in Jira).
     await hub.request({ action: "ticket-move", id: ticket.id, status: "todo" });
+    jira.issues.get("OPS-1")!.status = "Selected";
+    jira.touch(jira.issues.get("OPS-1")!);
+    expect(await sync()).toMatchObject({ added: 0, updated: 1 });
+    expect((await board())[0]).toMatchObject({ status: "todo", title: "OPS-1: Disk almost full on pg-01", external: { status: "Selected" } });
+    // The issue's text is changed in Jira after that: nobody here has read the new text, so the ticket
+    // waits for a person again (tests/main/jiraReview.test.ts).
     jira.issues.get("OPS-1")!.title = "Disk almost full on pg-01 (again)";
     jira.touch(jira.issues.get("OPS-1")!);
     expect(await sync()).toMatchObject({ added: 0, updated: 1 });
-    expect((await board())[0]).toMatchObject({ status: "todo", title: "OPS-1: Disk almost full on pg-01 (again)" });
+    expect((await board())[0]).toMatchObject({ status: "backlog", title: "OPS-1: Disk almost full on pg-01 (again)" });
   });
 
   it("follows the issue to Done and back, and takes its comments in as notes", async () => {

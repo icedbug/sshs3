@@ -38,6 +38,7 @@ export const AREA_OF = {
   "workspace-s3-configure": "sharing",
   "workspace-s3-sync-now": "sharing",
   "workspace-s3-disconnect": "sharing",
+  "workspace-s3-invite": "sharing",
   "inline-suggest": "conversations",
   "schedule-save": "schedules",
   "schedule-run-now": "schedules",

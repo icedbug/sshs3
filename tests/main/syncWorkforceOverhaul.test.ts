@@ -29,7 +29,6 @@ import { S3StorageProvider } from '../../src/main/storage/S3StorageProvider';
 import {
   decodeS3WorkspaceInvite,
   encodeS3WorkspaceInvite,
-  encodeS3WorkspaceInviteToken,
   S3WorkspaceSyncService,
   validateS3WorkspaceInvite,
   type S3WorkspaceSyncCallbacks,
@@ -517,7 +516,7 @@ describe('S3WorkspaceSyncService resilience, CAS, presence, and invite tokens', 
     expect(objects.has('team-bucket/team/presence/alice--laptop-1.json')).toBe(true);
   });
 
-  it('supports tokenized short-lived revocable v2 invites, warns on raw secretAccessKey, and keeps v1 decode compatible', () => {
+  it('reads a tokenized v2 invite (expired, revoked), warns on raw secretAccessKey, and keeps v1 decode compatible', () => {
     const baseCfg: S3WorkspaceConfig = {
       enabled: true,
       region: 'eu-west-1',
@@ -527,11 +526,21 @@ describe('S3WorkspaceSyncService resilience, CAS, presence, and invite tokens', 
       secretAccessKey: 'super-raw-secret-value', // pragma: allowlist secret
     };
 
-    const tokenInvite = encodeS3WorkspaceInviteToken(baseCfg, {
-      token: 'tok_short_lived_abc',
-      tokenId: 'tid-1',
-      ttlMs: 60_000,
-    });
+    // Nothing in the app makes a v2 invite any more; one that arrives is still read, so it is built here.
+    const tokenInvite = `sshs3-s3://${Buffer.from(
+      JSON.stringify({
+        v: 2,
+        region: baseCfg.region,
+        bucket: baseCfg.bucket,
+        prefix: baseCfg.prefix,
+        accessKeyId: baseCfg.accessKeyId,
+        tokenId: 'tid-1',
+        inviteToken: 'tok_short_lived_abc',
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      }),
+      'utf8',
+    ).toString('base64url')}`;
     const parsedToken = validateS3WorkspaceInvite(tokenInvite, { now: Date.now() + 1_000 });
     expect(parsedToken.valid).toBe(true);
     expect(parsedToken.version).toBe(2);

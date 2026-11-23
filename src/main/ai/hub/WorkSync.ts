@@ -1,6 +1,6 @@
-import type { QueueStore } from "./LearningQueue";
+import type { ListedObject, QueueStore } from "./LearningQueue";
 import type { AgentUsage } from "../../../shared/types/aiHub";
-import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
+import { RETIRE_REMOVE_AFTER_MS, TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
 
 /**
  * A conditional write that lost: told by the error's status or name only.
@@ -27,6 +27,12 @@ export function isPreconditionFailedError(err: unknown): boolean {
 export interface ConditionalQueueStore extends QueueStore {
   /** True when `write(path, buf, { ifMatch, ifNoneMatch })` enforces S3 conditional preconditions atomically. */
   supportsConditionalWrite?: boolean;
+  /**
+   * Whether a write that names a condition is really refused when the condition does not hold: tried
+   * out on the store itself, once. A bucket takes the headers whether or not it acts on them, so its
+   * word is not taken for it. Where this is there it decides, and `supportsConditionalWrite` is not asked.
+   */
+  conditionalWrites?(): Promise<boolean>;
   readWithMeta?(path: string): Promise<{ buffer: Buffer; etag?: string } | undefined>;
   write(
     path: string,
@@ -99,28 +105,82 @@ export interface TicketClaim {
 export class WorkSync {
   constructor(private readonly store: QueueStore) {}
 
-  private async readAll<T extends Mergeable>(collection: WorkCollection): Promise<T[]> {
-    const names = (await this.store.list(`work/${collection}`)).filter((n) => n.endsWith(".json"));
-    const items = await inBatches(names.slice(0, 500), 8, (name) =>
-      this.store.read(`work/${collection}/${name}`).then((b) => parse<T>(b)),
+  /**
+   * What was read of each object, by its path, with the mark the store's listing gave for it. An
+   * object whose mark is the same in the next listing has not changed, and is not downloaded again:
+   * a sync of a board nobody touched is then a listing per collection and nothing else. Kept while
+   * the object is listed. What is kept here is never handed out to be changed (reconcile copies what
+   * a caller takes over), or a change made to it here would look like the store's.
+   */
+  private readonly kept = new Map<string, { version: string; value: unknown }>();
+
+  /**
+   * Every object of a folder whose name is wanted, as `read` makes of its bytes. Only what is new
+   * or changed since the last time is downloaded, where the store's listing can tell
+   * (`listWithMeta`); a store that cannot tell has every object read, as before.
+   */
+  private async readDir<V>(dir: string, wanted: (name: string) => boolean, read: (buffer: Buffer | undefined) => V | undefined): Promise<V[]> {
+    const listed: ListedObject[] = this.store.listWithMeta ? await this.store.listWithMeta(dir) : (await this.store.list(dir)).map((name) => ({ name }));
+    const here = new Set<string>();
+    const values = await inBatches(
+      listed.filter((entry) => wanted(entry.name)),
+      8,
+      async (entry) => {
+        const at = `${dir}/${entry.name}`;
+        here.add(at);
+        const known = this.kept.get(at);
+        if (entry.version && known?.version === entry.version) return known.value as V | undefined;
+        // Listed first, read after: what is read is never older than its mark. If the object changed
+        // in between, the next listing has another mark and it is read once more.
+        const value = read(await this.store.read(at));
+        if (entry.version) this.kept.set(at, { version: entry.version, value });
+        else this.kept.delete(at);
+        return value;
+      },
     );
-    return items.filter((x): x is Awaited<T> => Boolean(x)) as T[];
+    for (const at of [...this.kept.keys()]) if (at.startsWith(`${dir}/`) && !here.has(at)) this.kept.delete(at);
+    return values.filter((value) => value !== undefined) as V[];
+  }
+
+  /**
+   * Every item of a collection. The store's list gives every name however many there are (it follows
+   * the bucket's pages), and every one is taken: a cap here meant that past it the rest never reached a
+   * teammate, and was uploaded again by its owner on every sync.
+   */
+  private readAll<T extends Mergeable>(collection: WorkCollection): Promise<T[]> {
+    return this.readDir<T>(`work/${collection}`, (name) => name.endsWith(".json"), (buffer) => parse<T>(buffer));
   }
 
   /**
    * Brings a local collection and the bucket's copy together: what is newer
    * in the bucket comes back in `items`, what is newer here is uploaded.
+   *
+   * With `retire`, what the caller's rule calls over and old (WorkBoard: `retiredRemoval`,
+   * `retiredTicket`) is left out of `items` and is not uploaded, and a day later its object is taken
+   * out of the store. The two copies are merged first, so a removal still in the store stands against
+   * an older copy here. The caller drops the same items from its own state with the same rule.
    */
   async reconcile<T extends Mergeable>(
     collection: WorkCollection,
     local: T[],
     /** For an item both sides have, where the newer copy winning would lose something (see mergeItems). */
     resolve?: (local: T, remote: T) => T,
+    retire?: { now: number; retired: (item: T, now: number) => boolean },
   ): Promise<{ items: T[]; changed: boolean }> {
+    const now = retire?.now ?? 0;
     const remote = await this.readAll<T>(collection);
     const merged = mergeItems(local, remote, resolve);
-    await inBatches(merged.newerLocally, 6, (item) => this.put(collection, item));
-    return { items: merged.items, changed: merged.changed };
+    const gone = new Map(retire ? merged.items.filter((x) => retire.retired(x, now)).map((x) => [x.id, x]) : []);
+    await inBatches(merged.newerLocally.filter((x) => !gone.has(x.id)), 6, (item) => this.put(collection, item));
+    const stale = remote.filter((r) => gone.has(r.id) && now - gone.get(r.id)!.updatedAt > RETIRE_REMOVE_AFTER_MS);
+    await inBatches(stale, 6, (item) => this.store.remove(`work/${collection}/${safeId(item.id)}.json`));
+    const mine = new Map(local.map((x) => [x.id, x]));
+    // What the caller takes over from the store is a copy of its own: the store's copy is kept here
+    // to be compared with next time, and the caller may change what it holds.
+    const items = merged.items.filter((x) => !gone.has(x.id)).map((x) => (mine.get(x.id) === x ? x : structuredClone(x)));
+    // Changed for the caller: something of its own is let go, or a kept item is not the copy it gave.
+    const changed = local.some((x) => gone.has(x.id)) || items.some((x) => mine.get(x.id) !== x);
+    return { items, changed };
   }
 
   private get conditionalStore(): ConditionalQueueStore {
@@ -128,11 +188,21 @@ export class WorkSync {
   }
 
   /**
+   * Whether a write that lost is refused by the store, so that "it was written" means "it is mine".
+   * Where it is not (a store that takes the condition and writes anyway), who won is found out by
+   * reading back after the store has settled.
+   */
+  private async refuses(): Promise<boolean> {
+    const store = this.conditionalStore;
+    return store.conditionalWrites ? store.conditionalWrites() : Boolean(store.supportsConditionalWrite);
+  }
+
+  /**
    * For something that must happen once however many installations see it
    * (telling a channel about a shared ticket). Uses `If-None-Match: "*"` when
-   * the store supports conditional writes so concurrent callers never race;
-   * falls back to `settle()` + read-back on plain mock stores. Marks do not
-   * expire; `pruneMarks` removes old ones.
+   * the store really refuses a second write (see `refuses`) so concurrent
+   * callers never race; otherwise writes, waits for `settle()` and reads back
+   * whose mark stands. Marks do not expire; `pruneMarks` removes old ones.
    */
   async markOnce(key: string, client: string, settle: () => Promise<void>, now = Date.now()): Promise<boolean> {
     const at = `work/notified/${safeId(key)}.json`;
@@ -155,14 +225,14 @@ export class WorkSync {
       if (isPreconditionFailedError(err)) return false;
       throw err;
     }
-    if (this.conditionalStore.supportsConditionalWrite) return true;
+    if (await this.refuses()) return true;
     await settle();
     return (await mark())?.client === client;
   }
 
   async pruneMarks(olderThanMs: number, now = Date.now()): Promise<void> {
     const names = (await this.store.list("work/notified")).filter((n) => n.endsWith(".json"));
-    await inBatches(names.slice(0, 500), 8, async (name) => {
+    await inBatches(names, 8, async (name) => {
       let at = 0;
       try {
         at = (JSON.parse((await this.store.read(`work/notified/${name}`))?.toString("utf8") ?? "{}") as { at?: number }).at ?? 0;
@@ -179,10 +249,10 @@ export class WorkSync {
   }
 
   async put<T extends Mergeable>(collection: WorkCollection, item: T): Promise<void> {
-    await this.store.write(
-      `work/${collection}/${safeId(item.id)}.json`,
-      Buffer.from(JSON.stringify(item), "utf8"),
-    );
+    const at = `work/${collection}/${safeId(item.id)}.json`;
+    await this.store.write(at, Buffer.from(JSON.stringify(item), "utf8"));
+    // Its mark in the store is another now: it is read once more at the next listing, and kept then.
+    this.kept.delete(at);
   }
 
   /**
@@ -193,23 +263,23 @@ export class WorkSync {
     await this.store.write(`work/usage/${safeId(client)}.json`, Buffer.from(JSON.stringify(usage), "utf8"));
   }
 
+  /** One installation's count, as it is in the store. An unreadable one is left out: it cannot be guessed. */
+  private static count<T>(max: number): (buffer: Buffer | undefined) => T | undefined {
+    return (buffer) => {
+      if (!buffer || buffer.length > max) return undefined;
+      try {
+        const value = JSON.parse(buffer.toString("utf8")) as T;
+        return value && typeof value === "object" ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+  }
+
   /** What every other installation has spent. */
   async readOtherUsage(client: string): Promise<Record<string, AgentUsage>[]> {
-    const names = (await this.store.list("work/usage")).filter(
-      (n) => n.endsWith(".json") && n !== `${safeId(client)}.json`,
-    );
-    const all = await inBatches(names.slice(0, 200), 8, (name) => this.store.read(`work/usage/${name}`));
-    const out: Record<string, AgentUsage>[] = [];
-    for (const buffer of all) {
-      if (!buffer || buffer.length > 200_000) continue;
-      try {
-        const value = JSON.parse(buffer.toString("utf8")) as Record<string, AgentUsage>;
-        if (value && typeof value === "object") out.push(value);
-      } catch {
-        // An unreadable count is left out; it cannot be guessed.
-      }
-    }
-    return out;
+    const others = await this.readDir("work/usage", (n) => n.endsWith(".json") && n !== `${safeId(client)}.json`, WorkSync.count<Record<string, AgentUsage>>(200_000));
+    return others.map((value) => structuredClone(value));
   }
 
   /**
@@ -221,21 +291,8 @@ export class WorkSync {
   }
 
   async readOtherPageUse<T>(client: string): Promise<T[]> {
-    const names = (await this.store.list("work/pageuse")).filter(
-      (n) => n.endsWith(".json") && n !== `${safeId(client)}.json`,
-    );
-    const all = await inBatches(names.slice(0, 200), 8, (name) => this.store.read(`work/pageuse/${name}`));
-    const out: T[] = [];
-    for (const buffer of all) {
-      if (!buffer || buffer.length > 400_000) continue;
-      try {
-        const value = JSON.parse(buffer.toString("utf8")) as T;
-        if (value && typeof value === "object") out.push(value);
-      } catch {
-        // An unreadable count is left out; it cannot be guessed.
-      }
-    }
-    return out;
+    const others = await this.readDir("work/pageuse", (n) => n.endsWith(".json") && n !== `${safeId(client)}.json`, WorkSync.count<T>(400_000));
+    return others.map((value) => structuredClone(value));
   }
 
   private claimPath(ticketId: string): string {
@@ -278,9 +335,9 @@ export class WorkSync {
   /**
    * Checks a ticket out. Uses `If-None-Match: "*"` on unclaimed tickets (and
    * `If-Match` when taking over a lapsed claim with an ETag) when the store
-   * supports conditional writes; falls back to `settle()` + read-back on plain
-   * mock stores. Returns the claim that holds, which is somebody else's when
-   * this failed.
+   * really refuses a write that lost (see `refuses`); otherwise writes, waits
+   * for `settle()` and reads back whose claim stands. Returns the claim that
+   * holds, which is somebody else's when this failed.
    */
   async claim(
     ticketId: string,
@@ -322,7 +379,7 @@ export class WorkSync {
       }
       throw err;
     }
-    if (this.conditionalStore.supportsConditionalWrite) {
+    if (await this.refuses()) {
       return mine;
     }
     await options.settle?.();
@@ -339,11 +396,14 @@ export class WorkSync {
         Buffer.from(JSON.stringify({ ...existing, seenAt: now }), "utf8"),
         etag ? { ifMatch: etag } : undefined,
       );
-      return true;
     } catch (err) {
       if (isPreconditionFailedError(err)) return false;
       throw err;
     }
+    if (await this.refuses()) return true;
+    // The store wrote without looking at the condition: another installation may have taken the
+    // ticket over between the read and the write. Whose claim stands now is read back.
+    return (await this.readClaim(ticketId))?.client === client;
   }
 
   async release(ticketId: string, client: string): Promise<void> {

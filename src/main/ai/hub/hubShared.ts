@@ -124,6 +124,7 @@ export const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubR
   "chat-answering-task",
   "chat-answering-runs",
   "chat-link-code",
+  "workspace-s3-invite",
 ]);
 /**
  * An agent as it arrives from the team bucket, made safe to take: whoever can

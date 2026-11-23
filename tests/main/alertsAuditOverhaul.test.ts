@@ -4,7 +4,6 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import type { InboxItem } from "../../src/shared/aiHubInbox";
 import type {
   AgentSchedule,
   AgentTask,
@@ -24,10 +23,6 @@ import {
   topologyNeighbors,
 } from "../../src/main/ai/hub/AlertIntake";
 import {
-  AUTO_PAUSE_MAX_SECONDS,
-  AUTO_PAUSE_MIN_SECONDS,
-  evaluateAutoPause,
-  evaluateEscalations,
   evaluateFlapCooldown,
   evaluateNoiseBudget,
   isQuietHours,
@@ -259,25 +254,6 @@ describe("Notifier & NotifyStore overhaul", () => {
     // After cooldown expires and outside window, allowed again
     r = evaluateFlapCooldown("fp-1", flapState, NOW + 25 * MIN, { maxChangesBeforeFlap: 3, cooldownMs: 10 * MIN });
     expect(r.allow).toBe(true);
-
-    // Auto-Pause: clamps cushion to [60, 120]s, holds non-critical transients, passes critical/approval immediately
-    const warnItem: InboxItem = { id: "alert:w1", kind: "alert", title: "Transient CPU", at: NOW, since: NOW, risk: "warning" };
-    const critItem: InboxItem = { id: "alert:c1", kind: "alert", title: "Disk full", at: NOW, since: NOW, risk: "critical" };
-    const ap1 = evaluateAutoPause([warnItem, critItem], {}, NOW + 10_000, { cushionSeconds: 30 }); // clamped to 60s
-    expect(ap1.ready.map((i) => i.id)).toEqual(["alert:c1"]);
-    expect(ap1.held.map((i) => i.id)).toEqual(["alert:w1"]);
-    expect(ap1.pending["alert:w1"].releaseAt).toBe(NOW + AUTO_PAUSE_MIN_SECONDS * 1000);
-
-    // If transient resolves before releaseAt, it drops out without notifying
-    const apResolved = evaluateAutoPause([], ap1.pending, NOW + 40_000, { cushionSeconds: 30 });
-    expect(apResolved.ready).toEqual([]);
-    expect(apResolved.pending).toEqual({});
-
-    // If still active after clamped max (120s), it releases
-    const apMax = evaluateAutoPause([warnItem], {}, NOW, { cushionSeconds: 300 });
-    expect(apMax.pending["alert:w1"].releaseAt).toBe(NOW + AUTO_PAUSE_MAX_SECONDS * 1000);
-    const apReleased = evaluateAutoPause([warnItem], apMax.pending, NOW + 120_000, { cushionSeconds: 300 });
-    expect(apReleased.ready.map((i) => i.id)).toEqual(["alert:w1"]);
   });
 
   it("enforces quiet hours and hourly noise budget with critical bypass", () => {
@@ -305,48 +281,40 @@ describe("Notifier & NotifyStore overhaul", () => {
     expect(bRes.suppressed.map((i) => i.id)).toEqual(["a1"]);
   });
 
-  it("supports multi-step ack-aware escalation tiers and upgrades NotifyStore without breaking legacy load/save", async () => {
+  it("loads a notify file of an earlier version, and does not carry on what nothing ever used", async () => {
     const dir = await makeTempDir("sshs3-notifystore-");
     const file = path.join(dir, "notify.json");
-    // Simulate legacy v1 file without new keys
+    // As earlier versions wrote it: without the newer keys, and with the state of the escalation tiers
+    // and the auto-pause cushion, which were kept and never used.
     await fs.writeFile(
       file,
-      JSON.stringify({ version: 1, channels: [], seen: { "approval:1": NOW }, reminded: {}, publicUrl: "", reminderMinutes: 5 }),
+      JSON.stringify({
+        version: 1,
+        channels: [],
+        seen: { "approval:1": NOW },
+        reminded: {},
+        publicUrl: "",
+        reminderMinutes: 5,
+        pushHistory: [NOW - 20 * MIN],
+        escalations: { "approval:1": { tier: 2, lastTierAt: NOW, ackedAt: NOW, ackedBy: "jacob" } },
+        autoPausePending: { "alert:w1": { firstAt: NOW, releaseAt: NOW + 60_000, kind: "alert" } },
+        autoPauseSeconds: 90,
+        escalationMinutes: [5, 15],
+      }),
     );
     const store = new NotifyStore(file);
     await store.load();
     expect(store.data.seen["approval:1"]).toBe(NOW);
-    expect(store.data.escalations).toEqual({});
-
-    const items: InboxItem[] = [
-      { id: "approval:1", kind: "approval", title: "Restart nginx", at: NOW, since: NOW },
-      { id: "approval:2", kind: "approval", title: "Drop temp table", at: NOW, since: NOW },
-    ];
-    const seen = { "approval:1": NOW, "approval:2": NOW };
-
-    // Step 1 at +5 min
-    const step1 = evaluateEscalations(items, seen, {}, NOW + 5 * MIN, { tierMinutes: [5, 15, 30] });
-    expect(step1.due.map((d) => [d.item.id, d.tier])).toEqual([
-      ["approval:1", 1],
-      ["approval:2", 1],
-    ]);
-
-    // Acknowledge approval:1 -> stops escalating while approval:2 advances to tier 2 after +15m
-    store.data.seen = seen;
-    store.data.escalations = step1.escalations;
-    store.acknowledge("approval:1", "jacob", NOW + 6 * MIN);
-    const step2 = evaluateEscalations(items, store.data.seen, store.data.escalations, NOW + 20 * MIN, { tierMinutes: [5, 15, 30] });
-    expect(step2.due.map((d) => [d.item.id, d.tier])).toEqual([["approval:2", 2]]);
-
-    // Persist and reload
-    store.data.escalations = step2.escalations;
-    store.recordPush(NOW + 20 * MIN);
+    expect(store.data.pushHistory).toEqual([NOW - 20 * MIN]);
+    expect(store.data.held).toEqual([]);
+    for (const gone of ["escalations", "autoPausePending", "autoPauseSeconds", "escalationMinutes"]) expect(store.data).not.toHaveProperty(gone);
     await store.save();
+    const written = JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+    for (const gone of ["escalations", "autoPausePending", "autoPauseSeconds", "escalationMinutes"]) expect(written).not.toHaveProperty(gone);
 
     const reloaded = new NotifyStore(file);
     await reloaded.load();
-    expect(reloaded.data.escalations?.["approval:1"].ackedBy).toBe("jacob");
-    expect(reloaded.data.escalations?.["approval:2"].tier).toBe(2);
+    expect(reloaded.data.seen["approval:1"]).toBe(NOW);
     expect(reloaded.data.pushHistory).toHaveLength(1);
   });
 

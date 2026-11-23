@@ -10,6 +10,7 @@ import type {
 import { simFactsOutput } from "../../../sim/facts";
 import { simWorld } from "../../../sim/SimWorld";
 import { flagStaleMemories, type FactsRecord } from "../FactsStore";
+import type { ListedObject, QueueStore } from "../LearningQueue";
 import { buildScript, diffFacts, factsHash, factsSummary, isWatchPath, parseFacts, problems } from "../ServerFacts";
 import { demoFactsOutput } from "../demoFacts";
 import { isDemoMode } from "../demoWorkspace";
@@ -179,27 +180,48 @@ export class FactsPart {
   async pullSharedFacts(this: HubService): Promise<boolean> {
     if (!this.s3Workspace.canUseBucket() || isDemoMode()) return false;
     let taken = false;
-    const objects = this.s3Workspace.objects;
-    const names = (await objects.list("work/facts/heads")).filter((n) => n.endsWith(".json")).slice(0, 1000);
+    const objects: QueueStore = this.s3Workspace.objects;
+    const listed: ListedObject[] = (objects.listWithMeta ? await objects.listWithMeta("work/facts/heads") : (await objects.list("work/facts/heads")).map((name) => ({ name }))).filter((e) =>
+      e.name.endsWith(".json"),
+    );
     // Only readings of servers this installation knows as shared: a teammate's personal server is not ours to see.
     const shared = new Set(this.getKnownServers().filter((s) => s.shared).map((s) => s.id));
-    for (const name of names) {
+    for (const { name, version } of listed) {
+      // The same head as last time, and what it said was dealt with then, or it is of a server that is
+      // still not ours to see: nothing is downloaded. This runs with every sync of the board.
+      const seen = this.factsHeadSeen.get(name);
+      if (version && seen?.version === version && (seen.done || !shared.has(seen.serverId))) continue;
       try {
         const head = JSON.parse((await objects.read(`work/facts/heads/${name}`))?.toString("utf8") ?? "null") as { serverId?: string; collectedAt?: number; hash?: string } | null;
-        if (!head?.serverId || !head.collectedAt || !shared.has(head.serverId)) continue;
+        const note = (done: boolean): void => {
+          if (version) this.factsHeadSeen.set(name, { version, serverId: head?.serverId ?? "", done });
+        };
+        if (!head?.serverId || !head.collectedAt) {
+          note(true);
+          continue;
+        }
+        if (!shared.has(head.serverId)) {
+          // Looked at again when the server becomes one of ours.
+          note(false);
+          continue;
+        }
         this.factsHeads.set(head.serverId, { collectedAt: head.collectedAt, hash: head.hash ?? "" });
         const mine = this.factsStore.get(head.serverId);
-        if ((mine?.collectedAt ?? 0) >= head.collectedAt) continue;
-        const data = JSON.parse((await objects.read(`work/facts/data/${name}`))?.toString("utf8") ?? "null") as FactsRecord | null;
-        // Stamped with the head's time: the data is written only when it changed, so it can be older than the reading.
-        if (data?.serverId === head.serverId && data.facts) {
-          await this.factsStore.put({ ...data, collectedAt: Math.max(data.collectedAt ?? 0, head.collectedAt), dismissed: mine?.dismissed, changes: data.changes ?? [] });
-          taken = true;
+        if ((mine?.collectedAt ?? 0) < head.collectedAt) {
+          const data = JSON.parse((await objects.read(`work/facts/data/${name}`))?.toString("utf8") ?? "null") as FactsRecord | null;
+          // Stamped with the head's time: the data is written only when it changed, so it can be older than the reading.
+          if (data?.serverId === head.serverId && data.facts) {
+            await this.factsStore.put({ ...data, collectedAt: Math.max(data.collectedAt ?? 0, head.collectedAt), dismissed: mine?.dismissed, changes: data.changes ?? [] });
+            taken = true;
+          }
         }
+        note(true);
       } catch {
-        // One unreadable object does not stop the rest.
+        // One unreadable object does not stop the rest, and is tried again next time.
       }
     }
+    const names = new Set(listed.map((e) => e.name));
+    for (const name of [...this.factsHeadSeen.keys()]) if (!names.has(name)) this.factsHeadSeen.delete(name);
     return taken;
   }
   /**

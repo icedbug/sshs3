@@ -371,6 +371,11 @@ export function NotificationsCard({
                   </>
                 )}
               </small>
+              {c.secretUnread && (
+                <small className="ai-bad" data-testid={`notify-channel-unread-${c.id}`}>
+                  Its address could not be read on this start, so nothing is sent to it. It is kept as it was stored. Start sshs3 again with the keyring unlocked, or edit the channel and enter the address again.
+                </small>
+              )}
               {testing[c.id] && <small role="status">{testing[c.id]}</small>}
             </div>
             <div className="ai-card-actions">
@@ -835,9 +840,14 @@ export function NotificationsCard({
                     }))
                   }
                 />
-                <span>Allow critical alerts &amp; destructive approvals</span>
+                <span>Still send critical alerts</span>
               </label>
             </div>
+          )}
+          {policy.quietHours.enabled && (
+            <p className="ai-hint" data-testid="quiet-hours-held-note">
+              During quiet hours nothing else is sent to the channels. What was held back is sent as one message when they end, and it stays in the inbox meanwhile.
+            </p>
           )}
         </div>
 

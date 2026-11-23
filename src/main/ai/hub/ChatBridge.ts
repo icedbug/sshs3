@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { decryptSecretValue, encryptSecretValue } from "../../crypto/SecretFieldCrypto";
+import { openSecretValue, sealSecretValue, unreadSecretNote } from "../../crypto/SecretFieldCrypto";
 import { ChatIndex, type ChatSearchQuery, type ChatThreadHit, type IndexedChannel, type StoredMessage } from "./ChatIndex";
 import { ChatError, mattermostApi, slackApi, type ChatAuth, type ChatMessage, type ChatRead, type ChatService, type ChatTransport } from "./ChatSources";
 import { guardUrl, request, type GuardOptions } from "./Notifier";
@@ -44,8 +44,12 @@ export const CHAT_FIRST_READ_DAYS = 90;
 /** Slack lists replies apart: threads this young are asked again for new ones. */
 const THREAD_WATCH_MS = 7 * 86_400_000;
 const THREAD_RECHECK_MS = 10 * 60_000;
-/** How far back a channel is looked over for messages that got their first reply later. */
+/** How far back a channel is looked over again: for messages that got their first reply later, and for ones that were edited or deleted. */
 const THREAD_RESCAN_MS = 2 * 86_400_000;
+/** A message this young may not be in an answer that was already on its way: it is not taken for deleted. */
+const JUST_WRITTEN_MS = 60_000;
+/** A thread's replies are read up to about this many at once (ten pages): more than that, and it cannot be said that all of them were read. */
+const WHOLE_THREAD_MAX = 1_800;
 const SERVICES: ChatService[] = ["slack", "mattermost"];
 const NAME: Record<ChatService, string> = { slack: "Slack", mattermost: "Mattermost" };
 
@@ -68,6 +72,14 @@ export class ChatBridge {
   private loading?: Promise<void>;
   private running: Promise<unknown> = Promise.resolve();
   private writes: Promise<void> = Promise.resolve();
+  /**
+   * A token that was stored encrypted and could not be decrypted on this start: the ciphertext as it
+   * was stored. In memory the token is empty; what is written back is the ciphertext, unchanged, so one
+   * start without the keyring does not lose the token for good.
+   */
+  private readonly unread: Partial<Record<ChatService, string>> = {};
+  /** The list of the bot's channels could not be read: how often in a row, and when it is asked again. */
+  private readonly listRetry: Partial<Record<ChatService, { failures: number; notBefore: number }>> = {};
   /** Kept for how long, in days. Nothing: for good. */
   retentionDays?: number;
   private lastPrune = 0;
@@ -101,8 +113,12 @@ export class ChatBridge {
     return (this.loading ??= (async () => {
       try {
         const raw = JSON.parse(await fs.readFile(path.join(this.dir, "connections.json"), "utf8")) as { connections?: ChatConnection[]; retentionDays?: number };
-        for (const c of raw.connections ?? [])
-          if (c && SERVICES.includes(c.service)) this.connections[c.service] = { ...c, token: decryptSecretValue(c.token ?? ""), enabled: c.enabled !== false };
+        for (const c of raw.connections ?? []) {
+          if (!c || !SERVICES.includes(c.service)) continue;
+          const token = openSecretValue(c.token ?? "");
+          if (token.kept) this.unread[c.service] = token.kept;
+          this.connections[c.service] = { ...c, token: token.value, enabled: c.enabled !== false };
+        }
         if (typeof raw.retentionDays === "number" && raw.retentionDays > 0) this.retentionDays = Math.floor(raw.retentionDays);
       } catch {
         // Not set up yet.
@@ -111,14 +127,21 @@ export class ChatBridge {
     })());
   }
 
+  /** The bot's token is stored but could not be read on this start. */
+  private tokenUnread(service: ChatService): boolean {
+    return Boolean(this.unread[service]) && !this.connections[service]?.token;
+  }
+
   private persist(): Promise<void> {
+    // A connection that is gone, or one with a token a person entered, has no use for the old ciphertext.
+    for (const service of SERVICES) if (!this.connections[service] || this.connections[service]!.token) delete this.unread[service];
     const content = JSON.stringify({
       version: 1,
       retentionDays: this.retentionDays,
       // A simulated connection is the lab's, for as long as its scenario runs: it is not kept.
       connections: Object.values(this.connections)
         .filter((c) => !c.simulated)
-        .map((c) => ({ ...c, token: encryptSecretValue(c.token) })),
+        .map((c) => ({ ...c, token: sealSecretValue(c.token, this.unread[c.service]) })),
     });
     const write = async (): Promise<void> => {
       await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -155,7 +178,8 @@ export class ChatBridge {
           enabled: c.enabled,
           bot: c.bot,
           workspace: c.workspace,
-          lastError: c.lastError,
+          // A token that could not be read on this start is said here, where a failed read is said.
+          lastError: this.tokenUnread(service) ? unreadSecretNote("The bot's token") : c.lastError,
           ...(c.simulated ? { simulated: true } : {}),
           channels: this.index.list(service).map((ch) => ({
             id: ch.id,
@@ -185,10 +209,13 @@ export class ChatBridge {
     const sameSite = had ? (had.baseUrl ?? "") === (baseUrl ?? "") : false;
     // A token is for one place: at another address it is not sent along.
     const token = input.token?.trim() || (sameSite ? had?.token : "") || "";
-    if (!token) throw new Error(had && !sameSite ? "The address changed, so the token has to be entered again." : "The bot's token is needed.");
+    // A token for this place that is stored but could not be read on this start stays as it is stored.
+    const kept = sameSite && this.tokenUnread(input.service);
+    if (!token && !kept) throw new Error(had && !sameSite ? "The address changed, so the token has to be entered again." : "The bot's token is needed.");
     if (input.service === "slack" && input.token?.trim() && !/^xox[be]-/.test(token))
       throw new Error("That does not look like a Slack bot token (it starts with xoxb-). A person's own token is not used: the bot reads only what it was invited to.");
     this.connections[input.service] = { ...(sameSite ? had : {}), service: input.service, baseUrl, token, enabled: input.enabled !== false, lastError: undefined };
+    delete this.listRetry[input.service];
     await this.persist();
     this.changed();
     return { target: NAME[input.service], what: `Team chat: the bot's connection to ${NAME[input.service]} was saved` };
@@ -209,7 +236,7 @@ export class ChatBridge {
   async test(service: ChatService, now = Date.now()): Promise<{ ok: boolean; bot?: string; workspace?: string; channels?: number; error?: string }> {
     const auth = this.auth(service, true);
     const connection = this.connections[service];
-    if (!auth || !connection) return { ok: false, error: "Save the token first." };
+    if (!auth || !connection) return { ok: false, error: this.tokenUnread(service) ? unreadSecretNote("The bot's token") : "Save the token first." };
     try {
       if (service === "slack") {
         const me = await slackApi.identity(this.send, auth);
@@ -219,6 +246,7 @@ export class ChatBridge {
         Object.assign(connection, { bot: me.name, workspace: me.workspace });
       }
       const channels = await this.refreshChannels(service, auth, now);
+      delete this.listRetry[service];
       connection.lastError = undefined;
       await this.persist();
       this.changed();
@@ -341,6 +369,11 @@ export class ChatBridge {
           ? await slackApi.replies(this.send, auth, channel, threadId, 0, connection.site ?? "", this.names.slack, true)
           : await mattermostApi.thread(this.send, auth, channel, threadId, this.names.mattermost);
       await this.index.add(service, channelId, messages);
+      // The whole thread was read: what is kept of it and is no longer there was deleted.
+      if (messages.length && messages.length < WHOLE_THREAD_MAX) {
+        const until = Date.now() - JUST_WRITTEN_MS;
+        await this.index.dropGone(service, channelId, (m) => m.threadId === threadId && m.at <= until, messages);
+      }
     } catch {
       // The service could not be asked now: what was read before is still worth having.
     }
@@ -369,8 +402,19 @@ export class ChatBridge {
         const auth = this.auth(service);
         const connection = this.connections[service];
         if (!auth || !connection) continue;
-        if (now - (connection.channelsAt ?? 0) > 30 * 60_000 && this.index.list(service).some((c) => c.selected)) {
-          await this.refreshChannels(service, auth, now).catch((error) => (connection.lastError = clip(safeError(error), 300)));
+        const retry = this.listRetry[service];
+        if (now - (connection.channelsAt ?? 0) > 30 * 60_000 && now >= (retry?.notBefore ?? 0) && this.index.list(service).some((c) => c.selected)) {
+          try {
+            await this.refreshChannels(service, auth, now);
+            delete this.listRetry[service];
+          } catch (error) {
+            // Not asked again at every tick while it fails: after two minutes, then four, up to an hour,
+            // or when the service says. A test of the connection, or saving it, asks at once.
+            const failures = (retry?.failures ?? 0) + 1;
+            const pause = error instanceof ChatError && error.retryAfterMs ? error.retryAfterMs : Math.min(60, 2 ** failures) * 60_000;
+            this.listRetry[service] = { failures, notBefore: now + pause };
+            connection.lastError = clip(safeError(error), 300);
+          }
           touched = true;
         }
         for (const channel of this.index.list(service)) {
@@ -444,19 +488,28 @@ export class ChatBridge {
       else channel.gaps = channel.gaps!.slice(1);
       if (!channel.gaps?.length) channel.gaps = undefined;
     }
-    if (service === "slack") {
-      // A first reply to an earlier message does not show among what is new: the last two days are
-      // looked over now and then, and a message that has got replies since is found there.
-      if (now - (channel.rescannedAt ?? 0) >= THREAD_RECHECK_MS) {
-        const recent = await this.history(service, auth, connection, channel, { afterMs: now - THREAD_RESCAN_MS }, 400);
-        await this.index.add(service, channel.id, recent.messages);
+    // The last two days are looked over now and then. In Slack a first reply to an earlier message does
+    // not show among what is new, and a message that has got replies since is found there. In both
+    // services it is where an edit or a deletion shows: a message that was changed there takes its new
+    // words here (index.add), and one that is gone from the stretch is removed here, provided the whole
+    // stretch was read. Older than two days, what is kept stays as it was read.
+    if (now - (channel.rescannedAt ?? 0) >= THREAD_RECHECK_MS) {
+      const since = now - THREAD_RESCAN_MS;
+      const recent = await this.history(service, auth, connection, channel, { afterMs: since }, 400);
+      await this.index.add(service, channel.id, recent.messages);
+      if (!recent.more) {
+        const until = now - JUST_WRITTEN_MS;
+        // Slack lists a channel's own messages here and a thread's replies apart; Mattermost lists every post.
+        await this.index.dropGone(service, channel.id, (m) => m.at > since && m.at <= until && (service !== "slack" || m.threadId === m.id), recent.messages);
+      }
+      if (service === "slack") {
         withReplies.push(...recent.threads);
         channel.threads ??= {};
         for (const t of recent.threads) channel.threads[t.id] ??= { latest: 0, checked: 0 };
-        channel.rescannedAt = now;
       }
-      await this.readSlackThreads(auth, connection, channel, withReplies, now);
+      channel.rescannedAt = now;
     }
+    if (service === "slack") await this.readSlackThreads(auth, connection, channel, withReplies, now);
   }
 
   /**
@@ -465,6 +518,10 @@ export class ChatBridge {
    * replies are read, and threads younger than a week are asked again now and
    * then. Not seen: a reply to a thread older than a week, and a first reply
    * to a message older than two days.
+   *
+   * A thread is asked for its replies of the last two days again, not only for
+   * the ones after the newest one kept: a reply that was edited takes its new
+   * words, and one that is gone is removed. Older replies stay as they were read.
    */
   private async readSlackThreads(auth: ChatAuth, connection: ChatConnection, channel: IndexedChannel, seen: { id: string; latestAt: number }[], now: number): Promise<void> {
     const threads = (channel.threads ??= {});
@@ -477,8 +534,13 @@ export class ChatBridge {
     }
     for (const id of due) {
       const state = (threads[id] ??= { latest: 0, checked: 0 });
-      const replies = await slackApi.replies(this.send, auth, channel, id, state.latest, connection.site ?? "", this.names.slack);
+      const since = Math.max(0, Math.min(state.latest, now - THREAD_RESCAN_MS));
+      const replies = await slackApi.replies(this.send, auth, channel, id, since, connection.site ?? "", this.names.slack);
       await this.index.add("slack", channel.id, replies);
+      if (replies.length < WHOLE_THREAD_MAX) {
+        const until = now - JUST_WRITTEN_MS;
+        await this.index.dropGone("slack", channel.id, (m) => m.threadId === id && m.id !== id && m.at > since && m.at <= until, replies);
+      }
       if (replies.length) state.latest = replies[replies.length - 1].at;
       state.checked = now;
     }

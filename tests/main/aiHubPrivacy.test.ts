@@ -36,10 +36,16 @@ describe("maskContext", () => {
       "key-".repeat(7500),
     ];
     for (const input of inputs) {
-      const started = performance.now();
-      expect(maskContext(input)).toBe(input);
+      // The best of five runs: one run alone is slowed by whatever else the machine is doing, and this
+      // test failed on a busy one while the code was right (about 10 ms a run).
+      let best = Infinity;
+      for (let run = 0; run < 5; run++) {
+        const started = performance.now();
+        expect(maskContext(input)).toBe(input);
+        best = Math.min(best, performance.now() - started);
+      }
       // Was 200–900 ms each before the patterns were bounded.
-      expect(performance.now() - started).toBeLessThan(100);
+      expect(best).toBeLessThan(100);
     }
   });
 

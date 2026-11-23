@@ -1013,7 +1013,7 @@ export function Settings({
               />
               <span>
                 Learn from finished work
-                <small>After a finished task, suggest team memories and write what was confirmed into knowledge base pages.</small>
+                <small>After a finished task, suggest team memories and write what was confirmed into knowledge base pages. With a team bucket, the finished conversation is uploaded there so that a teammate&rsquo;s app can read it. A conversation about a server marked Personal is left out: it is not uploaded and nothing is learned from it.</small>
               </span>
             </label>
             <label className="ai-check">

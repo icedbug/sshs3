@@ -21,8 +21,20 @@ export interface QueueWriteOptions {
   ifMatch?: string;
 }
 
+/**
+ * A name in a listing, with a mark that changes whenever the object does: its ETag, or where there is
+ * none, what a file system tells of a file that was replaced. No mark: it cannot be told whether the
+ * object changed, and whoever asks reads it.
+ */
+export interface ListedObject {
+  name: string;
+  version?: string;
+}
+
 export interface QueueStore {
   list(dir: string): Promise<string[]>;
+  /** The same listing with each object's mark, asked of the store afresh. A store that cannot tell leaves it out. */
+  listWithMeta?(dir: string): Promise<ListedObject[]>;
   /** undefined when the object does not exist. */
   read(path: string): Promise<Buffer | undefined>;
   write(path: string, content: Buffer, options?: QueueWriteOptions): Promise<void>;

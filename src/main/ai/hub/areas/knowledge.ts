@@ -819,11 +819,19 @@ export class KnowledgePart {
           doc.original = before.original;
           if (doc.shared === false && before.original && !before.original.keptLocal && before.shared !== false) {
             const team = this.teamStore();
-            if (!team) throw new Error("Connect to your team storage to make this original private.");
-            // Keep the owner's own copy before withdrawing the original from the team.
-            if (!(await this.readKbOriginal(before))) throw new Error("The original file could not be saved here. Try again when your team storage is available.");
-            await team.remove(this.kbOriginalKey(before));
-            doc.original = { ...before.original, keptLocal: true };
+            // Keep the owner's own copy before withdrawing the original from the team. Without team
+            // storage the file is here when it was added here: then it was never uploaded, or it was
+            // uploaded to a store that is not connected now, and its copy there is taken out when the
+            // store is next reached (`withdraw`, see syncSharedSetup). Only a file that is not here
+            // needs the store, to be fetched from it first.
+            if (!(await this.readKbOriginal(before)))
+              throw new Error(
+                team
+                  ? "The original file could not be saved here. Try again when your team storage is available."
+                  : "The original file is not on this computer, because a teammate added it. Connect to your team storage to make this original private.",
+              );
+            if (team) await team.remove(this.kbOriginalKey(before));
+            doc.original = { ...before.original, keptLocal: true, ...(team ? {} : { withdraw: true }) };
           }
           if (doc.shared === false) {
             const sourceId = new Set([doc.id]);

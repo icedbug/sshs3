@@ -313,7 +313,14 @@ export class McpPart {
           JSON.stringify([x.transport, x.command, x.args ?? [], x.url]);
         if (existing && reach(existing) !== reach(saved)) {
           // It is a different server now: what the old one answered no longer holds, and neither does
-          // trust in what it says about its own tools. A tool that was denied stays denied.
+          // trust in what it says about its own tools. A tool that was denied stays denied, and one
+          // set to ask still asks. "Allow" was said about the old server's tool: a tool of the same
+          // name on the new one is asked about again until a person allows it there.
+          const allowed = Object.entries(saved.toolPolicies ?? {}).filter(([, policy]) => policy === "allow").map(([tool]) => tool);
+          if (allowed.length) {
+            saved.toolPolicies = Object.fromEntries(Object.entries(saved.toolPolicies ?? {}).filter(([, policy]) => policy !== "allow"));
+            reply = { notes: [`${saved.name} now points somewhere else. ${allowed.length === 1 ? `The tool "${allowed[0]}" was set to Allow for the old server and is` : `${allowed.length} tools were set to Allow for the old server and are`} asked about again. Tools set to Ask or Deny stay as they were.`] };
+          }
           saved.trustReadOnlyHint = s.trustReadOnlyHint ?? false;
           saved.discoveredTools = [];
           saved.status = "unknown";

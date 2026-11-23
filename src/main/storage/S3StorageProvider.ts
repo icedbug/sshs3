@@ -293,6 +293,9 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
           mtime: item.LastModified ? formatDate(item.LastModified) : undefined,
           mtimeMs: item.LastModified ? item.LastModified.getTime() : undefined,
           mimeType: getMimeType(name),
+          // The listing's own mark of the object's content, as `stat` gives it: a reader that kept it
+          // can tell from a listing alone that an object has not changed.
+          ...(item.ETag ? { etag: item.ETag.replace(/["']/g, '') } : {}),
         });
       }
 

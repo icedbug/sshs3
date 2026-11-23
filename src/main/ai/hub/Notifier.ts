@@ -57,6 +57,13 @@ export interface NotifyContext {
   /** The person whose installation this is: on a shared server, only they can approve. */
   owner?: string;
   inboxLink?: string;
+  /**
+   * The message's own first line, for a message that is a list whatever the number of its items: what
+   * was held back while notifications were quiet, told afterwards. One item is then a list of one.
+   */
+  heading?: string;
+  /** How many more there were than are listed: said in the list's last line. */
+  more?: number;
 }
 
 const SEVERITY = { info: 0, warning: 1, critical: 2 } as const;
@@ -153,64 +160,6 @@ export function evaluateFlapCooldown(
   return { allow: true, flapping: false, nextState };
 }
 
-export const AUTO_PAUSE_MIN_SECONDS = 60;
-export const AUTO_PAUSE_MAX_SECONDS = 120;
-export const DEFAULT_AUTO_PAUSE_SECONDS = 90;
-
-export interface AutoPauseEntry {
-  firstAt: number;
-  releaseAt: number;
-  kind: string;
-  risk?: string;
-}
-
-/**
- * Cushions non-critical transient alerts/health items for 60–120 seconds before
- * pushing. If the item resolves/leaves the inbox before `releaseAt`, it is
- * dropped without ever notifying; critical/blocking items bypass immediately.
- *
- * Not used by the app yet: nothing calls it, and `autoPauseSeconds` has no setting.
- */
-export function evaluateAutoPause(
-  items: InboxItem[],
-  pending: Record<string, AutoPauseEntry>,
-  now: number,
-  options: { cushionSeconds?: number; enabled?: boolean } = {},
-): { ready: InboxItem[]; held: InboxItem[]; pending: Record<string, AutoPauseEntry> } {
-  if (options.enabled === false) {
-    return { ready: items, held: [], pending: {} };
-  }
-  const rawSeconds = options.cushionSeconds ?? DEFAULT_AUTO_PAUSE_SECONDS;
-  const clampedSeconds = Math.min(AUTO_PAUSE_MAX_SECONDS, Math.max(AUTO_PAUSE_MIN_SECONDS, rawSeconds));
-  const cushionMs = clampedSeconds * 1000;
-  const nextPending: Record<string, AutoPauseEntry> = {};
-  const ready: InboxItem[] = [];
-  const held: InboxItem[] = [];
-
-  for (const item of items) {
-    const isCriticalOrBlocking =
-      item.risk === "critical" ||
-      item.risk === "destructive" ||
-      item.kind === "approval" ||
-      item.kind === "peer" ||
-      item.kind === "plan" ||
-      item.kind === "question";
-    if (isCriticalOrBlocking) {
-      ready.push(item);
-      continue;
-    }
-    const existing = pending[item.id];
-    const releaseAt = existing ? existing.releaseAt : (item.since ?? item.at ?? now) + cushionMs;
-    if (now >= releaseAt) {
-      ready.push(item);
-    } else {
-      nextPending[item.id] = existing ?? { firstAt: now, releaseAt, kind: item.kind, risk: item.risk };
-      held.push(item);
-    }
-  }
-  return { ready, held, pending: nextPending };
-}
-
 export interface QuietHoursConfig {
   enabled: boolean;
   /** Hour [0..23] when quiet hours begin. */
@@ -297,71 +246,6 @@ export function evaluateNoiseBudget<T extends Pick<NotifyItem, "id" | "kind" | "
   };
 }
 
-export interface EscalationEntry {
-  tier: number;
-  lastTierAt: number;
-  ackedAt?: number;
-  ackedBy?: string;
-}
-
-export interface EscalationConfig {
-  /** Minutes elapsed at each step before escalating to the next tier (default [5, 15, 30]). */
-  tierMinutes?: number[];
-  /** Maximum escalation tier (default tierMinutes.length). */
-  maxTier?: number;
-  /** Item kinds eligible for multi-step escalation (default ["approval", "plan", "question", "alert"]). */
-  kinds?: InboxKind[];
-}
-
-/**
- * Evaluates multi-step, acknowledgement-aware escalation tiers for already-seen
- * items. Once an item is acknowledged (`ackedAt` set), further escalation stops.
- *
- * Not used by the app yet: an unanswered approval is reminded about once (HubService.flushInbox),
- * and an item acknowledged or snoozed in the inbox is not reminded about at all.
- */
-export function evaluateEscalations(
-  items: InboxItem[],
-  seen: Record<string, number>,
-  escalations: Record<string, EscalationEntry>,
-  now: number,
-  config: EscalationConfig = {},
-): {
-  due: Array<{ item: InboxItem; tier: number }>;
-  escalations: Record<string, EscalationEntry>;
-  reminded: Record<string, number>;
-} {
-  const tierMinutes = config.tierMinutes?.length ? config.tierMinutes : [5, 15, 30];
-  const maxTier = config.maxTier ?? tierMinutes.length;
-  const kinds = new Set<InboxKind>(config.kinds ?? ["approval", "plan", "question", "alert"]);
-  const nextEscalations: Record<string, EscalationEntry> = {};
-  const reminded: Record<string, number> = {};
-  const due: Array<{ item: InboxItem; tier: number }> = [];
-
-  for (const item of items) {
-    const firstSeenAt = seen[item.id];
-    if (firstSeenAt === undefined) continue;
-    const prev = escalations[item.id];
-    if (prev) nextEscalations[item.id] = { ...prev };
-    if (!kinds.has(item.kind)) continue;
-    if (prev?.ackedAt !== undefined) continue;
-
-    const currentTier = prev?.tier ?? 0;
-    if (currentTier >= maxTier) continue;
-    const waitMinutes = tierMinutes[Math.min(currentTier, tierMinutes.length - 1)];
-    if (waitMinutes <= 0) continue;
-    const baselineAt = prev?.lastTierAt ?? firstSeenAt;
-    if (now - baselineAt >= waitMinutes * 60_000) {
-      const nextTier = currentTier + 1;
-      nextEscalations[item.id] = { tier: nextTier, lastTierAt: now };
-      reminded[item.id] = now;
-      due.push({ item, tier: nextTier });
-    }
-  }
-
-  return { due, escalations: nextEscalations, reminded };
-}
-
 const HEADLINE: Record<InboxKind, string> = {
   approval: "Approval needed",
   peer: "A teammate's change needs a second person",
@@ -413,20 +297,23 @@ export interface OutgoingRequest {
 
 /**
  * The request that tells a channel about these items. One item is told in
- * full; several that came together are one message with a line each.
+ * full; several that came together are one message with a line each. With a
+ * heading of its own (`context.heading`) the message is such a list also for
+ * one item: what was held back, told afterwards.
  */
 export function renderNotification(channel: NotifyChannel, items: NotifyItem[], context: NotifyContext = {}): OutgoingRequest {
-  const one = items.length === 1 ? items[0] : undefined;
+  const one = items.length === 1 && !context.heading ? items[0] : undefined;
   const link = one?.link ?? context.inboxLink;
   const single = one ? lines(one, channel, context) : undefined;
-  const title = single ? single.head : `${items.length} things are waiting in sshs3`;
+  const title = single ? single.head : (context.heading ?? `${items.length} things are waiting in sshs3`);
   const rows = single
     ? single.body
     : items.slice(0, 12).map((item) => {
         const l = lines(item, channel, context);
         return `${l.head}${item.title && item.title !== item.command ? `: ${shorten(item.title, 120)}` : ""}`;
       });
-  if (!single && items.length > 12) rows.push(`…and ${items.length - 12} more`);
+  const unlisted = Math.max(0, items.length - 12) + (context.more ?? 0);
+  if (!single && unlisted > 0) rows.push(`…and ${unlisted} more`);
   const json = { "Content-Type": "application/json" };
 
   if (channel.kind === "slack") {
@@ -600,43 +487,75 @@ export function verifyStandardWebhook(
 
 // ---- where a notification may be sent ----------------------------------------
 
+/** An IPv6 address as its eight 16-bit groups, whichever way it is written (shortened, in full, with a dotted IPv4 tail). */
+function groupsOf(address: string): number[] | undefined {
+  if (!net.isIPv6(address)) return undefined;
+  let text = address.split("%")[0].toLowerCase();
+  const tail = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+  if (tail) text = `${text.slice(0, tail.index)}${((Number(tail[1]) << 8) | Number(tail[2])).toString(16)}:${((Number(tail[3]) << 8) | Number(tail[4])).toString(16)}`;
+  const [head, rest] = text.split("::");
+  const left = head ? head.split(":") : [];
+  const right = rest ? rest.split(":") : [];
+  const fill = text.includes("::") ? 8 - left.length - right.length : 0;
+  const groups = [...left, ...Array<string>(Math.max(0, fill)).fill("0"), ...right].map((g) => parseInt(g, 16));
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : undefined;
+}
+
 /**
  * The IPv4 address an IPv6 address carries, when it carries one: mapped
  * (::ffff:a.b.c.d, or the same in hex, ::ffff:7f00:1, which is how a URL parser
- * and a DNS answer write it), NAT64 (64:ff9b::/96) and the old compatible form
- * (::a.b.c.d). Such an address goes where its IPv4 address goes, and is judged
- * as that.
+ * and a DNS answer write it), translated (::ffff:0:a.b.c.d), NAT64
+ * (64:ff9b::/96), the old compatible form (::a.b.c.d) and 6to4 (2002:AABB:CCDD::/48).
+ * Such an address goes where its IPv4 address goes, and is judged as that.
  */
-function embeddedIPv4(address: string): string | undefined {
-  if (!net.isIPv6(address)) return undefined;
-  const dotted = /^(?:::ffff:|::|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
-  if (dotted) return dotted;
-  const hex = /^(?:::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(address);
-  if (!hex) return undefined;
-  const hi = parseInt(hex[1], 16);
-  const lo = parseInt(hex[2], 16);
-  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+function embeddedIPv4(groups: number[]): string | undefined {
+  const dotted = (hi: number, lo: number): string => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = groups;
+  if (g0 === 0x2002) return dotted(g1, g2);
+  if (g0 === 0x64 && g1 === 0xff9b && !(g2 | g3 | g4 | g5)) return dotted(g6, g7);
+  if (g0 | g1 | g2 | g3) return undefined;
+  if (g4 === 0 && g5 === 0xffff) return dotted(g6, g7);
+  if (g4 === 0xffff && g5 === 0) return dotted(g6, g7);
+  // The compatible form. `::` and `::1` are not IPv4 addresses.
+  if (g4 === 0 && g5 === 0 && (g6 !== 0 || g7 > 1)) return dotted(g6, g7);
+  return undefined;
 }
+
+/**
+ * Where a cloud keeps what only the machine itself should read (credentials, keys, its own settings),
+ * beside 169.254.169.254, which is link-local and refused as that: Alibaba Cloud, Azure's wire server
+ * and Oracle Cloud. Never a destination, on a desktop or on a server.
+ */
+const CLOUD_METADATA_IPV4 = new Set(["100.100.100.200", "168.63.129.16", "192.0.0.192"]);
 
 type AddressClass = "public" | "private" | "loopback" | "link-local" | "never";
 
 /** What kind of place an IP address is. */
 export function addressClass(address: string): AddressClass {
-  const ip = embeddedIPv4(address.replace(/^\[|\]$/g, "")) ?? address.replace(/^\[|\]$/g, "");
+  const bare = address.replace(/^\[|\]$/g, "");
+  const groups = groupsOf(bare);
+  const ip = (groups && embeddedIPv4(groups)) ?? bare;
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split(".").map(Number);
+    if (CLOUD_METADATA_IPV4.has(ip)) return "never";
     if (a === 127) return "loopback";
     if (a === 169 && b === 254) return "link-local";
     if (a === 0 || a >= 224) return "never";
     if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)) return "private";
     return "public";
   }
-  if (!net.isIPv6(ip)) return "never";
-  const low = ip.toLowerCase();
-  if (low === "::1") return "loopback";
-  if (low === "::" || low.startsWith("ff")) return "never";
-  if (/^fe[89ab]/.test(low)) return "link-local";
-  if (/^f[cd]/.test(low)) return "private";
+  if (!groups) return "never";
+  const [g0, g1, g2] = groups;
+  if (groups.every((g, i) => g === (i === 7 ? 1 : 0))) return "loopback";
+  if (groups.every((g) => g === 0) || g0 >> 8 === 0xff) return "never";
+  // Amazon's metadata and its other instance services (fd00:ec2::254 and the rest of the prefix).
+  if (g0 === 0xfd00 && g1 === 0xec2) return "never";
+  // NAT64 for local use (64:ff9b:1::/48): it leads to an IPv4 address, and where in it that address
+  // stands is the network's own choice, so it cannot be read here to be judged.
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return "never";
+  if ((g0 & 0xffc0) === 0xfe80) return "link-local";
+  // Unique local (fc00::/7), and the old site-local prefix (fec0::/10).
+  if ((g0 & 0xfe00) === 0xfc00 || (g0 & 0xffc0) === 0xfec0) return "private";
   return "public";
 }
 

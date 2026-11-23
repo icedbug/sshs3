@@ -533,6 +533,23 @@ describe('S3StorageProvider', () => {
       expect(entries[0].name).toBe('file1.txt');
       expect(entries[1].name).toBe('file2.txt');
     });
+
+    it("gives each object's ETag as the listing has it, without its quotes, and none where the store gives none", async () => {
+      clientSendMock.mockImplementation(async (command: any) => {
+        if (command instanceof ListObjectsV2Command) {
+          return {
+            Contents: [
+              { Key: 'a.json', Size: 2, LastModified: new Date('2026-09-14T15:00:00Z'), ETag: '"9e107d9d372bb6826bd81d3542a419d6"' },
+              { Key: 'b.json', Size: 2, LastModified: new Date('2026-09-14T15:00:00Z') },
+            ],
+          };
+        }
+        throw new Error(`Unexpected command: ${command.constructor.name}`);
+      });
+      const entries = await provider.list('/my-bucket', { force: true });
+      expect(entries.find((e) => e.name === 'a.json')?.etag).toBe('9e107d9d372bb6826bd81d3542a419d6');
+      expect(entries.find((e) => e.name === 'b.json')).not.toHaveProperty('etag');
+    });
   });
 
   describe('stat', () => {

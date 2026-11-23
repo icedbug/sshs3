@@ -685,6 +685,8 @@ export class RunsPart {
             transcript: taskTranscript(task),
           },
           `${task.title} ${task.target?.label ?? ""}`,
+          // The conversation itself: one about a personal server is not uploaded or learned from.
+          task,
         ).catch((e) => log.warn("Memory proposal run failed", safeError(e)));
     }
     task.updatedAt = Date.now();

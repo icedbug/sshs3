@@ -26,6 +26,8 @@ import {
   mergeItems,
   mergeTicketCopies,
   live,
+  retiredRemoval,
+  retiredTicket,
   splitRemovals,
   sumUsage,
   withRemovals,
@@ -62,13 +64,19 @@ export class SharingPart {
       throw new Error("Only an administrator of this server sets up, changes or disconnects the team's bucket.");
   }
 
+  /** The invite code holds the bucket's secret key: on a shared server only an administrator is given it. */
+  mayInviteToBucket(this: HubService): boolean {
+    return !(this.sharedServer() && !this.host.teamAdmin?.());
+  }
+
   /**
-   * The team bucket as this user sees it. Its invite code carries the bucket's secret key, so on a
-   * shared server only an administrator is given it.
+   * The team bucket as the interface shows it to this person: the status, and whether they may ask for
+   * the invite code. The code is in no status, because the status also goes into every conversation's
+   * snapshot and into tool answers. It is made by a request of its own (`workspace-s3-invite`).
    */
   teamBucketView(this: HubService): ReturnType<S3WorkspaceSyncService["getStatus"]> {
     const status = this.s3Workspace.getStatus();
-    return this.sharedServer() && !this.host.teamAdmin?.() ? { ...status, inviteCode: undefined } : status;
+    return { ...status, canInvite: status.configured && this.mayInviteToBucket() };
   }
 
   mergePresence(this: HubService,
@@ -221,10 +229,16 @@ export class SharingPart {
    * rights, and may carry secrets), and so are schedules (they belong to the
    * installation that runs them). The demo lab's invented data is not shared.
    */
-  async syncSharedSetup(this: HubService, sync: WorkSync): Promise<boolean> {
+  async syncSharedSetup(this: HubService, sync: WorkSync, now = Date.now()): Promise<boolean> {
     if (isDemoMode()) return false;
     const removed = (this.store.data.sharedRemoved ??= {});
     let changed = false;
+    // A removal's marker is let go when it is old (WorkBoard RETIRE_AFTER_MS), here as in the store. One of
+    // a built-in agent or document stays: every new installation has the built-in thing again.
+    const builtinIds = new Set([...getBuiltinAgents(), ...getBuiltinKbDocuments()].map((x) => x.id));
+    const retired = (item: Mergeable, at: number): boolean => !builtinIds.has(item.id) && retiredRemoval(item, at);
+    for (const marks of Object.values(removed))
+      for (const [id, at] of Object.entries(marks ?? {})) if (retired({ id, updatedAt: at, deleted: true }, now)) delete marks![id];
 
     // What goes to the bucket is masked: a teammate (and every model their agents use) reads it.
     const agents = await sync.reconcile(
@@ -233,11 +247,24 @@ export class SharingPart {
       // Field by field, a model and the provider it was chosen for together; a removal made after the
       // version an edit started from stands (mergeCopies).
       (l, r) => mergeCopies(l, r, AGENT_FIELD_GROUPS),
+      { now, retired },
     );
     this.applyMergedAgents(agents.items, agents.changed);
     if (agents.changed) changed = true;
 
     const docs = this.store.data.kbDocuments ?? [];
+    // An original made private while no team store was connected: its copy in the store, if it was
+    // ever uploaded there, is taken out now that the store is reached.
+    for (const d of docs) {
+      if (!d.original?.withdraw) continue;
+      const store = this.teamStore();
+      if (!store) break;
+      const withdrawn = await store.remove(this.kbOriginalKey(d)).then(() => true, () => false);
+      if (withdrawn && d.original) {
+        const { withdraw: _done, ...kept } = d.original;
+        d.original = kept;
+      }
+    }
     const privateDocs = this.privateDocumentIds();
     const builtinKbIds = new Set(getBuiltinKbDocuments().map((d) => d.id));
     // The pieces are made from the text, so they are not sent: a document travels once, not twice.
@@ -249,6 +276,7 @@ export class SharingPart {
       ),
       // A removal is final for a user's document, and for a built-in one until somebody restores it: see standingKbCopy.
       (local, remote) => standingKbCopy(local, remote, builtinKbIds.has(local.id)),
+      { now, retired },
     );
     const currentDocs = this.store.data.kbDocuments ?? [];
     const mine = new Map(currentDocs.map((d) => [d.id, d]));
@@ -285,7 +313,7 @@ export class SharingPart {
         (removed.pages ??= {})[page.id] = Math.max(Date.now(), page.updatedAt + 1);
       }
     }
-    const pages = await sync.reconcile("pages", withRemovals(publicPages(), removed.pages), mergePageCopies);
+    const pages = await sync.reconcile("pages", withRemovals(publicPages(), removed.pages), mergePageCopies, { now, retired });
     // Merged into the pages as they are now: one that was compiled here while the bucket was read stays.
     const pagesNow = mergeItems(withRemovals(publicPages(), removed.pages), pages.items, mergePageCopies);
     const pg = splitRemovals(pagesNow.items);
@@ -298,7 +326,7 @@ export class SharingPart {
       changed = true;
     }
 
-    const evals = await sync.reconcile("evals", withRemovals(this.store.data.evalCases ?? [], removed.evals));
+    const evals = await sync.reconcile("evals", withRemovals(this.store.data.evalCases ?? [], removed.evals), undefined, { now, retired });
     const ev = splitRemovals(evals.items);
     removed.evals = ev.removed;
     if (evals.changed) {
@@ -306,7 +334,7 @@ export class SharingPart {
       changed = true;
     }
 
-    const edges = await sync.reconcile("edges", withRemovals(this.store.data.infraEdges ?? [], removed.edges));
+    const edges = await sync.reconcile("edges", withRemovals(this.store.data.infraEdges ?? [], removed.edges), undefined, { now, retired });
     const e = splitRemovals(edges.items);
     removed.edges = e.removed;
     if (edges.changed) {
@@ -337,7 +365,7 @@ export class SharingPart {
           const run = this.store.data.tasks.find((x) => x.id === t.taskId);
           if (!still && run && active(run)) void this.stop(run, "Another installation took this ticket over; this run stops so that only one works on it.");
         }
-      const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
+      const goals = await sync.reconcile("goals", this.store.data.workGoals ?? [], undefined, { now, retired: retiredRemoval });
       // A ticket this installation is running stays its own to settle: a teammate's edit on a view
       // that did not show the run yet must not take the ticket from under it.
       const runningHere = (t: WorkTicket): boolean =>
@@ -346,10 +374,11 @@ export class SharingPart {
         t.claim?.client === client &&
         (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId));
       const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
-      const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun);
+      const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun, { now, retired: retiredTicket });
       // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
-      this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items;
-      this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items, keepRun).items;
+      // What the team's store lets go (a removal's marker, a done ticket, long unchanged) is let go here too.
+      this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items.filter((g) => !retiredRemoval(g, now));
+      this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items, keepRun).items.filter((t) => !retiredTicket(t, now));
       // Another installation's run is judged alive by its claim file, and by this machine's own clock:
       // a claim whose seenAt has not moved for the claim's lifetime, as seen from here, has lapsed.
       for (const t of live(this.store.data.workTickets))
@@ -357,7 +386,7 @@ export class SharingPart {
           const c = await sync.readClaim(t.id).catch(() => undefined);
           if (c) this.observeClaim(t.id, c.seenAt, now);
         }
-      const shared = await this.syncSharedSetup(sync);
+      const shared = await this.syncSharedSetup(sync, now);
       // A teammate's reading of a shared server, also for somebody who has not switched readings on.
       const facts = await this.pullSharedFacts().catch((e) => {
         log.warn("Reading shared server facts failed", safeError(e));
@@ -612,7 +641,7 @@ export class SharingPart {
         break;
       }
       case "workspace-s3-sync-now": {
-        await this.s3Workspace.syncNow({ forcePush: true });
+        await this.s3Workspace.syncNow();
         await this.syncWorkNow();
         break;
       }
@@ -620,6 +649,12 @@ export class SharingPart {
         this.assertTeamAdmin();
         await this.s3Workspace.disconnect();
         break;
+      }
+      case "workspace-s3-invite": {
+        // Whoever has the code has the bucket's secret key. It goes back to the person who pressed the
+        // button that copies it, and no tool an agent has makes this request.
+        if (!this.mayInviteToBucket()) throw new Error("Only an administrator of this server can copy the team bucket's invite code.");
+        return { reply: { s3Invite: { code: this.s3Workspace.inviteCode() } } };
       }
       default: {
         // Every request of this part has a case above: one that is given to it and not handled does not compile.

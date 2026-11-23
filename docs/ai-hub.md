@@ -312,7 +312,15 @@ explicitly enabled presentation on top of the same terminal authority.
   they are still in the activity log the assistant sees. Without a bucket (or when the upload fails) the app reads the record
   itself, as before. Records are masked like everything else, but note that a
   teammate's app sends the session's transcript to that teammate's model
-  provider.
+  provider. A conversation about a server marked Personal is left out
+  (`onPersonalServer`): it is not uploaded and nothing is learned from it,
+  with or without a bucket, because what is learned becomes team memory and
+  shared pages. It is told by the terminal's own server while the terminal is
+  open, and afterwards by the server's name or address: its target, a command
+  it ran, or a terminal that was put before it. The setting "Learn from
+  finished work" says so. Not covered: the team's activity log, which still
+  carries what a person did on a personal server
+  (`tests/main/personalServerLearning.test.ts`).
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
   presets (`MCP_MARKETPLACE_CATALOG`). Before a server is started or called
   the hub is asked whether it may be reached (`assertMcpReach`): on a shared
@@ -323,11 +331,30 @@ explicitly enabled presentation on top of the same terminal authority.
   an MCP server, not whenever it answers JSON. In demo mode `assertMcpReach`
   refuses every server: a demo process starts no MCP program and calls no
   MCP address (see [MCP in the demo](#the-demo-labs-incidents-srcmainsim)).
+  A person's choice for a tool (Allow, Ask, Deny) holds for the server it was
+  made about: when the server's command, arguments or address change, tools
+  set to Allow are asked about again, and Ask and Deny stay (`mcp-save`).
+  Every answer of an MCP tool carries the note that it is data from another
+  system, whether the call ran unasked or after a person approved it
+  (`mcpAnswerNote`). Tests: `tests/main/mcpToolTrust.test.ts`.
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory
   entries keep all their metadata (tier, cluster, confidence, success/failure
   and usage counts, feedback score, `autoLearned`, `sourceCommand`,
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
+  The bucket's invite code holds its secret key. It is in no status and no
+  snapshot: the interface asks for it with a request of its own
+  (`workspace-s3-invite`) when a person presses "Copy invite code", and on a
+  team server only an administrator is answered. No tool an agent has makes
+  that request. `tests/main/teamBucketSecret.test.ts` walks what an agent is
+  given (the context, the snapshot text, every management tool's answer) and
+  fails on the code or the key.
+  A workspace file in the bucket that cannot be read (cut off, or not a
+  workspace at all) no longer stops the sync of servers and memories for
+  everyone: it is kept beside itself as `workspace.broken.json`, written
+  again from the installation's own copy, and the status says so (`notice`).
+  What only the broken file held comes back when the installation that wrote
+  it syncs (`tests/main/teamWorkspaceFile.test.ts`).
 
 ## Where the hub's code is (`HubService.ts`, `areas/`)
 
@@ -356,7 +383,7 @@ parts that define the same method name are refused when the file loads.
 | `areas/memory.ts` | Team memory, proposals from runs and activity, the learning queue, tidying up | 9 |
 | `memory/mergeMemory.ts` | Matches, merges and replaces memories. Its rule tests sit beside it. | |
 | `areas/servers.ts` | Servers, the links between them, saved profiles | 10 |
-| `areas/sharing.ts` | The bucket, the board kept on a server, the shared workspace | 3 |
+| `areas/sharing.ts` | The bucket, the board kept on a server, the shared workspace | 4 |
 | `areas/mcp.ts` | MCP servers and what their tools may do; the keys and commands of an outside client | 9 |
 | `areas/inbox.ts` | What waits for a person, notification channels, the telling | 6 |
 | `areas/facts.ts` | What is on the servers, and what changed | 4 |
@@ -433,7 +460,14 @@ together from records (alert tickets, commands with their checks and
 rollbacks, team activity, finished tickets, pages and memories the assistant
 wrote, what waits in the inbox); no model writes it, so it cannot say more than
 the data does. It shows in the Inbox until marked read. The report itself is
-local to the installation that wrote it; it is not synced.
+local to the installation that wrote it; it is not synced. Neither is what the
+contradiction check found: the findings, and how far through the pairs of
+pages the check has come, stay on the installation that ran it that night
+(`kbContradictions`, `kbPairOffset`), so teammates do not see them, and
+another installation that takes the next night's claim starts from its own
+place. Sharing them is not done yet: a finding quotes its pages, so one about
+a private page has to stay where it is, and a finding one person dismissed
+has to go away for the others too.
 
 **Dependency map.** An agent that sees a link (a connection, a mount, a
 replication target) saves it with `save_infra_edge` and an `evidence` text. Such
@@ -1135,7 +1169,8 @@ keeps what is different. No model is involved.
   every reading and `work/facts/data/<server>.json` when something differs;
   an installation takes over what another read and does not read it again. A
   claim covers the minute a reading takes. Readings are taken over with the
-  board's sync (every 40 seconds), also by an installation that has not
+  board's sync (every ten seconds; a head whose mark in the listing has not
+  changed is not downloaded again), also by an installation that has not
   switched scheduled readings on: what a teammate read is the team's.
 - **Demo mode** answers from `demoFacts.ts` in the script's own format, with
   a second reading that differs, so the view can be shown without servers.
@@ -1186,12 +1221,44 @@ placed before the early return for a pending save); three seconds later
 - **Where a notification may go** (`guardUrl`): the name is resolved, every
   address it leads to is classified, and the request is made to the address
   that was checked (no redirects, the answer's body is dropped). Link-local
-  is never a destination. On a shared server neither is loopback, and the
+  is never a destination. Nor are the other addresses a cloud keeps a
+  machine's own credentials at: `fd00:ec2::/32` (Amazon on IPv6),
+  `100.100.100.200` (Alibaba), `168.63.129.16` (Azure) and `192.0.0.192`
+  (Oracle), and NAT64 for local use (`64:ff9b:1::/48`), which cannot be read
+  for the IPv4 address it leads to. An IPv6 address that carries an IPv4
+  address (mapped, translated, NAT64, compatible, 6to4) is judged as that
+  IPv4 address, however it is written (`addressClass`,
+  `tests/main/addressGuard.test.ts`). On a shared server neither is loopback, and the
   private network only with `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`.
+- **Quiet hours and the hourly limit hold, they do not drop.** During quiet
+  hours, or when the hour's limit is used up, what would go to the channels
+  is kept instead (`NotifyStore.hold`, in `notify.json`: a line per item, at
+  most 50, the oldest let go and counted past that). A critical alert still
+  goes. When the quiet hours are over, or an hour after the limit was
+  reached, one message tells it all: "3 things happened while notifications
+  were quiet", a line each, with "(no longer waiting)" on what was dealt with
+  meanwhile and "Still waiting" on a held reminder. That message counts as one
+  against the hour. What it tells is not also sent as a reminder in the same
+  moment. Each channel gets only the kinds it asked for. The held items stay
+  in the inbox all along. The escalation tiers and the "auto-pause" cushion
+  that were written and never called are removed, with their state in
+  `notify.json`. Tests: `tests/main/heldNotifications.test.ts`.
 - **Storage:** `<hub dir>/notify.json`, mode 0600, addresses and secrets
   through `encryptSecretValue`. Not in `hub.json`, whose save masks anything
   that looks like a secret, and never in the bucket. The snapshot carries
   `NotifyChannelView`: the host, not the address.
+- **A start without the keyring.** A secret that is stored encrypted and
+  cannot be decrypted on a start (the keyring is locked or missing, or a
+  server's key file could not be read) is empty in memory, and used to be
+  written back empty at the next save: one such start lost it for good. Now
+  the store keeps the ciphertext and writes it back unchanged
+  (`openSecretValue`, `sealSecretValue` in `SecretFieldCrypto.ts`), and the
+  status says the secret could not be read on this start. Nothing is sent to
+  a channel whose address is unread. A value a person enters meanwhile
+  replaces the old one. The same holds for the Jira and Confluence tokens
+  (`AtlassianStore`), the context bot's token (`ChatBridge`) and the team
+  bucket's secret key (`S3WorkspaceSyncService`). Tests:
+  `tests/main/keyringLostStart.test.ts`.
 - **Links:** `SSHS3_PUBLIC_URL` or the address saved in Settings, never the
   request's Host header. `?view=Inbox&item=<id>` is read once by
   `AiHubPanel` and removed from the address; `InboxView` marks the item or
@@ -1242,7 +1309,14 @@ inside Microsoft Teams.
   resolve is noted, and a ticket still in To do when its alert resolves goes
   to Backlog (and back to To do if it fires again), so the heartbeat does not
   start on an alert that is over. The alert's own words are quoted in the ticket as data
-  from the monitoring system. The heartbeat takes firing alerts before other
+  from the monitoring system. Every field of an alert is made one line first
+  (`cleanAlert`: line breaks of every kind and control characters become a
+  space, the source is cut to a short plain name), and every line of its text
+  is quoted, so a label with a line break cannot end the quoted block. The
+  ticket's prompt keeps a title on its line and quotes a note of several lines
+  line by line (`ticketPrompt`). This keeps the alert's words where they are
+  marked as data. It does not check what they say
+  (`tests/main/alertQuoting.test.ts`). The heartbeat takes firing alerts before other
   work, critical ones first.
 - **Inbox.** One list of everything that waits for a person, built from the
   snapshot (`inboxItems`): commands waiting for approval, plans, questions,
@@ -1287,6 +1361,16 @@ read the same Jira make one ticket.
 - What is written in an issue is text from outside the team. Its ticket is
   marked so (`outside`), lands in **Backlog**, and never starts an agent by
   itself: a person reads it and moves it to To do.
+- Text written in Jira after that reading is not handed to an agent unread.
+  When the issue's summary or description changes (`external.textHash`), or
+  somebody writes a comment there, a ticket in To do goes back to Backlog
+  with a note that says what is new. A ticket an agent is running stays with
+  its run, with a note for whoever reviews the result. Review and Blocked
+  wait for a person already. A person's own edit of the ticket on the board
+  is not a change in Jira.
+- The issue's text is masked and cut like other outside text
+  (`ticketTextFor`: at most 5,500 characters of the description, the title
+  and the names one line each). Tests: `tests/main/jiraReview.test.ts`.
 - The board's columns are the board's own. Jira decides only the two ends: an
   issue closed there is done here (unless a run is working it), and one opened
   again there goes back to Backlog.
@@ -1356,7 +1440,10 @@ and `users:read`.
 
 **What it may read.** Only channels the bot is a member of are listed, and
 only those a person ticks are read. Direct messages and group chats are never
-asked for. The context bot posts nothing and takes no commands. Its client
+asked for. The list of the bot's channels is asked for again every half hour.
+While that fails it is not asked at every tick: the wait is two minutes, then
+doubles up to an hour, or is what the service says; a test of the connection
+asks at once (`tests/main/chatBridgeUpkeep.test.ts`). The context bot posts nothing and takes no commands. Its client
 has no call that writes. Tests check both that its code has none and that
 it makes none while the agent bot posts in the same channels
 (`chatBridgeReadThread.test.ts`, and "keeps the two bots apart" in
@@ -1378,9 +1465,20 @@ teammates' installations see only the excerpts put on tickets.
 
 - It is kept until it is removed. A number of days can be set; none is set
   from the start.
-- A message edited or deleted in the chat afterwards stays as it was read.
-  "Forget" removes a channel's messages here at once, and "Disconnect and
-  forget" everything of a service.
+- A message edited or deleted in the chat within two days of being written
+  is brought in line here: the last two days of a channel are looked over
+  every ten minutes (in Mattermost too now), a message that was edited takes
+  its new words, and one that is gone from a stretch that was read whole is
+  removed (`ChatIndex.add`, `dropGone`). In Slack a thread's replies of the
+  last two days are read again when the thread is next asked for replies. The
+  month's file is written anew then, so the old words are not left on the
+  disk. A thread the agent bot asks for whole is brought in line at once,
+  whatever its age. Bounds: a look takes at most 400 messages, and when two
+  days hold more nothing is removed on that look; a message of the last
+  minute is not taken for deleted. Older than two days, a message stays as it
+  was read. "Forget" removes a channel's messages here at once, and
+  "Disconnect and forget" everything of a service. Tests:
+  `tests/main/chatBridgeUpkeep.test.ts`.
 - Slack lists a thread's replies apart from the channel. Threads with replies
   are read, threads younger than a week are asked again, and the last two
   days are looked over every ten minutes for messages that got their first
@@ -2322,7 +2420,14 @@ give a document a title, a collection or tags first.
   so it stays on the computer of the person who added it
   (`original.keptLocal`) and teammates are told who has it. An original is
   removed with its document, also the copy a teammate's installation fetched.
-  Everything else dropped in is readable by the whole team.
+  Everything else dropped in is readable by the whole team. Making a
+  document private takes its file out of the team's store. With no store
+  connected it needs none: the file stays here, and a copy in a store that is
+  connected later is taken out then (`original.withdraw`). Only a file that is
+  not on this computer needs the store, to be fetched first.
+- **A private page is not named on an alert's ticket** (`pagesForAlert`): the
+  ticket is on the team's board, and the page's title would tell the team what
+  it is about. Tests for both: `tests/main/privateKnowledge.test.ts`.
 - **Out.** The snapshot's document list carries the beginning of each text and
   no pieces; `kb-read` returns one whole document, `kb-search` the ranked
   search the assistant uses, `kb-original` the file. These answers come in
@@ -2355,6 +2460,16 @@ because there is no server to run one on.
   `work/claims/<ticketId>.json` and reads it back; only the app that finds its
   own claim proceeds. The claim is refreshed while the run lives and lapses
   after 4 minutes without a sign of life, which frees the ticket with a note.
+  The claim, and a mark for something done once (`markOnce`), are written
+  with a condition (nothing there yet, or the version that was read), so the
+  second of two writers is refused. Whether the bucket really refuses is
+  tried on the bucket itself, once (`checkConditionalWrites`): Amazon S3
+  does; a store that only speaks its protocol may take the condition and
+  write anyway. Where it does not refuse, the writer waits for the store to
+  settle and reads back whose claim or mark stands, and a refresh reads back
+  too. That narrows the moment in which two can both believe they hold a
+  ticket. It does not close it: such a store gives nothing to close it with.
+  Tests: `tests/main/bucketConditionalWrites.test.ts`.
 - **Review.** A finished run puts the agent's report on the ticket and moves
   it to Review; a person approves it or sends it back with a note. A run that
   failed or was stopped leaves the ticket Blocked with the reason. Agents
@@ -2440,12 +2555,37 @@ because there is no server to run one on.
   `withRemovals`) so it reaches everyone instead of the item coming back. A
   knowledge base document's removal is final: a copy written later (a
   teammate's computer that finished reading it afterwards) does not bring it
-  back, and the pages written only from it go with it. It
-  is read every 40 seconds, and at once after a change. Spending is one
+  back, and the pages written only from it go with it. The store
+  is looked at every ten seconds (`WORK_SYNC_INTERVAL_MS` on the hub's tick),
+  and at once after a change. A look is a listing per collection: the listing
+  gives each object's ETag (`listWithMeta`; a team server's folder gives the
+  file's number, size and time), `WorkSync` keeps it with what it read, and
+  an object whose mark has not changed is not downloaded again. A board nobody
+  touched costs listings and no download; a store that gives no mark has
+  every object read as before. What is taken over from the store is a copy,
+  so the kept one stays what the store holds. The same holds for other
+  installations' spending and page use, the readings of servers, and the
+  presence files of people who are away. Presence is written by one timer
+  (every 15 seconds), no longer also by every poll of the workspace file.
+  Tests: `tests/main/teamBoardReads.test.ts`. Spending is one
   object per installation (`work/usage/<client>.json`) and added up
   (`sumUsage`), so a budget holds for the team. Not shared, on purpose: MCP
   servers and external runners (commands that run with the user's rights) and
   schedules (they belong to the installation that runs them).
+- **Every item, and what is let go.** A sync lists every object of a
+  collection and takes every one, however many there are (there is no cap).
+  One rule lets old things go (`RETIRE_AFTER_MS` in `WorkBoard.ts`,
+  `retiredRemoval`, `retiredTicket`): the marker of a removal, 90 days after
+  its last change. Every installation then drops the marker and stops
+  uploading it, and a day later the object is taken out of the store. Only
+  what a person removed is let go: a ticket that was not removed is kept
+  however old it is, a Done one too, because it is the record of what was
+  done. The removal of a built-in agent or document is kept, because every
+  new installation has the built-in thing again. The cost: an installation
+  that was away for more than 91 days and still has its own copy of something
+  a teammate removed brings it back.
+  The rule runs with the sync, so one person's app with no team store keeps
+  everything. Tests: `tests/main/teamBoardSync.test.ts`.
 - **One server, no bucket** (`FileQueueStore`, `WebTenantManager.teamBoard`).
   Everybody with an account on one web server has the same board, agents,
   knowledge base, pages and dependencies without a bucket. The same `WorkSync`

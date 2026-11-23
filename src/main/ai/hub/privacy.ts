@@ -498,6 +498,28 @@ export function clip(value: string, max: number): string {
   return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1)).trimEnd()}…` : clean;
 }
 
+/**
+ * Text from outside as one line: every line break and control character becomes a space, and runs of
+ * spaces one. A field that is put into a line of a prompt (a title, a label, a name) cannot then begin
+ * a line of its own, which a reader would take for the prompt's.
+ */
+export function oneLine(value: string): string {
+  // \s covers the Unicode line and paragraph separators; the C0 and C1 ranges cover NEL, VT, FF and the rest.
+  // eslint-disable-next-line no-control-regex -- the control characters are what is taken out
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Text from outside as its lines, for putting a mark before each (a quoted block): every kind of line
+ * break ends a line, other control characters are gone, and empty lines are left out.
+ */
+export function plainLines(value: string): string[] {
+  return value
+    .split(/\r\n?|[\n\v\f\u0085\u2028\u2029]/)
+    .map(oneLine)
+    .filter(Boolean);
+}
+
 /** The longest message a person may start or continue a conversation with. */
 export const PERSON_PROMPT_MAX = 16_000;
 /**
