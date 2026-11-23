@@ -40,7 +40,7 @@ import { TerminalRegistry, type DetectedCommandActivity } from "./TerminalRegist
 import { ToolBroker } from "./ToolBroker";
 import { type AgentRuntime } from "./AgentRuntime";
 import { ContextService, scopedMemory } from "./ContextService";
-import { AuditLog, AuditShipper } from "./AuditLog";
+import { AuditLog } from "./AuditLog";
 import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
@@ -294,6 +294,19 @@ export class HubService {
           approvedBy: change.decidedBy?.name, detail: change.adminException?.reason, userId: change.adminException?.actorId,
         }, Date.now(), true);
       },
+      // A plain command that has been running for a moment: in the log as started, in case its end never comes.
+      recordStarted: (task, change) => {
+        void this.audit()
+          .append({
+            kind: task.fromOutside ? "mcp" : "command",
+            actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
+            target: change.target, taskId: task.id, changeId: change.id,
+            what: change.command || change.description,
+            outcome: "started",
+            detail: "Still running. How it ended is written when it ends.",
+          }, Date.now(), true)
+          .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+      },
       approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
       // Time spent waiting for a person is not the run's: its budget moves by as much.
       // Nobody sits at a ticket's or a schedule's run: what it waits for is told at once, not on the next look.
@@ -546,6 +559,8 @@ export class HubService {
 
   initialize(): Promise<void> {
     return (this.initialized ??= (async () => {
+      // A store that could not be read leaves the hub on default settings and rules, saving nothing.
+      // The person is told in every snapshot (`storeProblem`), not only in the log.
       await this.store.load().catch((e) =>
         log.warn("HubStore load failed; using default store", safeError(e)),
       );
@@ -844,6 +859,7 @@ export class HubService {
       ...(this.teamRulesView() ? { teamRules: this.teamRulesView() } : {}),
       ...(chatAnswering ? { chatAnswering } : {}),
       safetyPolicyChanged: this.store.data.safetyPolicyChanged,
+      ...(this.store.problem ? { storeProblem: this.store.problem } : {}),
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({
         memories: allMemories,
@@ -950,8 +966,6 @@ export class HubService {
   readonly changeReveals = new Map<string, { label: string; value: string; at: number }>();
   readonly writingAudit = new Set<string>();
   readonly restoringChanges = new Set<string>();
-  auditShipper?: AuditShipper;
-  auditShipperUnsub?: () => void;
   private lastAnchorAt = 0;
   private lastRecordingPruneAt = 0;
   recorder?: SessionRecorder;
@@ -1351,6 +1365,8 @@ export class HubService {
     clearTimeout(this.workSyncPushTimer);
     powerMonitor?.removeListener("suspend", this.suspend);
     powerMonitor?.removeListener("resume", this.resume);
+    /** The runs that are at work as the app closes. */
+    const closing = new Set(this.store.data.tasks.filter(active).map((t) => t.id));
     await Promise.all(
       this.store.data.tasks
         .filter(active)
@@ -1358,12 +1374,19 @@ export class HubService {
     );
     await this.localMcp?.stop();
     await this.recorder?.stopAll().catch(() => undefined);
-    this.auditShipperUnsub?.();
-    this.auditShipperUnsub = undefined;
-    await this.auditShipper?.flush().catch(() => undefined);
     await this.s3Workspace.dispose();
     await this.broker.dispose();
     this.terminals.dispose();
+    // What was running when the app closed ends here as "uncertain". It is written to the audit log
+    // before the app is gone, not left for the next start. Only the runs that were at work, and
+    // not for ever: a log that is slow to write must not hold the app open.
+    await new Promise((resolve) => setImmediate(resolve));
+    this.auditFinishedChanges(closing);
+    if (this.auditLog) {
+      let giveUp: NodeJS.Timeout | undefined;
+      await Promise.race([this.auditLog.idle(), new Promise((resolve) => (giveUp = setTimeout(resolve, 3000)))]);
+      clearTimeout(giveUp);
+    }
     // A document being read, or facts being collected, writes into the hub's folder when it
     // ends. A hub that has been disposed of must have stopped writing before it says so.
     for (let i = 0; i < 100 && (this.kbReadingId || this.factsRound); i++)

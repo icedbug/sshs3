@@ -2,35 +2,22 @@ import type { IPty, IDisposable } from 'node-pty';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { SimShell } from '../sim/SimShell';
 import { simWorld } from '../sim/SimWorld';
+import { readPosixEnvelope, startsPosixEnvelope } from '../ai/hub/shellAdapters';
 
 /**
  * The frame the agent runtime types around a command (see `commandEnvelope` in
  * ai/hub/shellAdapters.ts): a mark before, the command in a subshell, and a
  * mark after that carries the exit code and the folder. A real shell runs the
- * `printf`s; the virtual one reads the frame and prints the marks itself.
+ * `printf`s; the virtual one reads the frame (`readPosixEnvelope`) and prints
+ * the marks itself.
+ *
+ * Where a typed line of the frame ends: at its Enter, or at a Ctrl-C that drops
+ * it. A line of the frame holds no line break of its own (the command is sent
+ * encoded).
  */
-const AGENT_FRAME_PREFIX = "printf '\\033]777;SSHS3;";
-const AGENT_FRAME =
-  /^printf '\\033\]777;(SSHS3;[a-f0-9]{32});BEGIN\\007'; \(eval ('(?:[^']|'"'"')*')\); __sshs3_rc=\$\?; printf '\\033\]777;\1;END;%s;%s\\007' "\$__sshs3_rc" "\$PWD"$/;
-
-/** The generated frame quotes the whole command, including any embedded newlines. */
 function frameLineEnd(input: string): number {
-  let quote = '';
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
-    if (ch === '\x03' || (!quote && (ch === '\r' || ch === '\n'))) return i;
-    if (ch === "'" || ch === '"') {
-      if (!quote) quote = ch;
-      else if (quote === ch) quote = '';
-    }
-  }
-  return -1;
-}
-
-/** A command as the frame quotes it for `eval`, back to what was meant. */
-function unquoteForEval(quoted: string): string {
-  const inner = quoted.startsWith("'") && quoted.endsWith("'") ? quoted.slice(1, -1) : quoted;
-  return inner.replace(/'"'"'/g, "'");
+  // eslint-disable-next-line no-control-regex -- Ctrl-C is what is looked for
+  return input.search(/[\r\n\x03]/);
 }
 
 /**
@@ -559,6 +546,8 @@ export class DemoVirtualPty implements IPty {
   private dataListeners = new Set<(data: string) => void>();
   private exitListeners = new Set<(e: { exitCode: number; signal?: number }) => void>();
   private lineBuffer = '';
+  /** The pieces of a long framed command typed so far (see `commandEnvelope`). */
+  private frameLines: string[] = [];
   private history: string[] = [];
   private historyIdx = -1;
   private killed = false;
@@ -706,21 +695,27 @@ export class DemoVirtualPty implements IPty {
     // The Windows SSH writer submits up to 512 bytes at a time. Interpret a frame only
     // after its Enter, so a fragment never runs as an ordinary simulated shell command.
     let input = this.lineBuffer + data;
-    while (input.startsWith(AGENT_FRAME_PREFIX)) {
-      const end = /[\r\n]/.test(data) || data.includes('\x03') ? frameLineEnd(input) : -1;
+    while (startsPosixEnvelope(input)) {
+      const end = frameLineEnd(input);
       if (end < 0) {
         this.lineBuffer = input;
         return;
       }
       this.lineBuffer = '';
+      const line = input.slice(0, end);
       if (input[end] === '\x03') {
+        this.frameLines = [];
         this.emitData('^C\r\n' + this.getPrompt());
+      } else if (/^ ?__sshs3_c=/.test(line)) {
+        // One piece of a long command: kept until the line that runs it.
+        this.frameLines.push(line);
       } else {
-        const frame = AGENT_FRAME.exec(input.slice(0, end));
+        const frame = readPosixEnvelope([...this.frameLines, line].join('\r'));
+        this.frameLines = [];
         if (frame) {
-          const res = this.runHere(unquoteForEval(frame[2]));
+          const res = this.runHere(frame.command);
           this.emitData(
-            `\x1b]777;${frame[1]};BEGIN\x07${res.output ? `${res.output}\r\n` : ''}\x1b]777;${frame[1]};END;${res.exitCode};${res.cwd}\x07${this.getPrompt()}`
+            `\x1b]777;${frame.prefix};BEGIN\x07${res.output ? `${res.output}\r\n` : ''}\x1b]777;${frame.prefix};END;${res.exitCode};${res.cwd}\x07${this.getPrompt()}`
           );
         } else {
           this.emitData('\r\nInvalid demo shell frame\r\n' + this.getPrompt());

@@ -431,13 +431,21 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
     expect(hub.notifyStore.data.channels[0].last).toBeUndefined();
 
     // The demo's audit notice says what is not recorded (AuditLogView): an incident that is started, a command
-    // somebody types, a scripted walkthrough and a change of the safety rules leave the log empty.
+    // somebody types and a scripted walkthrough leave the log empty.
     await hub.request({ action: "sim-start", scenarioId: "pg-wal-full" });
     simWorld().shell(simWorld().host("pg-prod-db01")!).run("df -h");
     await hub.request({ action: "sim-replay", mode: "careful" });
-    await hub.request({ action: "safety-policy-save", policy: { clusterPolicies: { "Postgres-Prod": { maxMode: "assisted" } } } } as never);
     await new Promise((r) => setTimeout(r, 50));
     expect((await hub.request({ action: "audit-read", limit: 20 })).reply?.audit?.entries).toEqual([]);
+    // A change of the safety rules is recorded in the demo as anywhere: the demo's log is its own.
+    await hub.request({ action: "safety-policy-save", policy: { clusterPolicies: { "Postgres-Prod": { maxMode: "assisted" } } } } as never);
+    await new Promise((r) => setTimeout(r, 50));
+    const afterRules = (await hub.request({ action: "audit-read", limit: 20 })).reply?.audit?.entries ?? [];
+    expect(afterRules.map((e) => [e.kind, e.target, e.outcome]).reverse()).toEqual([
+      ["setting", "Safety rules", "intent"],
+      ["setting", "sshs3 on this computer", "completed"],
+    ]);
+    expect(afterRules[0].what).toContain('rules for "Postgres-Prod"');
     await hub.request({ action: "sim-reset" });
 
     // And what is: what an agent's run did. The log is kept in the demo's own folder.

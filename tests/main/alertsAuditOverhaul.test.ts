@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -36,9 +35,6 @@ import { buildDailyReport } from "../../src/main/ai/hub/DailyReport";
 import {
   ANCHORS_READ,
   AuditLog,
-  AuditShipper,
-  formatAuditOtlpJson,
-  formatAuditRfc5424Cef,
   hashEntry,
   type AuditAnchor,
 } from "../../src/main/ai/hub/AuditLog";
@@ -476,102 +472,6 @@ describe("AuditLog & SessionRecorder overhaul", () => {
     await fs.writeFile(legacyFile, `${JSON.stringify({ ...base, hash: hashEntry(base) })}\n`);
     const legacyLog = new AuditLog(legacyDir, "c1");
     expect(await legacyLog.verify()).toMatchObject({ ok: true, entries: 1 });
-  });
-
-  it("ships audit entries out-of-band (OTLP/JSON, RFC 5424 CEF/Syslog, webhook) without blocking append", async () => {
-    const dir = await makeTempDir("sshs3-audit-ship-");
-    const log = new AuditLog(dir, "c1");
-
-    const receivedHttp: Array<{ headers: http.IncomingHttpHeaders; body: string }> = [];
-    const srv = http.createServer((req, res) => {
-      let body = "";
-      req.on("data", (c) => (body += c));
-      req.on("end", () => {
-        receivedHttp.push({ headers: req.headers, body });
-        res.writeHead(200).end("ok");
-      });
-    });
-    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
-    disposals.push(() => new Promise((r) => srv.close(() => r(undefined))));
-    const port = (srv.address() as { port: number }).port;
-
-    const cefSent: string[] = [];
-    const otlpSent: string[] = [];
-    let releaseSlow!: () => void;
-    const slowBlocker = new Promise<void>((r) => {
-      releaseSlow = r;
-    });
-
-    const slowShipper = new AuditShipper({
-      format: "otlp",
-      send: async ({ body }) => {
-        await slowBlocker;
-        otlpSent.push(body);
-      },
-    });
-    const cefShipper = new AuditShipper({
-      format: "cef",
-      hostname: "bastion-01",
-      appName: "sshs3-hub",
-      send: ({ body }) => {
-        cefSent.push(body);
-      },
-    });
-    const webhookShipper = new AuditShipper({
-      format: "webhook",
-      url: `http://127.0.0.1:${port}/audit`,
-      secret: "audit-hook-secret",
-      guard: { server: false, allowPrivate: true, allowPlainHttp: true },
-    });
-    const failingErrors: unknown[] = [];
-    const failingShipper = new AuditShipper({
-      format: "otlp",
-      send: async () => {
-        throw new Error("sink down");
-      },
-      onError: (err) => failingErrors.push(err),
-    });
-
-    log.subscribe(slowShipper);
-    log.subscribe(cefShipper);
-    log.subscribe(webhookShipper);
-    log.subscribe(failingShipper);
-
-    // append() resolves immediately even though slowShipper is blocked and failingShipper throws
-    const entry = await log.append(
-      {
-        kind: "approval",
-        actor: "Jacob",
-        target: "pg-01",
-        what: "systemctl restart postgresql",
-        outcome: "completed",
-        userId: "u1",
-        sourceIp: "10.0.0.2",
-      },
-      1_800_000_000_000,
-    );
-    expect(entry.seq).toBe(1);
-    expect(otlpSent).toHaveLength(0);
-
-    releaseSlow();
-    await Promise.all([slowShipper.flush(), cefShipper.flush(), webhookShipper.flush(), failingShipper.flush()]);
-
-    expect(otlpSent).toHaveLength(1);
-    const otlp = JSON.parse(otlpSent[0]) as ReturnType<typeof formatAuditOtlpJson>;
-    expect(JSON.stringify(otlp)).toContain("systemctl restart postgresql");
-    expect(JSON.stringify(otlp)).toContain("enduser.id");
-
-    expect(cefSent).toHaveLength(1);
-    expect(cefSent[0]).toBe(formatAuditRfc5424Cef(entry, { hostname: "bastion-01", appName: "sshs3-hub" }));
-    expect(cefSent[0]).toMatch(/^<\d+>1 2027-01-15T08:00:00\.000Z bastion-01 sshs3-hub - approval - CEF:0\|Sshs3\|AuditLog\|1\|approval\|/);
-    expect(cefSent[0]).toContain("suser=u1");
-    expect(cefSent[0]).toContain("src=10.0.0.2");
-
-    expect(receivedHttp).toHaveLength(1);
-    expect(receivedHttp[0].headers["x-sshs3-signature"]).toBe(
-      `sha256=${crypto.createHmac("sha256", "audit-hook-secret").update(receivedHttp[0].body).digest("hex")}`,
-    );
-    expect(failingErrors).toHaveLength(1);
   });
 
   it("paginates verify() beyond ANCHORS_READ = 2000 and catches early-page tampering", async () => {

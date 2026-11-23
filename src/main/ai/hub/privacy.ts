@@ -283,12 +283,179 @@ export function maskContext(value: string, options: MaskContextOptions = {}): st
 }
 
 /**
+ * One word on a command line that may be a password: single-quoted (always taken), or double-quoted
+ * or bare. A double-quoted or bare word that is a variable or a command substitution is not taken:
+ * it holds no secret, and it is code a person approving the command should see.
+ */
+const WORD = "(?:'[^'\\r\\n]*'|(?!\"?\\$[({A-Za-z_]|\"?`)(?:\"[^\"\\r\\n]*\"|[^\\s;&|\"'<>]+))";
+/** The same, as a word of its own after a flag: an option that follows (`-p --eval …`) is not the flag's value. */
+const NEXT_WORD = `(?!-)${WORD}`;
+/** The rest of one command: up to the next `;`, `&`, `|` or line break that is not inside quotes. Bounded. */
+const REST = "(?:[^\\n;&|'\"]|'[^'\\n]*'|\"[^\"\\n]*\"){0,400}";
+
+/** A word that is a variable, a command substitution or a redirection: shown as it is. */
+const IS_CODE = /^"?\$[({A-Za-z_]|^"?`|^\d*[<>]/;
+
+type SegmentRule = (segment: string) => string;
+const flagRule = (flag: string, word = WORD, flags = "g"): SegmentRule => {
+  // eslint-disable-next-line security/detect-non-literal-regexp -- built from the fixed pieces above and a flag written here
+  const re = new RegExp(`(\\s${flag})${word}`, flags);
+  return (segment) => segment.replace(re, "$1[redacted]");
+};
+const both = (...rules: SegmentRule[]): SegmentRule => (segment) => rules.reduce((s, rule) => rule(s), segment);
+const when = (test: RegExp, rule: SegmentRule): SegmentRule => (segment) => (test.test(segment) ? rule(segment) : segment);
+
+const passwordAfterP = flagRule("-p\\s*", NEXT_WORD, "");
+const passwordAfterBigP = flagRule("-P\\s*", NEXT_WORD);
+const passwordAfterW = flagRule("-w\\s*", NEXT_WORD);
+const registryLogin = when(/\slogin\b/, flagRule("-p[\\s=]*", NEXT_WORD, ""));
+const archivePassword = flagRule("-h?p", "(?!\\s)" + WORD);
+const puttyPassword = flagRule("-pw\\s+", NEXT_WORD);
+/** `-U name%password`, quoted or not. */
+const sambaUser: SegmentRule = (segment) => segment.replace(/(\s(?:-U\s*|--user[=\s])["']?[^\s%;&|"']{1,100}%)[^\s;&|"']+/g, "$1[redacted]");
+/**
+ * `htpasswd -b [file] user password`: with `b` among its flags the password is a word of the command,
+ * the third after the flags, or the second when `n` (print, no file) is among them.
+ */
+const htpasswd: SegmentRule = (segment) => {
+  const words = [...segment.matchAll(/'[^'\n]*'|"[^"\n]*"|[^\s'"]+/g)].slice(1);
+  const flags = words.filter((w) => /^-[A-Za-z0-9]+$/.test(w[0])).map((w) => w[0]).join("");
+  if (!flags.includes("b")) return segment;
+  const plain = words.filter((w) => !w[0].startsWith("-"));
+  const password = plain[flags.includes("n") ? 1 : 2];
+  if (!password || IS_CODE.test(password[0])) return segment;
+  return `${segment.slice(0, password.index)}[redacted]${segment.slice(password.index + password[0].length)}`;
+};
+
+/**
+ * Programs that take a password as an ordinary word on their command line, and where in the command
+ * it stands. Anchored on the program's name, so ordinary text is left alone: `-p` is a port to ssh
+ * and a password to sshpass.
+ */
+const COMMAND_RULES: Record<string, SegmentRule> = {
+  "redis-cli": flagRule("-a\\s+", NEXT_WORD),
+  "redis-benchmark": flagRule("-a\\s+", NEXT_WORD),
+  docker: registryLogin,
+  podman: registryLogin,
+  nerdctl: registryLogin,
+  buildah: registryLogin,
+  skopeo: registryLogin,
+  helm: registryLogin,
+  crane: registryLogin,
+  oras: registryLogin,
+  mongosh: passwordAfterP,
+  mongo: passwordAfterP,
+  mongodump: passwordAfterP,
+  mongorestore: passwordAfterP,
+  mongoexport: passwordAfterP,
+  mongoimport: passwordAfterP,
+  mongostat: passwordAfterP,
+  mongotop: passwordAfterP,
+  ldapsearch: passwordAfterW,
+  ldapmodify: passwordAfterW,
+  ldapadd: passwordAfterW,
+  ldapdelete: passwordAfterW,
+  ldapwhoami: passwordAfterW,
+  ldapcompare: passwordAfterW,
+  ldapmodrdn: passwordAfterW,
+  ldapexop: passwordAfterW,
+  ldappasswd: flagRule("-[was]\\s*", NEXT_WORD),
+  zip: passwordAfterBigP,
+  unzip: passwordAfterBigP,
+  zipcloak: passwordAfterBigP,
+  ipmitool: passwordAfterBigP,
+  mosquitto_pub: passwordAfterBigP,
+  mosquitto_sub: passwordAfterBigP,
+  sqlcmd: passwordAfterBigP,
+  bcp: passwordAfterBigP,
+  "7z": archivePassword,
+  "7za": archivePassword,
+  "7zr": archivePassword,
+  "7zz": archivePassword,
+  rar: archivePassword,
+  unrar: archivePassword,
+  plink: puttyPassword,
+  pscp: puttyPassword,
+  psftp: puttyPassword,
+  smbclient: sambaUser,
+  rpcclient: sambaUser,
+  smbget: sambaUser,
+  htpasswd,
+  openssl: both(flagRule("-pass(?:in|out)?\\s+pass:", "(?!\\s)" + WORD), when(/\senc\b/, flagRule("-k\\s+", NEXT_WORD))),
+  rabbitmqctl: flagRule("(?:add_user|change_password|authenticate_user)\\s+\\S+\\s+", NEXT_WORD, ""),
+  mysqladmin: flagRule("password\\s+", NEXT_WORD, ""),
+  nmcli: flagRule("(?:password|wifi-sec\\.psk|802-1x\\.password)\\s+", NEXT_WORD),
+  aws: flagRule("configure\\s+set\\s+\\S*(?:secret|token)\\S*\\s+", NEXT_WORD, ""),
+  kubectl: when(/\screate\s+secret\b/, flagRule("--from-literal[=\\s][\\w.-]+=", "(?!\\s)" + WORD)),
+  oc: when(/\screate\s+secret\b/, flagRule("--from-literal[=\\s][\\w.-]+=", "(?!\\s)" + WORD)),
+  lftp: (segment) => segment.replace(/(\s-u\s+[^\s,;&|"']{1,100},)[^\s;&|"']+/, "$1[redacted]"),
+  sqlplus: (segment) => segment.replace(/(\s[\w$#.-]{1,60}\/)[^\s@;&|"'/]+(?=@|\s|$)/, "$1[redacted]"),
+};
+// eslint-disable-next-line security/detect-non-literal-regexp -- the program names above and the fixed pieces
+const COMMAND_SEGMENT = new RegExp(`(?<![\\w./-])(${Object.keys(COMMAND_RULES).join("|")})(?![\\w.-])${REST}`, "g");
+
+/** sshpass's own options come before the command it wraps: a `-p` after that command is the wrapped program's. */
+const SSHPASS = new RegExp(`\\b(sshpass\\s+(?:-[A-Za-z]+\\s+(?:[^-\\s]\\S*\\s+)?){0,4}?-p\\s*)${WORD}`, "g");
+
+/**
+ * Programs that read a password from their input: `echo PW | sudo -S …`, `echo 'user:PW' | chpasswd`,
+ * `echo PW | docker login --password-stdin`. An optional `sudo` in front of them is part of it.
+ */
+const PASSWORD_READER =
+  "(?:sudo\\b[^\\n;&|]{0,80}?\\s)?(?:chpasswd\\b|sudo\\b[^\\n;&|]{0,80}?\\s(?:-[A-Za-z]*S[A-Za-z]*(?![\\w-])|--stdin\\b)|passwd\\b[^\\n;&|]{0,80}?--stdin\\b|(?:docker|podman|nerdctl|buildah|skopeo|helm|crane|oras)\\b[^\\n;&|]{0,200}?--password-stdin\\b|smbpasswd\\b|vncpasswd\\b|kinit\\b|cryptsetup\\b|gpg2?\\b[^\\n;&|]{0,200}?--passphrase-fd\\b|htpasswd\\b[^\\n;&|]{0,80}?\\s-[A-Za-z0-9]*i)";
+const ECHO_TO_READER = new RegExp(`\\b(echo|printf)\\b(${REST})(\\|\\s*${PASSWORD_READER})`, "g");
+const HERE_STRING_TO_READER = new RegExp(`\\b(${PASSWORD_READER}${REST}<<<\\s*)(${WORD})`, "g");
+const CHPASSWD_HEREDOC = /(\bchpasswd\b[^\n]{0,80}<<-?\s*["']?(\w{1,40})["']?[^\n]{0,80}\n)([\s\S]{0,4000}?)(\n[ \t]*\2\b)/g;
+/** sshpass -e and redis-cli read these from the environment. */
+const PASSWORD_ENV = new RegExp(`\\b((?:SSHPASS|REDISCLI_AUTH)=)${WORD}`, "g");
+
+/** `name:password` with the password masked; anything else masked whole. */
+function maskCredential(word: string, keepName: boolean): string {
+  if (IS_CODE.test(word)) return word;
+  const quote = /^["']/.test(word) ? word[0] : "";
+  const inner = quote ? word.slice(1, word.endsWith(quote) ? -1 : undefined) : word;
+  const name = keepName ? /^[\w.@-]{1,64}:/.exec(inner)?.[0] : undefined;
+  // A printf format keeps its line break: only the value is the secret.
+  const tail = /(?:\\n|\\r)+$/.exec(inner)?.[0] ?? "";
+  return `${quote}${name ?? ""}[redacted]${tail}${quote}`;
+}
+
+/** What `echo` or `printf` hands to a program that reads a password: every word that is one. */
+function maskEchoed(program: string, args: string, toChpasswd: boolean): string {
+  let first = true;
+  return args.replace(/\$\([^)\n]*\)|`[^`\n]*`|'[^'\n]*'|"[^"\n]*"|[^\s'"]+/g, (word) => {
+    const wasFirst = first;
+    first = false;
+    if (program === "echo" && /^-[neE]+$/.test(word)) {
+      first = wasFirst;
+      return word;
+    }
+    // printf's first word is its format: it is the secret only when it holds no placeholder.
+    if (program === "printf" && wasFirst && /%/.test(word)) return word;
+    return maskCredential(word, toChpasswd);
+  });
+}
+
+/** Passwords written as ordinary words on a command line (see the rules above). */
+function maskCommandLineSecrets(value: string): string {
+  return value
+    .replace(COMMAND_SEGMENT, (segment: string, program: string) => COMMAND_RULES[program]?.(segment) ?? segment)
+    .replace(SSHPASS, "$1[redacted]")
+    .replace(ECHO_TO_READER, (_match: string, program: string, args: string, reader: string) => `${program}${maskEchoed(program, args, /chpasswd/.test(reader))}${reader}`)
+    .replace(HERE_STRING_TO_READER, (_match: string, before: string, word: string) => `${before}${maskCredential(word, /chpasswd/.test(before))}`)
+    .replace(CHPASSWD_HEREDOC, (_match: string, head: string, _tag: string, body: string, end: string) =>
+      `${head}${body.replace(/^([ \t]*[\w.@-]{1,64}:)\S+/gm, "$1[redacted]")}${end}`,
+    )
+    .replace(PASSWORD_ENV, "$1[redacted]");
+}
+
+/**
  * The secrets in a text, masked, and everything else left exactly as it was —
  * including the control codes a terminal draws with. For a recording that has
  * to replay as it looked, which `maskContext` (which strips them) cannot give.
  */
 export function maskSecrets(value: string): string {
-  return value
+  return maskCommandLineSecrets(value)
     // A whole key, BEGIN to END; a key cut off before its END is masked as far as
     // its base64 lines go, and no further, so what follows it is still shown.
     .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, "[private key redacted]")
@@ -334,7 +501,11 @@ export function maskSecrets(value: string): string {
     .replace(/("auth"\s*:\s*")[^"]+"/g, '$1[redacted]"')
     // A password given as a flag: --password x, --password=x, mysql -pSECRET.
     .replace(/(--pass(?:word)?[= ])(?!\$\(|`)[^\s;&|]+/gi, "$1[redacted]")
-    .replace(/\b(curl\b[^\n;&|]{0,200}?\s(?:-u|--user)\s*["']?[^\s:;&|"']{1,100}:)(?!\$\(|`)[^\s;&|"']+/g, "$1[redacted]")
+    // A flag whose name ends in password, passphrase, token or api-key, with its value as the next word:
+    // --http-password x, --token x, --api-key x. (With `=` the rule for `name = value` further down has it.)
+    // eslint-disable-next-line security/detect-unsafe-regex -- the optional first part is bounded and ends in a fixed `-`, so it cannot backtrack
+    .replace(/(--(?:[a-z][a-z-]{0,30}-)?(?:password|passphrase|token|api-?key) )(?!-|\$[({A-Za-z_]|"\$|`|\[redacted\])(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'<>]+)/gi, "$1[redacted]")
+    .replace(/\b(curl\b[^\n;&|]{0,200}?\s(?:-u|--user|-U|--proxy-user)\s*["']?[^\s:;&|"']{1,100}:)(?!\$\(|`)[^\s;&|"']+/g, "$1[redacted]")
     .replace(/\b((?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n;&|]*?\s-p)(?!\s)[^\s;&|]+/g, "$1[redacted]")
     // The runs before `://` and around the keyword are bounded: unbounded, each
     // start position scans to the end of a long unbroken run (base64, a hex

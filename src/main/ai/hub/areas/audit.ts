@@ -2,9 +2,10 @@ import path from "node:path";
 import type { HubReply } from "../../../../shared/types/aiHub";
 import { isPlainCommand } from "../../../../shared/types/aiHub";
 import { isDemoMode } from "../demoWorkspace";
-import { AuditLog, AuditShipper, type AuditShipperOptions } from "../AuditLog";
+import { AuditLog } from "../AuditLog";
 import { SessionRecorder } from "../SessionRecorder";
-import { safeError } from "../privacy";
+import { COMPARISON_TEXT } from "../ToolBroker";
+import { clip, safeError } from "../privacy";
 import { requiredText } from "../hubHelpers";
 import { log, DECIDED_HOW, active } from "../hubShared";
 import type { HubService } from "../HubService";
@@ -26,24 +27,8 @@ export class AuditPart {
       this.auditLog = new AuditLog(path.join(this.directory, "audit"), this.clientId(), () =>
         this.s3Workspace.canUseBucket() && !isDemoMode() ? this.s3Workspace.objects : undefined,
       );
-      if (this.host.auditShipper) {
-        this.configureAuditShipper(this.host.auditShipper);
-      }
     }
     return this.auditLog;
-  }
-
-  /** Attaches (or replaces) the out-of-band AuditShipper subscriber on the audit log. */
-  configureAuditShipper(this: HubService, options?: AuditShipperOptions): void {
-    this.auditShipperUnsub?.();
-    this.auditShipperUnsub = undefined;
-    this.auditShipper = undefined;
-    if (!options || isDemoMode()) return;
-    // Where the log goes is held to the same rule as any other address sshs3 calls out to: on a shared
-    // server not the server itself or its private network, unless the administrator allows it.
-    const shipper = new AuditShipper({ ...options, guard: { ...this.outboundGuard(), allowPlainHttp: true } });
-    this.auditShipper = shipper;
-    this.auditShipperUnsub = this.audit().subscribe((entry) => shipper.emit(entry));
   }
 
   /** Where the terminals an agent owned are recorded. */
@@ -62,15 +47,18 @@ export class AuditPart {
    * log once: what ran, where, as whose run, who allowed it, and how it ended.
    * Read off the changes themselves rather than from each place that makes
    * one, so a path that is added later is not a path that is left out.
+   * `only`: just these runs (as the app closes, the ones that were at work).
    */
-  auditFinishedChanges(this: HubService): void {
+  auditFinishedChanges(this: HubService, only?: ReadonlySet<string>): void {
     const FINAL = new Set(["completed", "failed", "denied", "uncertain"]);
     for (const task of this.store.data.tasks) {
-      if (task.distillSourceId) continue;
+      if (task.distillSourceId || (only && !only.has(task.id))) continue;
       for (const change of task.changes) {
         // A run that has ended leaves nothing half-way: what was never answered was not allowed,
         // and what was allowed but never reported back (an external agent's action) is not known.
-        if (!active(task) && (change.status === "pending" || change.status === "approved" || change.status === "running")) {
+        // Not while a tool call of the run is still on its way out: the broker knows how that one
+        // ended (it ran out of time, it was not run at all) and says so in a moment.
+        if (!active(task) && !this.broker.working(task.id) && (change.status === "pending" || change.status === "approved" || change.status === "running")) {
           if (change.status === "pending") {
             change.status = "denied";
             change.decidedHow ??= "stopped";
@@ -107,8 +95,12 @@ export class AuditPart {
                 ? `check ${change.check.after === true ? (change.check.before ? "passed (it already passed before)" : "passed") : change.check.after === false ? "failed" : `not looked at (${change.check.skipped ?? "unknown"})`}: ${change.check.command}`
                 : "",
               change.adminException ? `Administrator exception: ${change.adminException.reason}` : "",
+              // Why something that was not run was not run: a rule, a freeze, a run that ended, a terminal that was not ready.
+              change.status === "denied" && change.output ? (change.output.startsWith("Not run: ") ? change.output : `not run: ${change.output}`) : "",
+              // What is known about something whose end is not: it ran out of time and was interrupted, the terminal was taken back.
+              change.status === "uncertain" && change.output ? clip(change.output, 400) : "",
               attempted
-                ? `Rollback attempted with: ${change.rollback!.command}${change.rollback!.restored === false ? " (the check does not read as before)" : ""}`
+                ? `Rollback attempted with: ${change.rollback!.command}${change.rollback!.restored === false ? " (the check does not read as before)" : change.rollback!.comparison ? ` (${COMPARISON_TEXT[change.rollback!.comparison]})` : ""}`
                 : change.rollback?.skipped
                   ? `rollback not run: ${change.rollback.skipped}`
                   : "",

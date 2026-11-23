@@ -37,6 +37,50 @@ function extractFilePathFromChange(change: AgentChange): string | undefined {
   return idx >= 0 ? desc.slice(0, idx).trim() : desc;
 }
 
+/**
+ * Whether a write failed because the server refused to begin it, so that nothing was written:
+ * no permission, a read-only file system, or a file or folder that is not there. A full disk or a
+ * lost connection is not among them: such a write may have happened in part.
+ */
+function refusedBeforeWriting(error: unknown): "permission" | "read-only" | "missing" | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  const text = error instanceof Error ? error.message : String(error);
+  // SFTP reports a number: 2 is "no such file", 3 is "permission denied".
+  if (code === "EACCES" || code === "EPERM" || code === 3 || /\b(?:EACCES|EPERM)\b|permission denied|operation not permitted|access is denied/i.test(text)) return "permission";
+  if (code === "EROFS" || /\bEROFS\b|read-only file system/i.test(text)) return "read-only";
+  if (code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR" || code === 2 || /\b(?:ENOENT|ENOTDIR|EISDIR)\b|no such file/i.test(text)) return "missing";
+  return undefined;
+}
+
+/**
+ * What is said about a write that wrote nothing: `shown` to the person on the change, `told` to the
+ * agent. A file the login account may not write is the common case on a real server (what is under
+ * /etc belongs to root), so the agent is told the way forward: a change card with sudo.
+ */
+function notWritten(error: unknown, refused: ReturnType<typeof refusedBeforeWriting>, file: string, local: boolean): { shown: string; told: string } {
+  const detail = safeError(error);
+  const account = local ? "The account sshs3 runs as" : "The account sshs3 logs in with";
+  if (refused === "permission")
+    return {
+      shown: `Not written: ${account.charAt(0).toLowerCase()}${account.slice(1)} may not write this file (${detail}). The file is as it was.`,
+      told: `${account} may not write ${file}. Nothing was written. Make the edit with sshs3_change and sudo instead, for example \`sudo sed -i …\` or \`sudo tee\`, with a check and a rollback. (${detail})`,
+    };
+  if (refused === "read-only")
+    return {
+      shown: `Not written: the file system this file is on is read-only (${detail}). The file is as it was.`,
+      told: `The file system ${file} is on is read-only. Nothing was written. Find out why it is read-only before you change anything there. (${detail})`,
+    };
+  if (refused === "missing")
+    return {
+      shown: `Not written: the file or its folder is not there (${detail}). Nothing was written.`,
+      told: `${file} or its folder is not there any more. Nothing was written. Read the folder again before you write there. (${detail})`,
+    };
+  return {
+    shown: `Not written: ${detail}\nThe file is as it was.`,
+    told: `The file was not written: ${detail} Nothing was written: ${file} reads as it did before.`,
+  };
+}
+
 /** File providers are resolved from the bound live session, never from model-supplied host IDs. */
 export class FileTools {
   private checkpoints = new Map<string, FileCheckpoint>();
@@ -336,11 +380,21 @@ export class FileTools {
       this.changed();
       throw error;
     }
+    // The rules are looked at once more right before the write. Refused here, nothing is written:
+    // not the new content, and not the old content "put back" either.
+    try {
+      recheck?.(change);
+    } catch (error) {
+      change.status = "denied";
+      change.decidedHow = ["running", "waiting"].includes(task.status) ? "policy" : "stopped";
+      change.output = `Not run: ${safeError(error)} Nothing was written.`;
+      this.changed();
+      throw error;
+    }
     change.status = "running";
     task.verification = "not-verified";
     this.changed();
     try {
-      recheck?.(change);
       await this.bridge.fileEditorService.saveFile(
         this.bridge.storageRegistry,
         providerId,
@@ -370,9 +424,28 @@ export class FileTools {
         source: session.label + ":" + file,
         verified: "file-content-only",
         ...(editsApplied !== undefined ? { editsApplied } : {}),
+        // What the person said with their yes is for the agent to act on.
+        ...(change.decisionNote ? { personNote: `Approved with a note from the person: ${change.decisionNote}` } : {}),
       };
     } catch (error) {
-      // A write that failed half-way leaves a file nobody wanted: put back what was there.
+      // Was anything written? The file is read again: when it reads as it did, nothing was, and
+      // there is nothing to put back. A write that the server refused to begin (no permission, a
+      // read-only file system, a folder that is gone) wrote nothing either.
+      const refused = refusedBeforeWriting(error);
+      let now: string | undefined;
+      try {
+        now = await this.readUtf8(providerId, file);
+      } catch {
+        now = undefined;
+      }
+      if (now === before || (refused && now === undefined)) {
+        const why = notWritten(error, refused, file, session.kind === "local");
+        change.status = "failed";
+        change.output = why.shown;
+        this.changed();
+        throw new Error(why.told, { cause: error });
+      }
+      // The write may have happened in part, and left a file nobody wanted: put back what was there.
       let restored: boolean;
       try {
         await this.bridge.fileEditorService.saveFile(

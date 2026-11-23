@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { maskSecrets, maskTerminalOutput } from "./privacy";
 
 /**
@@ -51,7 +52,20 @@ interface Open {
   /** When a prompt or a redraw stops without a newline, it is written after a short pause instead of late. */
   flush?: NodeJS.Timeout;
   writes: Promise<unknown>;
+  /**
+   * Set while the output is inside a private key whose END line has not come yet: how many of its
+   * lines were left out so far. The pieces after the first carry no header, so nothing in them says
+   * that they are a key.
+   */
+  insideKey?: number;
 }
+
+const KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
+const KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+/** A line inside a private key: base64 (a checksum line is that too), an armor header ("Proc-Type: 4,ENCRYPTED"), or an empty line. */
+const isKeyLine = (line: string): boolean => line === "" || /^[A-Za-z0-9+/=]+$/.test(line) || /^[A-Za-z][A-Za-z-]{0,40}: /.test(line);
+/** No private key is longer than this. A block that goes on is no key any more, and is shown again. */
+const MAX_KEY_LINES = 400;
 
 /** Output with no newline is written after this long without more. */
 const IDLE_FLUSH_MS = 300;
@@ -172,7 +186,7 @@ export class SessionRecorder {
     if (cut >= 0 || rec.pending.length >= MAX_PENDING) {
       const ready = cut >= 0 ? rec.pending.slice(0, cut + 1) : rec.pending;
       rec.pending = cut >= 0 ? rec.pending.slice(cut + 1) : "";
-      this.event(rec, "o", maskTerminalOutput(ready), now);
+      this.event(rec, "o", this.masked(rec, ready), now);
     }
     // Agent mode writes prompts without newlines after a short idle pause; human opt-in mode stays
     // strictly line-buffered so partial prompts/keystroke echoes are masked as complete lines.
@@ -182,8 +196,39 @@ export class SessionRecorder {
         if (!rec.pending || !this.open.has(sessionId)) return;
         const text = rec.pending;
         rec.pending = "";
-        this.event(rec, "o", maskTerminalOutput(text), now + IDLE_FLUSH_MS);
+        this.event(rec, "o", this.masked(rec, text), now + IDLE_FLUSH_MS);
       }, IDLE_FLUSH_MS);
+  }
+
+  /**
+   * One piece of output with its secrets masked. A private key that arrives in several pieces is
+   * masked as one: the first piece holds its header and is masked as far as it goes, and whether
+   * the output is still inside the key is remembered here. From then on every line that can be
+   * part of a key is left out, up to and with the key's END line. A line that cannot be part of a
+   * key ends it too (the command was cut short), and is shown.
+   */
+  private masked(rec: Open, text: string): string {
+    let at = 0;
+    while (rec.insideKey !== undefined && at < text.length) {
+      const end = text.indexOf("\n", at);
+      const next = end < 0 ? text.length : end + 1;
+      const line = stripVTControlCharacters(text.slice(at, end < 0 ? text.length : end)).trim();
+      if (KEY_END.test(line)) {
+        rec.insideKey = undefined;
+        at = next;
+      } else if (isKeyLine(line) && rec.insideKey < MAX_KEY_LINES) {
+        rec.insideKey++;
+        at = next;
+      } else rec.insideKey = undefined;
+    }
+    const rest = text.slice(at);
+    if (!rest) return "";
+    // A key that begins in this piece and does not end in it.
+    const visible = stripVTControlCharacters(rest);
+    let begin = -1;
+    for (const match of visible.matchAll(KEY_BEGIN)) begin = match.index;
+    if (begin >= 0 && !KEY_END.test(visible.slice(begin))) rec.insideKey = 0;
+    return maskTerminalOutput(rest);
   }
 
   /** How the last command ended: an asciicast exit event ("x"), which players that do not know it skip. */
@@ -197,7 +242,7 @@ export class SessionRecorder {
   private flushPending(rec: Open, now: number): void {
     if (rec.flush) clearTimeout(rec.flush);
     rec.flush = undefined;
-    if (rec.pending) this.event(rec, "o", maskTerminalOutput(rec.pending), now);
+    if (rec.pending) this.event(rec, "o", this.masked(rec, rec.pending), now);
     rec.pending = "";
   }
 

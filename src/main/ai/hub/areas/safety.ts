@@ -900,7 +900,8 @@ export class SafetyPart {
           for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
         }
-        if (moved.length && !isDemoMode()) await this.audit().append({
+        // In the demo lab too: its audit log is its own, kept in the demo's folder and sent nowhere.
+        if (moved.length) await this.audit().append({
           kind: "setting", actor: await this.resolveActorName(), target: "Safety rules", what: moved.join("; "), outcome: "intent",
         });
         this.store.data.safetyPolicy = next;
@@ -910,7 +911,7 @@ export class SafetyPart {
           this.appendActivityEvent(event);
           await this.host.recordWorkspaceActivity?.(event).catch(() => {});
         }
-        if (moved.length && !isDemoMode()) {
+        if (moved.length) {
           this.store.data.safetyPolicyChanged = { by: await this.resolveActorName(), at: Date.now() };
           void this.audit()
             .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Safety policy: ${moved.join("; ")}`, outcome: "completed" })

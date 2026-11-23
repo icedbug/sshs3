@@ -2,7 +2,6 @@ import { expireTerminalSources } from "../../../shared/answerSources";
 import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { dropCommandRating } from "./olderStores";
 import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
-import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { writeFileAtomic } from "../../storage/atomicFile";
@@ -35,10 +34,10 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
-import { maskContext } from "./privacy";
+import { maskContext, safeError } from "./privacy";
 import {
-  decryptSecretValue,
   encryptSecretValue,
+  openSecretValue,
 } from "../../crypto/SecretFieldCrypto";
 
 /**
@@ -56,26 +55,32 @@ const SAVED_AS_WRITTEN = new Set<keyof HubData>([
   "agents",
 ]);
 
-/** An MCP server's credentials: its header and environment values, and a URL that may carry a password. */
+/**
+ * An MCP server's credentials: its header and environment values, and a URL that may carry a password.
+ * `transform` is told which field of which server a value is (`where`), so that a value that could not
+ * be read is known again when the store is written.
+ */
 function mapMcpSecrets(
   servers: McpServerConfig[] | undefined,
-  transform: (value: string) => string,
+  transform: (value: string, where: string) => string,
 ): McpServerConfig[] | undefined {
   const values = (
     record: Record<string, string> | undefined,
+    where: string,
   ): Record<string, string> | undefined =>
     record &&
     Object.fromEntries(
       Object.entries(record).map(([k, v]) => [
         k,
-        typeof v === "string" ? transform(v) : v,
+        typeof v === "string" ? transform(v, `${where}\u0000${k}`) : v,
       ]),
     );
   return servers?.map((server) => ({
     ...server,
-    ...(server.headers ? { headers: values(server.headers) } : {}),
-    ...(server.env ? { env: values(server.env) } : {}),
-    ...(server.url ? { url: transform(server.url) } : {}),
+    ...(server.headers ? { headers: values(server.headers, `${server.id}\u0000headers`) } : {}),
+    ...(server.env ? { env: values(server.env, `${server.id}\u0000env`) } : {}),
+    // An address that could not be read is empty here and still has a place to be written back to.
+    ...(typeof server.url === "string" ? { url: transform(server.url, `${server.id}\u0000url`) } : {}),
   }));
 }
 
@@ -211,11 +216,48 @@ export class HubStore {
   private writes: Promise<void> = Promise.resolve();
   constructor(private readonly file: string) {}
 
+  /** What went wrong when the file was read, for the person: said for as long as the app runs. */
+  private loadProblem?: string;
+  /** Why the last save did not go through. Gone again with the next save that does. */
+  private saveProblem?: string;
+  /**
+   * Secrets of MCP servers that are stored encrypted and could not be read on this start, by server
+   * and field: the ciphertext as it was stored. It is written back as it is, so that one start with a
+   * key that is missing or broken does not replace the secret with nothing.
+   */
+  private keptSecrets = new Map<string, string>();
+
+  /**
+   * What a person has to know about the store's file, or nothing while all is well: it could not be
+   * read (so nothing is saved), it was empty or broken (a copy was kept and the hub started fresh),
+   * a secret could not be read, or the last save failed.
+   */
+  get problem(): string | undefined {
+    const unread = this.keptSecrets.size
+      ? `${this.keptSecrets.size === 1 ? "A secret of an MCP server" : `${this.keptSecrets.size} secrets of MCP servers`} could not be read on this start: the key that protects ${this.keptSecrets.size === 1 ? "it" : "them"} was not available. ${this.keptSecrets.size === 1 ? "It is" : "They are"} kept as stored. Fix the key and start sshs3 again, or enter ${this.keptSecrets.size === 1 ? "it" : "them"} again.`
+      : undefined;
+    const parts = [this.loadProblem, unread, this.saveProblem].filter(Boolean);
+    return parts.length ? parts.join(" ") : undefined;
+  }
+
+  /** Keeps the file as it is beside itself, before the hub starts fresh. Returns the copy's name. */
+  private async keepAside(): Promise<string> {
+    const copy = `${this.file}.corrupt-${Date.now()}`;
+    await fs.copyFile(this.file, copy);
+    return path.basename(copy);
+  }
+
   async load(): Promise<void> {
+    this.loadProblem = undefined;
+    this.keptSecrets.clear();
     try {
       const raw = (await fs.readFile(this.file, "utf8")).replace(/^\uFEFF/, "").trim();
       if (!raw) {
+        // An empty file is not a first start: something emptied it (a full disk, a write that was cut
+        // short). There is nothing to read, so the hub starts fresh, but not without a word.
+        const copy = await this.keepAside();
         this.data = defaultHubData();
+        this.loadProblem = `The AI hub's data file was empty, so the hub started fresh: conversations, memory, settings and safety rules are at their defaults. The empty file was kept as ${copy}.`;
         return;
       }
       const value = JSON.parse(raw) as HubData;
@@ -236,10 +278,11 @@ export class HubStore {
       };
       // What an older version stored about a rating of commands that no longer exists.
       dropCommandRating(this.data);
-      this.data.mcpServers = mapMcpSecrets(
-        this.data.mcpServers,
-        decryptSecretValue,
-      );
+      this.data.mcpServers = mapMcpSecrets(this.data.mcpServers, (stored, where) => {
+        const opened = openSecretValue(stored);
+        if (opened.kept) this.keptSecrets.set(where, opened.kept);
+        return opened.value;
+      });
       for (const task of this.data.tasks) {
         if (["running", "queued", "waiting"].includes(task.status)) {
           task.status = "interrupted";
@@ -271,18 +314,25 @@ export class HubStore {
       // that could not be read at all (locked by antivirus or a sync client, too many open files) is not
       // known to be broken: nothing is written over it, and the hub says so instead of starting empty.
       const unreadable = !(error instanceof SyntaxError) && (error as Error).message !== "Unsupported AI Hub store";
+      const runsOnDefaults = "The hub runs with default settings and safety rules, and saves nothing until this is fixed.";
       if (unreadable) {
         this.writable = false;
+        this.data = defaultHubData();
+        this.loadProblem = `The AI hub's data could not be read (${safeError(error)}). ${runsOnDefaults} Close what holds the file open and start sshs3 again.`;
         throw new Error(`The AI hub's data could not be read (${(error as Error).message}); nothing was changed. Close what holds the file open and start again.`, { cause: error });
       }
+      let copy: string;
       try {
-        await fs.copyFile(this.file, `${this.file}.corrupt-${Date.now()}`);
+        copy = await this.keepAside();
       } catch (copyError) {
         // Not kept aside, so not replaced either.
         this.writable = false;
+        this.data = defaultHubData();
+        this.loadProblem = `The AI hub's data file is not readable as a store, and a copy of it could not be kept (${safeError(copyError)}). ${runsOnDefaults}`;
         throw new Error(`The AI hub's data is not readable as a store, and could not be kept aside (${(copyError as Error).message}); nothing was changed.`, { cause: copyError });
       }
       this.data = defaultHubData();
+      this.loadProblem = `The AI hub's data file could not be understood, so the hub started fresh: conversations, memory, settings and safety rules are at their defaults. The file was kept as ${copy}.`;
     }
   }
 
@@ -315,8 +365,40 @@ export class HubStore {
     }
   }
 
+  /**
+   * Writes the store. Never throws: what goes wrong (a secret that cannot be encrypted, a full disk)
+   * comes back as a rejected promise and is said in `problem`, so a save started from a timer cannot
+   * take the app down.
+   */
   save(): Promise<void> {
     if (!this.writable) return Promise.resolve();
+    let content: string;
+    try {
+      content = this.serialize();
+    } catch (error) {
+      this.saveProblem = `The AI hub's data could not be saved (${safeError(error)}). What changes now is lost when sshs3 closes.`;
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    const write = async (): Promise<void> => {
+      try {
+        // The hub's folder is the owner's alone, as it always was when the store made it.
+        await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+        // The same helper the rest of the app writes its files with: a temporary file, synced, then renamed.
+        await writeFileAtomic(this.file, content, { mode: 0o600 });
+        if (!this.unsavedSecret) this.saveProblem = undefined;
+      } catch (error) {
+        this.saveProblem = `The AI hub's data could not be saved (${safeError(error)}). What changes now is lost when sshs3 closes.`;
+        throw error;
+      }
+    };
+    this.writes = this.writes.then(write, write);
+    return this.writes;
+  }
+
+  /** Set while a secret that was entered could not be encrypted and so was left out of the file. */
+  private unsavedSecret = false;
+
+  private serialize(): string {
     this.prune();
     // Serialize a detached, redacted copy; never mutate live state during an asynchronous write.
     // Image data is masked by nobody: base64 holds no secret a mask could find, and masking megabytes
@@ -341,19 +423,40 @@ export class HubStore {
         ]),
       ),
       // Encrypted with the OS keyring where one exists (plain otherwise, as for saved profiles).
-      mcpServers: mapMcpSecrets(this.data.mcpServers, encryptSecretValue),
+      mcpServers: this.sealMcpSecrets(),
     });
-    const write = async (): Promise<void> => {
-      await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-      const temporary = `${this.file}.tmp-${process.pid}-${crypto.randomUUID()}`;
-      await fs.writeFile(temporary, content, { mode: 0o600 });
-      await fs.rename(temporary, this.file).catch(async (error: unknown) => {
-        await fs.rm(temporary, { force: true }).catch(() => {});
-        throw error;
-      });
-    };
-    this.writes = this.writes.then(write, write);
-    return this.writes;
+    return content;
+  }
+
+  /**
+   * The MCP servers as they are written. A secret that could not be read on this start and was not
+   * entered again goes back as the ciphertext it was stored as. One that cannot be encrypted now
+   * (the web server's key is broken) is left out, with a word to the person, and the rest of the
+   * store is still saved: one field must not stop every save.
+   */
+  private sealMcpSecrets(): McpServerConfig[] | undefined {
+    let failed: unknown;
+    const live = new Set<string>();
+    const sealed = mapMcpSecrets(this.data.mcpServers, (value, where) => {
+      live.add(where);
+      const kept = this.keptSecrets.get(where);
+      if (!value) return kept ?? value;
+      try {
+        const encrypted = encryptSecretValue(value);
+        // Entered again and stored: the old ciphertext is not needed any more.
+        this.keptSecrets.delete(where);
+        return encrypted;
+      } catch (error) {
+        failed = error;
+        return kept ?? "";
+      }
+    });
+    // A server or a field that was removed takes its unread secret with it.
+    for (const where of [...this.keptSecrets.keys()]) if (!live.has(where)) this.keptSecrets.delete(where);
+    this.unsavedSecret = failed !== undefined;
+    if (failed !== undefined)
+      this.saveProblem = `A secret of an MCP server could not be saved (${safeError(failed)}). The rest was saved. Enter it again once this is fixed.`;
+    return sealed;
   }
 
   /**

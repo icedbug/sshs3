@@ -13,6 +13,7 @@ import {
   getShellAdapterCapabilities,
   lastVisibleLine,
   parseOscMarkers,
+  visibleLine,
   type CommandResult,
   type Osc133Phase,
   type ShellAdapterCapabilities,
@@ -99,6 +100,19 @@ export function atShellPrompt(tail: string | undefined): boolean {
   return /[$#%>❯»]\s*$/.test(last) || (trimmed.endsWith(">") && /PS [A-Za-z]:\\/.test(trimmed));
 }
 
+/**
+ * What a terminal printed before a command began, without a shell prompt at its end. The prompt of
+ * the command before it often arrives that late, and says nothing.
+ */
+function withoutTrailingPrompt(text: string | undefined): string {
+  if (!text) return "";
+  const lines = text.split("\n");
+  while (lines.length && !visibleLine(lines[lines.length - 1])) lines.pop();
+  if (lines.length && atShellPrompt(lines[lines.length - 1])) lines.pop();
+  const rest = lines.join("\n").replace(/[ \t\r\n]+$/, "");
+  return visibleLine(rest.replace(/\n/g, " ")) ? rest : "";
+}
+
 /** Whether the terminal is asking for a password, passphrase or token (and so not echoing what is typed). */
 export function atSecretPrompt(tail: string): boolean {
   // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
@@ -126,6 +140,8 @@ interface LiveTerminal {
   trimPostHandshakeNewline?: boolean;
   /** The last line of the shell's prompt, as the latest handshake saw it (only where output can arrive late). */
   promptLine?: string;
+  /** What the terminal printed before a handshake began, kept for the result of the next command. */
+  printedBeforeHandshake?: string;
   /** Latest OSC 133 shell integration prompt state. */
   oscPromptActive?: boolean;
   lastOscPhase?: Osc133Phase;
@@ -135,6 +151,18 @@ interface LiveTerminal {
   reconnectGrace?: ReconnectGraceMetadata;
   /** Active shared session participants (read-only observers vs interactive peers). */
   observers: TerminalObserverParticipant[];
+  /**
+   * A command of the agent's was let go of before its end marker came: it ran out of time, or the
+   * terminal was taken back while it ran. It may still be running, so nothing is typed here by
+   * itself until text that arrived after that moment ends in a shell prompt.
+   */
+  unsettled?: {
+    since: number;
+    /** What the terminal has shown since, the last of it. */
+    shown: string;
+    /** Text the command's frame still held back when it was let go of: shown with the next text. */
+    flush: string;
+  };
   pending?: {
     frames: CommandFrames;
     handshake: boolean;
@@ -150,6 +178,13 @@ interface LiveTerminal {
 /** How long a terminal that delivers text late is given after the last text, and at most, before a command's frame is closed. */
 const LATE_QUIET_MS = 150;
 const LATE_MAX_MS = 800;
+
+/** Said when something is to be typed into a terminal whose last command was let go of and has shown no prompt since. */
+export const STILL_RUNNING =
+  "The last command is still running in this terminal, or it has not shown a shell prompt since. Nothing is typed there until it does. Use another terminal, or ask the person to look at this one.";
+
+/** Whether text that came after a command was let go of ends in a shell prompt. Nothing shown is not a prompt here. */
+const promptCameBack = (shown: string): boolean => shown !== "" && atShellPrompt(shown);
 
 export interface DetectedCommandActivity {
   kind: "command" | "config-edit" | "service" | "deploy";
@@ -380,6 +415,11 @@ export class TerminalRegistry extends EventEmitter {
   private feedInner(id: string, data: string): string {
     const s = this.sessions.get(id);
     if (!s) return data;
+    if (!s.pending && s.unsettled?.flush) {
+      // The end of what a command showed before it was let go of was still held back: it is shown now.
+      data = s.unsettled.flush + data;
+      s.unsettled.flush = "";
+    }
     if (s.pending) {
       try {
         const result = s.pending.frames.feed(data);
@@ -408,6 +448,7 @@ export class TerminalRegistry extends EventEmitter {
     }
     if (clean) {
       s.tail = ((s.tail ?? "") + clean).slice(-240);
+      if (s.unsettled) s.unsettled.shown = (s.unsettled.shown + clean).slice(-240);
       s.fedAt = Date.now();
       const osc = parseOscMarkers(clean);
       if (osc.osc133.length > 0) {
@@ -436,6 +477,8 @@ export class TerminalRegistry extends EventEmitter {
     // After a handshake, which prints nothing, what the terminal shows last is the prompt.
     if (pending.handshake && pending.frames.awaitingLate) s.promptLine = pending.frames.promptSeen() || undefined;
     s.pending = undefined;
+    // An answer to the handshake came from a shell: whatever ran here before has ended.
+    if (pending.handshake) s.unsettled = undefined;
     s.trimPostHandshakeNewline = pending.handshake;
     s.view.state = "ready";
     s.view.cwd = result.cwd;
@@ -459,7 +502,13 @@ export class TerminalRegistry extends EventEmitter {
         this.lastResolvedFailures.delete(id);
       }
     }
-    pending.resolve({ ...result, output: boundedContext(result.output) });
+    // What the terminal printed before the frame began is not the command's output, and is handed
+    // over as that. Nobody reads the result of a handshake, so what came before one (a banner that
+    // was still arriving when the terminal was connected to) goes with the next command.
+    const { printedBefore: own, ...rest } = result;
+    const printed = boundedContext([s.printedBeforeHandshake, withoutTrailingPrompt(own)].filter(Boolean).join("\n"), 4000);
+    s.printedBeforeHandshake = pending.handshake && printed ? printed : undefined;
+    pending.resolve({ ...rest, output: boundedContext(result.output), ...(!pending.handshake && printed ? { printedBefore: printed } : {}) });
     if (!pending.handshake) this.emit("executed", id, result.exitCode);
     this.emit("changed");
   }
@@ -662,9 +711,17 @@ export class TerminalRegistry extends EventEmitter {
       return { ...s.view };
     }
     if (s.pending) throw new Error("Terminal is currently busy");
+    // A command that was let go of before it ended may still be running (a password prompt, a pager,
+    // a long job). What the terminal showed before it says nothing now: only a prompt shown since counts.
+    if (s.unsettled) {
+      if (!promptCameBack(s.unsettled.shown)) throw new Error(STILL_RUNNING);
+      s.unsettled = undefined;
+    }
     if (s.armFailedAt && Date.now() - s.armFailedAt < 5 * 60_000)
       throw new Error(s.armFailure ?? "This terminal did not answer like a shell a moment ago. Connect it at a prompt by hand.");
-    // The handshake is typed into the terminal: only where a shell is waiting, never into a running program.
+    // The handshake is typed into the terminal, so only where the last text it showed reads as a shell
+    // prompt. That is a reading of the last line and no proof: a program whose last line looks like a
+    // prompt gets the handshake typed into it, and the handshake then goes unanswered.
     const oscPromptReady = s.oscPromptActive === true && !atSecretPrompt(s.tail ?? "");
     if (!oscPromptReady && !atShellPrompt(s.tail))
       throw new Error("This terminal is not at a shell prompt (a program is running in it, or it is waiting for input). Leave it at a prompt, or connect it by hand.");
@@ -736,7 +793,8 @@ export class TerminalRegistry extends EventEmitter {
   async arm(id: string, shell: ShellKind): Promise<void> {
     const s = this.require(id);
     if (s.view.owner || s.pending) throw new Error("Terminal is in use");
-    // This is an explicit user action after checking that the prompt is idle and the target is correct.
+    // Called when a person presses "Connect at prompt" (they looked at the terminal), and by
+    // ensureReady and armAtPrompt once the last line reads as a prompt. Nothing is checked here.
     s.view.shell = shell;
     s.view.state = "ready";
     await this.execute(
@@ -827,12 +885,7 @@ export class TerminalRegistry extends EventEmitter {
         handshake,
         resolve,
         reject,
-        timer: setTimeout(() => {
-          this.invalidate(
-            id,
-            "Command status is unknown after timeout. Inspect the terminal; the command was not retried.",
-          );
-        }, timeout),
+        timer: setTimeout(() => this.ranOutOfTime(id, s, timeout), timeout),
       };
       try {
         s.write(envelope);
@@ -848,10 +901,29 @@ export class TerminalRegistry extends EventEmitter {
   }
 
   /**
-   * Gives the terminal back to the person. `interrupt`: stop what the agent is
-   * running (Ctrl-C), when the person asked for control with a button rather
-   * than by typing — their own keys, Ctrl-C included, go through by themselves.
+   * A command did not end in the time it was given. It is left running: sshs3 never stops a command
+   * by itself, because a long job (an upgrade, a restore) cut off part way can leave more broken than
+   * a slow one. Whoever ran it is told so, and the terminal stays closed to the agent until it shows
+   * a shell prompt again (see `unsettled`).
+   *
+   * A handshake that got no answer is another matter: it was typed into something that is not a
+   * shell, and there is no command of sshs3's running there.
    */
+  private ranOutOfTime(id: string, s: LiveTerminal, timeoutMs: number): void {
+    const pending = s.pending;
+    if (!pending) return;
+    const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+    if (pending.handshake) {
+      this.invalidate(id, `no shell answered within ${seconds} seconds`);
+      return;
+    }
+    const last = lastVisibleLine(pending.frames.shownSoFar() + pending.frames.heldBack()).slice(-200);
+    this.invalidate(
+      id,
+      `The command did not finish within ${seconds} seconds. It was left running in this terminal: sshs3 does not stop a command by itself. Nothing more is typed there until it shows a shell prompt again. It was not run again. Use another terminal, or ask the person to look at this one.${last ? ` It last showed: ${last}` : ""}`,
+    );
+  }
+
   /** The person's terminal was resized: kept for a recording to replay at the right size. */
   resized(id: string, cols: number, rows: number): void {
     const s = this.sessions.get(id);
@@ -866,6 +938,11 @@ export class TerminalRegistry extends EventEmitter {
     return { cols: s?.cols, rows: s?.rows };
   }
 
+  /**
+   * Gives the terminal back to the person. `interrupt`: stop what the agent is
+   * running (Ctrl-C), when the person asked for control with a button rather
+   * than by typing. Their own keys, Ctrl-C included, go through by themselves.
+   */
   takeover(id: string, options: { interrupt?: boolean } = {}): void {
     const s = this.require(id);
     const owner = s.view.owner;
@@ -885,9 +962,19 @@ export class TerminalRegistry extends EventEmitter {
     if (s.pending) {
       clearTimeout(s.pending.timer);
       clearTimeout(s.pending.lateTimer);
+      if (!s.pending.handshake && !disconnected) {
+        // The command's end marker never came. What the terminal showed last is kept (a question for
+        // a password is known by it), and only a prompt shown from here on opens the terminal again.
+        const flush = s.pending.frames.heldBack();
+        const last = (s.pending.frames.shownSoFar() + flush).slice(-240);
+        if (last) s.tail = last;
+        s.unsettled = { since: Date.now(), shown: "", flush };
+        s.oscPromptActive = undefined;
+      }
       s.pending.reject(new Error(reason));
       s.pending = undefined;
     }
+    if (disconnected) s.unsettled = undefined;
     s.view.generation = crypto.randomUUID();
     // Whatever held the terminal lets go of it here too, so a recording ends with the run that made it.
     if (owner) this.emit("released", { ...s.view }, owner);

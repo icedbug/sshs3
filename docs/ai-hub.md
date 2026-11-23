@@ -185,6 +185,23 @@ explicitly enabled presentation on top of the same terminal authority.
   at least half of what the request asks for. Commands, snippets and
   output are masked with `privacy.ts` before they are stored; counters and events
   persist in `HubStore` (`selfLearningState`).
+- **`HubStore`** — the hub's own data, `<hub dir>/hub.json`, written through
+  the app's shared `writeFileAtomic` (a temporary file, synced, then renamed).
+  A file that cannot be used never turns into a fresh start without a word:
+  - A file that is empty or is not a store is kept beside it as
+    `hub.json.corrupt-<time>`, and the hub starts fresh.
+  - A file that could not be read at all (locked, no permission) is left
+    alone. The hub then runs with default settings and safety rules and saves
+    nothing until the app is started again.
+  - A secret of an MCP server (a header, an environment value, its address)
+    that is stored encrypted and cannot be decrypted on a start is empty in
+    memory, and its ciphertext is written back unchanged until it is read on a
+    later start or entered again.
+  - A save never throws. A secret that cannot be encrypted (a web server whose
+    key is broken) is left out and the rest is saved.
+  Each of these is said to the person: the snapshot's `storeProblem` holds the
+  text, and the panel shows it as a line above everything else. Tests:
+  `tests/main/hubStoreProblems.test.ts`.
 - **`TerminalRegistry` / `ToolBroker` / `shellAdapters`** — terminal authority:
   correlated `OSC 777;SSHS3;<nonce>;BEGIN … END;<exit>;<cwd>` framing and
   `OSC 133;D;<exit>` shell integration. A successful command reports the failure
@@ -599,7 +616,12 @@ What went with the classifier:
 What did not change: the budget of a run, the guard against running one
 command again and again for one answer, the servers a chat run may reach,
 masking of secrets, and the audit log. Every finished command is in the audit
-log. A card and a file write are also written there before they run.
+log. A card and a file write are also written there before they run. A plain
+command is written once, when it has ended. One that is still running after
+five seconds is written as "started" as well, so that a command that hangs is
+in the log before it runs out of time. What is running when the app closes is
+written as "uncertain" before the app is gone
+(`tests/main/auditCommandStarted.test.ts`).
 
 Where it is decided: `ToolBroker.authorize` for every tool of a run,
 `isPlainCommand` (`src/shared/types/aiHub.ts`) for which of the two an action
@@ -633,11 +655,40 @@ to change cards when a plain command would do the same is not known.
 - What it claims is only what it showed. A check that already passed before
   the change is not proof (the run is "not verified", and the agent is told
   so). "Rolled back" means the rollback exited 0 *and* the check reads as it
-  did before; otherwise it says it is not back as it was. A change command
+  did before; otherwise it says it is not back as it was. "Reads as it did
+  before" is seen in one of three ways, tried in this order, and the result
+  says which (`comparedBy`, `rollback.comparison`, the audit entry):
+  the same exit code and output (`exact`); the same once dates and times,
+  "… ago", process ids and the counters uptime and systemd print are left out
+  (`stable`, `stableObservation` in `ToolBroker.ts`); or the check passed
+  before the change and passes again by the card's own expected text
+  (`expected`). A check that failed before and fails again counts only by its
+  output: two failed checks are not the same state by themselves. A number
+  that may be a setting (a timeout, a port, a count of workers) is never
+  left out. A rollback from the Changes view compares the same way, from the
+  hashes kept with the change. `tests/main/changeRollbackComparison.test.ts`.
+  A rollback from the Changes view runs once. When the terminal refused it
+  before anything was typed (something stands at its prompt, it is not ready
+  any more), it is not recorded as run: the audit log gets "rollback-not-run"
+  and the person can try again (`tests/main/changeManualRollback.test.ts`).
+  A change command
   that failed while the check still reads as before runs no rollback. A run
   that loses the terminal mid-change (stopped, taken over, timed out) leaves
-  it "uncertain" and says the rollback did not run. The expected text is
+  it "uncertain" and says the rollback did not run.
+- "Uncertain" is only for a command that was typed and whose end is not
+  known. A change or a command that is stopped after it was allowed and
+  before it is typed (the rules changed, a freeze began, the run ended, or
+  the terminal was no longer the run's to type into) is marked as not run:
+  status `denied`, with "Not run:" and the reason in its output and in the
+  audit entry. `tests/main/changeNotRun.test.ts`. The expected text is
   matched as a word or phrase: "inactive" does not pass for "active".
+- Every command a card types counts against the run's budget: the check
+  before, the change, each later look at the check, and the rollback (a look
+  before a plain command, `preflightCommand`, counts too). A card is never
+  stopped half-way for the budget: what is over is refused at the next call.
+- A call that carries an `idempotencyKey` is answered from a ledger when it is
+  made again with the same arguments. A key is remembered for a day, not for
+  as long as the app runs. `tests/main/brokerCountsAndKeeps.test.ts`.
 - Only a proven fix is learned: a change counts for team memory only when its
   check passed and had not passed before.
 - Nothing looks at what the command, the check or the rollback do. The model
@@ -656,15 +707,44 @@ to change cards when a plain command would do the same is not known.
   a chain after `token=…`, or what follows a lone private-key header stays
   visible. When anything was masked, the change carries `hiddenValues` and the
   card says the real values run where it shows `[redacted]`.
+- A password written as an ordinary word of a command is masked too, in the
+  card, the store and the audit log: `sshpass -p`, `redis-cli -a`,
+  `docker login -p` (and podman, helm and the like), `mongosh -p`,
+  `ldapsearch -w`, `zip -P`, `7z -p…`, `htpasswd -b`, `openssl -pass pass:…`,
+  `smbclient -U name%…`, `ipmitool -P`, `rabbitmqctl add_user`, a flag whose
+  name ends in password, token or api-key, and what `echo` or `printf` pipes
+  into `chpasswd`, `sudo -S`, `passwd --stdin` or `--password-stdin`
+  (`maskCommandLineSecrets` in `privacy.ts`). The rules go by the program's
+  name: `-p` is a port to ssh and a password to sshpass. A variable or a
+  command substitution in that place is shown as it is. A program that is not
+  on the list is not covered: a password given to it as a plain word is shown.
+  The command that runs is always the one that was written, never the masked
+  one. `tests/main/privacyCommandLines.test.ts` holds the list.
 - Nothing is shortened for approval. A command, check, rollback or cluster
   command too long to show in full is refused, not cut.
+- The approved command reaches a bash, zsh, sh or dash shell byte for byte
+  (see Terminal authority below). In fish it is typed as it stands.
 - An approved plan covers a command by its exact text (`commandHash`), never
   by how it looks once masked, and never one with hidden values.
 - File changes are approved as a unified diff (Inbox, task, Changes), keep
   their path whatever the agent calls them, and are refused when the new
   content would be shown masked. A file is rewritten through the model only
   if it could be read whole (28,000 characters); a longer one is read as
-  "not complete". A write that fails half-way puts the file back.
+  "not complete".
+- A file write that wrote nothing says so (`FileTools.ts`). Refused at the
+  last look at the rules (a freeze began, the rules changed) it is marked as
+  not run and nothing is written, not the old content "put back" either.
+  Refused by the server before it began (the login account may not write the
+  file, the file system is read-only, the folder is gone), or failed while
+  the file still reads as it did, it is "failed" and "Not written", and
+  nothing is put back. For a file the account may not write, the agent is
+  told the way forward: make the edit with `sshs3_change` and sudo, with a
+  check and a rollback. Only a write that may have happened in part is put
+  back; "uncertain" is for when that did not work.
+  `tests/main/FileToolsNotWritten.test.ts`.
+- What a person writes with their yes reaches the agent as `personNote`: on
+  a change card, a file write, a call to a tool of another system (`mcp__*`)
+  and a guarded settings change.
 - Every change records how it was decided (`decidedHow`): a person (with
   `decidedBy`: name, time, yes or no), the safety rules, an approved plan,
   nobody answering in time, or the run being stopped. Changes and the audit
@@ -809,15 +889,43 @@ reads them. There are none in the desktop app and none in the demo lab.
   anchored, and stretches in which entries waited for an anchor (the
   computer was off, or anchors were removed). Without a team bucket, a cut from the very end does not
   show, and the screen says so.
+- **A log that is damaged does not stop work.** An entry is written before
+  every change card and file write, so a log that refused to write stopped
+  every change. Now:
+  - A last line that was cut off while it was written (a crash) is kept in
+    `audit-<client>.jsonl.torn` and taken out of the log. The chain goes on
+    from the last whole entry, with a `journal` entry that says so. The check
+    then holds: nothing that was whole is gone.
+  - A line in the middle that is not an entry, was changed, or leaves a hole
+    stays where it is. The log writes one `journal` entry that names the line
+    and what is wrong there, once, and goes on from the last entry in the
+    file. The check reports the break for as long as it is in the file ("The
+    log does not hold"), with the line and when the log wrote it down
+    (`breaks` in the verification).
+  - A file that is there and cannot be read is reported as that
+    (`unreadable`), not as an empty chain that holds. Nothing is written to
+    it, so change cards and file writes are refused until it can be read.
+- **What a check reads.** The screen reads the newest entries from the end of
+  the file. The chain is walked from the start on the first check after a
+  start, when anything but this app's own writes touched the file (its size
+  or time differ from what the app left), and for an export. In between, each
+  entry is checked as it is written and the check reads nothing. The names of
+  the anchors are listed at every check, so a removed anchor shows at once.
+  An anchor's content is read once and kept until the app closes or an
+  export. So an edit that keeps the file's size and puts its time back, or an
+  anchor rewritten in place, shows at the next start or export, not at once.
 - **The screen.** Changes → Audit log: newest first, the verdict, a filter,
-  "Check it again", and Export (the file as it is on disk plus what the check
-  found).
+  "Check it again", and Export (the file as it is on disk plus what a check
+  of all of it found).
 - **Recordings.** While an agent's run holds a terminal, what the terminal
   showed is recorded as asciicast v2 (`recordings/<run>-<terminal>-<time>.cast`):
   output only, never what a person types, at the terminal's real size, with
   a marker per command and an exit event (`"x"`) when it ends. Secrets are
   masked on the visible text, so colour codes cannot hide one; a line holding
-  a secret gives up its colours. A prompt without a newline is written after
+  a secret gives up its colours. A private key that arrives in several pieces
+  is masked as one: after its header the recorder leaves out every line that
+  can be part of a key, up to its END line or the first line that cannot be.
+  A prompt without a newline is written after
   300 ms. Each time a run holds the terminal gets its own file. A recording
   ends when the run lets go or loses the terminal, and is sealed into the
   audit log with its sha256; the player says whether it still matches. A run
@@ -830,11 +938,11 @@ reads them. There are none in the desktop app and none in the demo lab.
   anchored in a bucket and not sent anywhere. The Timeline there shows
   invented example data (`demoWorkspace.ts`), and says so. While the demo's
   log is empty, the Audit log screen says so instead of "verified". It says
-  that entries come when an agent runs a command or makes a change, and
-  names what is not recorded in the demo: a command typed in a terminal, a
-  scripted walkthrough, starting an incident, and a change of the safety
-  rules (`safety-policy-save` skips the log in demo mode). In any mode an
-  empty log reads "nothing to verify yet", not as a chain that holds.
+  that entries come when an agent runs a command or makes a change, or when
+  the safety rules are changed (`safety-policy-save` is logged in the demo
+  as anywhere), and names what is not recorded in the demo: a command typed
+  in a terminal, a scripted walkthrough and starting an incident. In any
+  mode an empty log reads "nothing to verify yet", not as a chain that holds.
 - **The player.** From a timeline item or a log entry: pauses over 2 s
   shortened, speed, scrubbing, the commands as a list with ✓ or the exit
   code, and a log entry opens it at its own command.
@@ -842,9 +950,12 @@ reads them. There are none in the desktop app and none in the demo lab.
   installation's bucket credentials can write a consistent forgery of both
   log and anchors; other installations do not witness each other's heads
   yet. Entries since the last anchor are only hash-chained. Nothing is written
-  before a command runs, so a crash between running and logging loses that
-  entry. These are the next steps the research named (signed anchors and
-  witnesses, an HMAC key ratchet, an intent entry before running).
+  before a plain command runs: it is written when it ends, and as "started"
+  once it has run for five seconds. So a crash in the first five seconds of a
+  command loses that entry. A command that several servers run at once
+  (`sshs3_cluster_exec`) gets no "started" entry. These are the next steps
+  the research named (signed anchors and witnesses, an HMAC key ratchet, an
+  intent entry before every command).
 
 ## Investigations: hypotheses and investigators that can look
 
@@ -2941,6 +3052,21 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
 - Connecting by itself (`ensureReady`) happens only at something that looks
   like a shell prompt — never into `mysql>`, `psql`, a pager or a password
   prompt — and after a failed connect it is not retried for five minutes.
+  That is a reading of the last line the terminal showed, and no proof.
+- A command that does not end in its time (two minutes) is left running.
+  sshs3 does not stop a command by itself: a long job cut off part way (an
+  upgrade, a restore) can leave more broken than a slow one. The agent is
+  told that the command is still running, with the last line the terminal
+  showed. The command is not run again, and a change card says its rollback
+  did not run. A person who wants it stopped presses Ctrl-C in the terminal.
+- A terminal whose last command was let go of before it ended (it ran out of
+  time, or a person took the terminal back while it ran) is not typed into by
+  itself until it has shown a shell prompt again. What it showed before the
+  command does not count. Until then the agent is told "The last command is
+  still running in this terminal" and to use another terminal. A person can
+  still press "Connect at prompt": they looked, and the shell's answer is
+  taken as proof. `tests/main/terminalAfterTimeout.test.ts` holds this, also in
+  a real bash and dash where they are installed.
 - Which shell a terminal runs is read from what it shows and what it was
   started with (`detectShellFromHint`). Its name is what a person called it
   and counts only where a tab is named after its program: "cmd", "powershell"
@@ -2950,10 +3076,36 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   anywhere.) A guess the terminal did not answer to is not kept: the next try
   reads the terminal again.
 - An agent's command is never written over something half-typed at the prompt.
+- The shell runs the bytes that were approved. For bash, zsh, sh and dash the
+  command is not typed as it stands: it is sent as a format for the shell's
+  own `printf` (letters, digits, spaces and a few signs as they are, every
+  other byte as an octal escape), which the shell turns back into the command
+  and runs (`commandEnvelope`, `printfFormat` in `shellAdapters.ts`). So a
+  tab, a quote, a line break or text that is not ASCII arrives as it was
+  approved, whatever the shell's line editor would have done with it. No typed
+  line is longer than 800 characters. A long command is handed over in
+  pieces, and the last line runs it only when every character arrived; when
+  not, nothing runs and the result says so (exit code 126). Each typed line
+  begins with a space, so a shell that is set to keep such lines out of its
+  history does. PowerShell and cmd carry the command base64 encoded, as
+  before. fish is still typed as the command stands, so a tab in it may be
+  completed away: that could not be tried in a real fish.
+  `tests/main/shellAdaptersBytes.test.ts` runs this in a real bash, sh and
+  dash, with tabs, a 6,040 character command and the longest command the tools
+  take (16,000 characters). zsh is skipped where it is not installed and has
+  not been tried.
 - The command runs in a subshell, so it cannot redefine `printf` to report a
   false exit code, and an `exit` or `cd` in it does not end or move the
   person's shell. (A consequence: `cd` and `export` do not carry over from one
   agent command to the next.)
+- What a terminal printed after a command was typed and before the command
+  began is not the command's output: the end of an earlier command's output,
+  a banner that was still arriving when the terminal was connected to. It
+  used to be dropped. Now the agent gets it as `printedBeforeCommand`, at
+  most 4,000 characters, without the echo of what was typed and without a
+  shell prompt at its end. It is still not drawn in the person's terminal,
+  and it is not worked out where the terminal delivers text late (Windows'
+  pseudo console).
 - A frame that only looks like sshs3's own (a nonce it never issued) is
   program output and becomes nothing.
 - An answer typed at a password prompt is never kept as a command, so it can

@@ -383,10 +383,12 @@ export interface AgentChange {
    * afterwards does not show that the change did it). `skipped`: why the check
    * was never looked at after the change.
    */
-  check?: { command: string; expected: string; baselineHash?: string; before?: boolean; after?: boolean; output?: string; skipped?: string };
+  check?: { command: string; expected: string; baselineHash?: string; baselineStableHash?: string; before?: boolean; after?: boolean; output?: string; skipped?: string };
   /**
    * The command that takes the change back, and what happened if it had to run.
    * `restored`: after the rollback the check reads as it did before the change.
+   * `comparison`: how that was seen. `exact`: the same output. `stable`: the same once times,
+   * process ids and counters are left out. `expected`: the check passed before and passes again.
    * `skipped`: why it did not run although the change did not hold.
    */
   rollback?: {
@@ -397,6 +399,7 @@ export interface AgentChange {
     checkAfter?: boolean;
     restored?: boolean;
     comparedWithBaseline?: boolean;
+    comparison?: "exact" | "stable" | "expected";
     skipped?: string;
   };
   /**
@@ -2084,6 +2087,10 @@ export interface AuditVerificationView {
   ok: boolean;
   entries: number;
   problem?: { seq: number; text: string };
+  /** Every place the chain does not hold (at most twenty): the line of the file, and when the log itself wrote it down. */
+  breaks?: { line: number; seq: number; text: string; recordedAt?: number }[];
+  /** The log's file could not be read: nothing is known about it. */
+  unreadable?: boolean;
   anchors?: { checked: number; held: number; coveredSeq?: number; lastAt?: number; gaps?: { from: number; to: number }[] };
   lastAt?: number;
 }
@@ -2370,6 +2377,8 @@ export interface HubSnapshot {
   chatAnswering?: ChatAnsweringSnapshot;
   /** Who last changed the safety policy on this computer, and when. */
   safetyPolicyChanged?: { by: string; at: number };
+  /** Set while the hub's own data file could not be read or saved: what happened and what it means, for the person. */
+  storeProblem?: string;
   pendingLayoutEvent?: WorkspaceLayoutEvent;
   selfLearning?: SelfLearningStatus;
   /** Per-inbox-item snooze/acknowledge metadata keyed by `InboxItem.id`. */

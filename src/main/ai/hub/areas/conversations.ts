@@ -17,7 +17,8 @@ import { hostOf } from "../Notifier";
 import { getBuiltinSkillsAndMemories, getDemoTasks, getDemoWorkforceRuns, isDemoMode } from "../demoWorkspace";
 import { type DetectedCommandActivity } from "../TerminalRegistry";
 import { scopedMemory } from "../ContextService";
-import { boundedContext, boundedPrompt, clip, maskContext, maskProviderText, observationHash, safeError, workspaceHostNames } from "../privacy";
+import { boundedContext, boundedPrompt, clip, maskContext, maskProviderText, safeError, workspaceHostNames } from "../privacy";
+import { comparedWithBaseline, showsExpected } from "../ToolBroker";
 import {
   requiredText,
   integer,
@@ -27,7 +28,7 @@ import {
   buildInstantCommandSuggestion,
 } from "../hubHelpers";
 import { answerSourceReply, evidenceSourceReply, messageForView } from "../answerSourceRead";
-import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS } from "../hubShared";
+import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS, log } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
@@ -768,13 +769,29 @@ export class ConversationsPart {
             if (!verified.restored) throw new Error("The file could not be verified after restoring.");
             change.rollback = {command:command || "Restore file checkpoint", ran:true, restored:true, comparedWithBaseline:true, exitCode:0};
           } else {
+            // The registry refuses at once, before it types anything, when the terminal cannot take the
+            // command (something is typed at its prompt, it is not ready any more). Only from here on
+            // was the rollback typed, and only then is it recorded as run.
+            const running = this.terminals.execute(session.id, session.generation, task.id, command!, 120_000);
             attempted = true;
-            const result = await this.terminals.execute(session.id, session.generation, task.id, command!, 120_000);
+            const result = await running;
             change.rollback = {command:command!, ran:true, exitCode:result.exitCode, output:maskContext(result.output)};
             if (result.exitCode === 0 && request.action === "rollback-change" && request.verify !== false && check && change.check?.baselineHash) {
               const observation = await this.terminals.execute(session.id, session.generation, task.id, check, 60_000);
+              // As when the broker takes a change back by itself: the same output, the same once times,
+              // process ids and counters are left out, or a check that passed before and passes again.
+              const wanted = change.structuredCheck && change.check.expected === JSON.stringify(change.structuredCheck) ? "" : change.check.expected;
+              const comparison = comparedWithBaseline({
+                id: change.id,
+                now: observation,
+                exactHash: change.check.baselineHash,
+                stableHash: change.check.baselineStableHash,
+                before: change.check.before,
+                passes: (look) => look.exitCode === 0 && showsExpected(look.output, wanted, change.structuredCheck),
+              });
               change.rollback.comparedWithBaseline = true;
-              change.rollback.restored = observationHash(change.id, observation) === change.check.baselineHash;
+              change.rollback.restored = comparison !== undefined;
+              if (comparison) change.rollback.comparison = comparison;
             }
           }
           await this.audit().append({...event, outcome:change.rollback?.restored === true ? "rolled-back":"rollback-unverified"});
@@ -783,6 +800,12 @@ export class ConversationsPart {
           if (attempted) {
             if (!change.rollback?.ran) change.rollback = { command: command || "Restore file checkpoint", ran: true, output: safeError(error) };
             await this.audit().append({ ...event, outcome: "rollback-unverified", detail: safeError(error) });
+          } else {
+            // Nothing was typed and nothing was written: the rollback did not run, and can be tried again.
+            // The log says so, after the entry that said it was about to run.
+            await this.audit()
+              .append({ ...event, outcome: "rollback-not-run", detail: safeError(error) })
+              .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
           }
           throw error;
         } finally {

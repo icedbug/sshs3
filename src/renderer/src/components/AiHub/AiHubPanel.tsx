@@ -110,6 +110,7 @@ export function AiHubPanel(props: AiHubPanelProps): JSX.Element {
       <PanelHeader p={p} />
       <PanelNav p={p} />
       <ScenarioBar p={p} />
+      {hub?.storeProblem && <p className="ai-error" role="alert">{hub.storeProblem}</p>}
       {!hub ? (
         <p className="ai-empty">Connecting…</p>
       ) : (

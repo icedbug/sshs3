@@ -188,9 +188,112 @@ export function parseOscMarkers(text: string): ParsedOscMarkers {
   };
 }
 
-function quote(text: string): string {
-  return `'${text.replace(/'/g, `'"'"'`)}'`;
+/**
+ * The longest line typed into a POSIX shell. A shell without a line editor of its own (dash, sh)
+ * reads from the terminal in line mode, which holds 4,095 characters of one line on Linux and 1,024
+ * on macOS; BusyBox ash reads at most 1,024. What does not fit is dropped without a word.
+ */
+const MAX_TYPED_LINE = 800;
+
+/** The exit code of a command that did not arrive whole in the terminal, so nothing of it ran. */
+export const NOT_WHOLE_EXIT = 126;
+const NOT_WHOLE_NOTE = "sshs3: the command did not arrive whole in this terminal. Nothing ran.";
+
+/**
+ * A command as a format for the shell's own `printf`, which writes it back byte for byte. Letters,
+ * digits, spaces and a few signs stand as they are; every other byte is an octal escape. So what
+ * is typed holds no tab (a line editor completes it away), no line break, no quote, and nothing
+ * else a line editor or the shell could read as its own.
+ */
+export function printfFormat(command: string): string {
+  const bytes = Buffer.from(command, "utf8");
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    // "-" at the start would be read as an option of printf.
+    const plain =
+      (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (" _./:=,@+".includes(String.fromCharCode(b))) || (b === 0x2d && i > 0);
+    out += plain ? String.fromCharCode(b) : `\\${b.toString(8).padStart(3, "0")}`;
+  }
+  return out;
 }
+
+/** What `printfFormat` made, back to the command. Undefined when the text is not such a format. */
+function readPrintfFormat(format: string): string | undefined {
+  // eslint-disable-next-line security/detect-unsafe-regex -- the two alternatives never begin with the same character, so it cannot backtrack
+  if (!/^(?:[A-Za-z0-9 _./:=,@+-]|\\[0-3][0-7]{2})*$/.test(format)) return undefined;
+  const bytes: number[] = [];
+  for (let i = 0; i < format.length; i++) {
+    if (format[i] === "\\") {
+      bytes.push(parseInt(format.slice(i + 1, i + 4), 8));
+      i += 3;
+    } else bytes.push(format.charCodeAt(i));
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+const posixBegin = (prefix: string): string => `printf '\\033]777;${prefix};BEGIN\\007'`;
+const posixEnd = (prefix: string): string => `printf '\\033]777;${prefix};END;%s;%s\\007' "$__sshs3_rc" "$PWD"`;
+
+/**
+ * What is typed into a POSIX shell (bash, zsh, sh, dash) to run a command. The command is sent as
+ * a `printf` format (see `printfFormat`) that the shell turns back into the command and runs, so
+ * the shell runs the bytes that were approved whatever its line editor does with a tab or a quote.
+ *
+ * A short command is one line. A long one is handed over in pieces, one short line each, into a
+ * variable; the last line runs it only when every character arrived, and says so when not.
+ *
+ * Each line begins with a space: a shell set to keep such lines out of its history does.
+ */
+function posixEnvelope(command: string, prefix: string): string {
+  const format = printfFormat(command);
+  // The command runs in a subshell: what it defines (a function called printf, say) cannot reach the
+  // line that reports its exit code, and an `exit` or `cd` in it does not end or move the person's shell.
+  const inline = ` ${posixBegin(prefix)}; (eval "$(printf '${format}')"); __sshs3_rc=$?; ${posixEnd(prefix)}`;
+  if (inline.length <= MAX_TYPED_LINE) return `${inline}\r`;
+  const first = " __sshs3_c='";
+  const more = ` __sshs3_c="$__sshs3_c"'`;
+  const room = MAX_TYPED_LINE - more.length - 1;
+  const lines: string[] = [];
+  for (let at = 0; at < format.length; at += room) lines.push(`${at === 0 ? first : more}${format.slice(at, at + room)}'`);
+  lines.push(
+    ` ${posixBegin(prefix)}; if [ "\${#__sshs3_c}" = ${format.length} ]; then (eval "$(printf "$__sshs3_c")"); __sshs3_rc=$?; else printf '%s\\n' '${NOT_WHOLE_NOTE}'; __sshs3_rc=${NOT_WHOLE_EXIT}; fi; unset __sshs3_c; ${posixEnd(prefix)}`,
+  );
+  return `${lines.join("\r")}\r`;
+}
+
+/**
+ * Reads back what `commandEnvelope` types for a POSIX shell: the frame's id and the command. For a
+ * stand-in shell (the demo's virtual terminal), which runs the command itself and prints the marks.
+ * `typed`: every line of the envelope, without the last line break. Undefined when it is not one.
+ */
+export function readPosixEnvelope(typed: string): { prefix: string; command: string } | undefined {
+  const lines = typed.split(/\r\n|\r|\n/);
+  const last = lines.pop() ?? "";
+  const head = /^ ?printf '\\033\]777;(SSHS3;[a-f0-9]{32});BEGIN\\007'; /.exec(last);
+  if (!head) return undefined;
+  const prefix = head[1];
+  const rest = last.slice(head[0].length);
+  const tail = `; ${posixEnd(prefix)}`;
+  if (!rest.endsWith(tail)) return undefined;
+  const body = rest.slice(0, -tail.length);
+  let format: string | undefined;
+  if (lines.length === 0) {
+    format = /^\(eval "\$\(printf '([^']*)'\)"\); __sshs3_rc=\$\?$/.exec(body)?.[1];
+  } else {
+    const pieces = lines.map((line, i) => (i === 0 ? /^ ?__sshs3_c='([^']*)'$/ : /^ ?__sshs3_c="\$__sshs3_c"'([^']*)'$/).exec(line)?.[1]);
+    if (pieces.some((p) => p === undefined)) return undefined;
+    format = pieces.join("");
+    if (!body.startsWith(`if [ "\${#__sshs3_c}" = ${format.length} ]; then (eval "$(printf "$__sshs3_c")"); __sshs3_rc=$?; else `)) return undefined;
+  }
+  if (format === undefined) return undefined;
+  const command = readPrintfFormat(format);
+  return command === undefined ? undefined : { prefix, command };
+}
+
+/** Whether a line that was typed begins an envelope of `commandEnvelope` for a POSIX shell. */
+export const startsPosixEnvelope = (line: string): boolean => /^ ?(?:printf '\\033\]777;SSHS3;|__sshs3_c=)/.test(line);
+
 function fishQuote(text: string): string {
   return `'${text.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }
@@ -226,17 +329,26 @@ export function commandEnvelope(
     return envelope;
   }
   if (shell === "fish") {
+    // Typed as it stands: fish's line editor may change it (a tab is completed away). Not encoded
+    // here because it could not be tried in a real fish.
     return `printf '\\033]777;${prefix};BEGIN\\007'; eval ${fishQuote(command)}; set -l __sshs3_rc $status; printf '\\033]777;${prefix};END;%s;%s\\007' $__sshs3_rc "$PWD"\r`;
   }
-  // The command runs in a subshell: what it defines (a function called printf, say) cannot reach the
-  // line that reports its exit code, and an `exit` or `cd` in it does not end or move the person's shell.
-  return `printf '\\033]777;${prefix};BEGIN\\007'; (eval ${quote(command)}); __sshs3_rc=$?; printf '\\033]777;${prefix};END;%s;%s\\007' "$__sshs3_rc" "$PWD"\r`;
+  return posixEnvelope(command, prefix);
 }
+
+/** The last line of what is typed for a command: the one that prints the marks, whose echo may reach the output. */
+const lastTypedLine = (envelope: string): string => envelope.replace(/\r$/, "").split("\r").at(-1) ?? "";
 
 export interface CommandResult {
   output: string;
   exitCode: number;
   cwd: string;
+  /**
+   * What the terminal printed after the command was typed and before it began, without the echo of
+   * what was typed: the end of an earlier command's output, a banner that was still arriving. Not
+   * the command's output. Bounded.
+   */
+  printedBefore?: string;
 }
 export interface CommandFrameOptions {
   command?: string;
@@ -337,6 +449,8 @@ function promptGluedAt(raw: string, line: string, prompt: string): number | unde
 
 /** How much of the typed line holds the frame's random id: `printf '\033]777;SSHS3;` and the 32 characters after it. */
 const ECHO_HEAD = 54;
+/** How much of what the terminal printed between the typing of a command and its start is kept. */
+const LEAD_MAX = 4000;
 
 export const LATE_OUTPUT_NOTE =
   "[sshs3: the text from the marked line on reached the terminal after the command had ended. It may end with the shell's prompt, which is not output.]";
@@ -354,23 +468,50 @@ export class CommandFrames {
   private trailing = "";
   /** What was typed to run the command, as seen characters: its echo is not the command's output. */
   private readonly typed: string;
+  /** How the first typed line begins, as seen characters: where its echo begins, the terminal's own text before the command ends. */
+  private readonly firstTyped: string;
+  /** What the terminal sent after the command was typed and before its frame began: the first of it. */
+  private lead = "";
   constructor(
     private readonly nonce: string,
     private readonly maxOutput = 128_000,
     private readonly options: CommandFrameOptions = {},
   ) {
     const shell = options.shell;
-    // Only where the envelope is typed as it stands (PowerShell and cmd carry the command encoded).
+    // Only where the terminal echoes what is typed as text a person could read as output (PowerShell and
+    // cmd carry the command in one encoded word). Of a command typed in several lines, the last one: the
+    // lines before it were echoed, and run, before the frame began.
     const plain = options.command !== undefined && shell !== undefined && shell !== "powershell" && shell !== "pwsh" && shell !== "cmd";
     let typed = "";
+    let firstTyped = "";
     if (plain) {
       try {
-        typed = seen(commandEnvelope(shell, options.command!, nonce)).chars;
+        const envelope = commandEnvelope(shell, options.command!, nonce);
+        typed = seen(lastTypedLine(envelope)).chars;
+        firstTyped = seen(envelope.split("\r")[0]).chars.slice(0, ECHO_HEAD);
       } catch {
         typed = "";
       }
     }
     this.typed = typed;
+    this.firstTyped = firstTyped;
+  }
+
+  /**
+   * What the terminal printed between the typing of the command and its start, without the echo of
+   * what was typed. It used to be dropped without a word. Not worked out where the terminal delivers
+   * text late: there it cannot be told from late text of the command itself.
+   */
+  private printedBefore(): string {
+    if (!this.firstTyped || this.options.lateOutput || !this.lead) return "";
+    const got = seen(this.lead);
+    let at = got.chars.indexOf(this.firstTyped);
+    // The echo had only begun when the kept text ended: what is kept of it is still echo.
+    for (let k = Math.min(this.firstTyped.length - 1, got.chars.length); at < 0 && k >= 8; k--)
+      if (got.chars.endsWith(this.firstTyped.slice(0, k))) at = got.chars.length - k;
+    // No echo at all in what was kept: all of it came before the echo, or the terminal does not echo.
+    const text = (at < 0 ? this.lead : at === 0 ? "" : this.lead.slice(0, got.ends[at - 1])).replace(/[ \t\r]+$/, "");
+    return visibleLine(text.replace(/\n/g, " ")) ? text : "";
   }
   get commandText(): string | undefined {
     return this.options.command;
@@ -383,6 +524,18 @@ export class CommandFrames {
     const out = this.displayBuffer;
     this.displayBuffer = "";
     return out;
+  }
+  /** What the command has printed so far, the last of it: for a frame that is let go of before its end. */
+  shownSoFar(): string {
+    return this.started ? (this.output + this.heldBack()).slice(-2000) : "";
+  }
+  /**
+   * The last few characters, held back in case a marker begins in them. A frame that is let go of
+   * hands them over to be shown. Not when an escape sequence begins there: half of one would
+   * swallow the text after it.
+   */
+  heldBack(): string {
+    return this.ended || this.carry.includes("\x1b") ? "" : this.carry;
   }
   feed(chunk: string): CommandResult | undefined {
     if (this.ended) {
@@ -445,8 +598,10 @@ export class CommandFrames {
         }
         const ended = { exitCode: Number(parts[3]), cwd: parts.slice(4).join(";") };
         // Output that came in frames of its own cannot arrive late: nothing to wait for.
-        if (!this.options.lateOutput || this.structuredOutput !== undefined)
-          return { output: cleanInternalTitleOsc(this.structuredOutput ?? this.withoutEcho(this.output).text), ...ended };
+        if (!this.options.lateOutput || this.structuredOutput !== undefined) {
+          const printedBefore = this.printedBefore();
+          return { output: cleanInternalTitleOsc(this.structuredOutput ?? this.withoutEcho(this.output).text), ...ended, ...(printedBefore ? { printedBefore } : {}) };
+        }
         this.ended = ended;
         this.trailing = trailing;
         return this.promptIsBack() ? this.settle() : undefined;
@@ -574,6 +729,7 @@ export class CommandFrames {
       }
     } else if (this.typed && text) {
       this.before = (this.before + text).slice(-(this.typed.length * 3 + 4000));
+      if (this.lead.length < LEAD_MAX) this.lead += text.slice(0, LEAD_MAX - this.lead.length);
     }
   }
 }

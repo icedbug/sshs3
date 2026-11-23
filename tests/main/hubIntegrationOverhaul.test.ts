@@ -57,7 +57,6 @@ vi.mock("../../src/main/ai/hub/AcpRuntime", async () => {
 import { HubService, incomingAgentForTesting } from "../../src/main/ai/hub/HubService";
 import { createMultiSSHApi, HUB_DELTA_CHANNEL, type AiHubDeltaEvent } from "../../src/shared/ipc/createMultiSSHApi";
 import { applyAiHubDelta } from "../../src/renderer/src/lib/aiHub";
-import type { AuditEntry } from "../../src/main/ai/hub/AuditLog";
 import type { AgentTask, HubSnapshot, MissionAgent, WorkspaceServerSummary } from "../../src/shared/types/aiHub";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -75,7 +74,6 @@ async function createTestHub(options: {
   alertHookOwner?: string;
   servers?: WorkspaceServerSummary[];
   onDelta?: (d: AiHubDeltaEvent) => void;
-  auditShipperSend?: (payload: { format: string; body: string; entry: AuditEntry }) => Promise<void>;
 } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-overhaul-"));
   const cfgPath = path.join(dir, "ai-config.json");
@@ -111,14 +109,6 @@ async function createTestHub(options: {
       workspaceServers: async () => servers,
       execOnServer: mocks.execOnServer,
       restoreCheckpoint: mocks.restoreCheckpoint,
-      ...(options.auditShipperSend
-        ? {
-            auditShipper: {
-              format: "webhook",
-              send: options.auditShipperSend,
-            },
-          }
-        : {}),
     },
     dir,
   );
@@ -799,13 +789,8 @@ describe("Wave 2 Hub integration overhaul", () => {
     expect(patchedTask.model).toBe("gpt-backup");
   });
 
-  it("handles SSH reconnect grace interruption, recordingIds[], per-target Heartbeat concurrency, and AuditShipper", async () => {
-    const shipped: AuditEntry[] = [];
-    const { hub } = await createTestHub({
-      auditShipperSend: async ({ entry }) => {
-        shipped.push(entry);
-      },
-    });
+  it("handles SSH reconnect grace interruption, recordingIds[] and per-target Heartbeat concurrency", async () => {
+    const { hub } = await createTestHub();
     registerReadyTerminal(hub, "ssh-1", "app-01", "srv-1");
 
     // 1. Multi-recording accumulation + graceful reconnect drop
@@ -921,16 +906,5 @@ describe("Wave 2 Hub integration overhaul", () => {
     await (hub as unknown as { workTick: (n: number, ai?: boolean) => Promise<void> }).workTick(now + 1000, true);
     expect(startTicketSpy).not.toHaveBeenCalled();
     startTicketSpy.mockRestore();
-
-    // 3. AuditShipper received audit entries
-    await hub.audit().append({
-      kind: "setting",
-      actor: "alice",
-      target: "cluster-a",
-      what: "Verified shipper hook",
-      outcome: "completed",
-    });
-    await hub.dispose();
-    expect(shipped.some((e) => e.what === "Verified shipper hook")).toBe(true);
   });
 });

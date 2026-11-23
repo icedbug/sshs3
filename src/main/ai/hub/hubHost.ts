@@ -14,7 +14,6 @@ import type { IStorageProvider } from "../../../shared/types/storage";
 import { ChatBridge } from "./ChatBridge";
 import { type ToolDependencies } from "./ToolBroker";
 import { type InventoryTarget } from "./ContextService";
-import { type AuditShipperOptions } from "./AuditLog";
 import { type ConditionalQueueStore } from "./WorkSync";
 
 export interface HubHost {
@@ -45,7 +44,6 @@ export interface HubHost {
     hash: string;
     beforeHash: string;
   }>;
-  auditShipper?: AuditShipperOptions;
   inventoryTargets(): Promise<InventoryTarget[]>;
   /**
    * Opens a terminal of the hub's own on a saved target (or "local") and

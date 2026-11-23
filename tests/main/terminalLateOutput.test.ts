@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CommandFrames, LATE_OUTPUT_NOTE, commandEnvelope, lastVisibleLine } from "../../src/main/ai/hub/shellAdapters";
+import { CommandFrames, LATE_OUTPUT_NOTE, commandEnvelope, lastVisibleLine, readPosixEnvelope } from "../../src/main/ai/hub/shellAdapters";
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
 
 /**
@@ -172,7 +172,7 @@ describe("a terminal that delivers late, as the registry runs commands in it", (
     registry.register({ id: "t", label: "netapp-aff-01", kind: "ssh" }, (data) => {
       const n = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
       if (!n) return;
-      const command = /\(eval '([^']*)'\)/.exec(data)?.[1] ?? "";
+      const command = readPosixEnvelope(data.replace(/\r$/, ""))?.command ?? "";
       // Each piece is a delivery of its own, as the pseudo console makes them.
       answer(n, command).forEach((piece, i) => setTimeout(() => registry.feed("t", piece), 5 * (i + 1)));
     });

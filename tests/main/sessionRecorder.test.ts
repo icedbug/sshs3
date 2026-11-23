@@ -120,6 +120,59 @@ describe("what an agent saw in a terminal", () => {
     ]);
   });
 
+  describe("a private key that arrives in several pieces", () => {
+    const BEGIN = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    const END = "-----END OPENSSH PRIVATE KEY-----";
+    const one = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW";
+    const two = "QyNTUxOQAAACDSECONDHALFOFTHEKEYMATERIALxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    const three = "AAAAQTHIRDLINEOFKEYMATERIALyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
+
+    async function recorded(pieces: string[]): Promise<string> {
+      const rec = await recorder();
+      await rec.start({ sessionId: "s1", taskId: "t1", label: "db-01" }, 0);
+      rec.marker("s1", "cat ~/.ssh/id_ed25519", 1);
+      pieces.forEach((piece, i) => rec.output("s1", piece, 10 + i));
+      const info = await rec.stop("s1", 100);
+      return lines((await rec.read(info!.id))!)
+        .slice(1)
+        .filter((e) => (e as unknown[])[1] === "o")
+        .map((e) => (e as string[])[2])
+        .join("");
+    }
+
+    it("keeps none of it: the pieces after the first hold no header, and are still part of the key", async () => {
+      // The terminal delivers the file in two pieces.
+      const shown = await recorded([`${BEGIN}\n${one}\n`, `${two}\n${three}\n${END}\nops@db-01:~$ `]);
+      for (const secret of [one, two, three, "SECONDHALFOFTHEKEYMATERIAL", "THIRDLINEOFKEYMATERIAL"]) expect(shown).not.toContain(secret);
+      expect(shown).toBe("[private key redacted]\nops@db-01:~$ ");
+    });
+
+    it("also line by line, with carriage returns, colours, and a piece that ends in the middle of a line", async () => {
+      const shown = await recorded([`${BEGIN}\r\n`, `${one}\r\n`, `\x1b[0m${two.slice(0, 30)}`, `${two.slice(30)}\r\n`, `${three}\r\n${END}\r\n`, "ops@db-01:~$ "]);
+      for (const secret of [one, two, three, two.slice(0, 30), two.slice(30)]) expect(shown).not.toContain(secret);
+      expect(shown).toContain("[private key redacted]");
+      expect(shown.endsWith("ops@db-01:~$ ")).toBe(true);
+    });
+
+    it("an encrypted key and a PGP key block, with their header lines", async () => {
+      const rsa = await recorded(["-----BEGIN RSA PRIVATE KEY-----\n", "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,2AF25325A9B318F344B8391AFD767D6D\n\n", `${two}\n`, "-----END RSA PRIVATE KEY-----\n", "$ "]);
+      expect(rsa).not.toContain(two);
+      expect(rsa).not.toContain("2AF25325A9B318F344B8391AFD767D6D");
+      expect(rsa.endsWith("$ ")).toBe(true);
+      const pgp = await recorded(["-----BEGIN PGP PRIVATE KEY BLOCK-----\n", `\n${one}\n`, `${two}\n=AbCd\n`, "-----END PGP PRIVATE KEY BLOCK-----\ndone\n"]);
+      expect(pgp).not.toContain(one);
+      expect(pgp).not.toContain(two);
+      expect(pgp).toContain("done");
+    });
+
+    it("shows what comes after a key that was cut short: a line that cannot be part of a key ends it", async () => {
+      // `head -2` of the key, then the prompt and the next command's output.
+      const shown = await recorded([`${BEGIN}\n${one}\n`, "ops@db-01:~$ ", "uptime\n 10:00:01 up 3 days\n"]);
+      expect(shown).not.toContain(one);
+      expect(shown).toContain("ops@db-01:~$ uptime\n 10:00:01 up 3 days\n");
+    });
+  });
+
   it("removes old recordings", async () => {
     const rec = await recorder();
     const info = await rec.start({ sessionId: "s1", taskId: "t1", label: "db01" }, 0);

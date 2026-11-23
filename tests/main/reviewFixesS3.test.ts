@@ -36,7 +36,6 @@ import { ToolBroker, ToolBrokerError } from "../../src/main/ai/hub/ToolBroker";
 import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/safetyPolicy";
 import { isQuietHours } from "../../src/main/ai/hub/Notifier";
 import { NotifyStore } from "../../src/main/ai/hub/NotifyStore";
-import { AuditShipper, type AuditEntry } from "../../src/main/ai/hub/AuditLog";
 import { parseDistillAnswer, type GovernedMemoryProposal } from "../../src/main/ai/hub/MemoryDistiller";
 import type { IncomingAlert } from "../../src/main/ai/hub/AlertIntake";
 import type { AgentChange, AgentTask, MemoryEntry, SafetyPolicyConfig, WorkspaceServerSummary } from "../../src/shared/types/aiHub";
@@ -395,13 +394,6 @@ describe("S3.4 alerts and the audit shipper", () => {
     expect((ticket.comments ?? []).filter((c) => c.text.includes("HighCPU"))).toHaveLength(1);
   });
 
-  it("AuditShipper without a guard of its own does not post to this machine", async () => {
-    const errors: unknown[] = [];
-    const shipper = new AuditShipper({ format: "webhook", url: "http://127.0.0.1:9/audit", onError: (e) => errors.push(e) });
-    shipper.emit({ seq: 1, at: Date.now(), kind: "setting", actor: "a", what: "x", hash: "h" } as AuditEntry);
-    await shipper.flush();
-    expect(String(errors[0])).toMatch(/itself|private|local|not allowed/i);
-  });
 });
 
 describe("S3.5 request checks", () => {

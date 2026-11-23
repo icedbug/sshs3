@@ -43,6 +43,10 @@ export interface ToolErrorEnvelope {
   recoverable?: boolean;
 }
 
+/** How long an idempotency key is remembered: long past any retry, and not for as long as the app runs. */
+export const IDEMPOTENCY_KEEP_MS = 24 * 3600_000;
+const IDEMPOTENCY_PRUNE_EVERY_MS = 10 * 60_000;
+
 /** How many times running one command may give one answer before it is not run again. */
 const REPEAT_LIMIT = 3;
 /** Only a repeat just now counts: the same check a while later is a new look at a system that may have moved. */
@@ -307,6 +311,99 @@ export function showsExpected(
   return true;
 }
 
+/** How a look at a change's check after a rollback matched the look before the change. */
+export type BaselineComparison = NonNullable<NonNullable<AgentChange["rollback"]>["comparison"]>;
+
+/**
+ * A check's output with what is plainly different at every look taken out: dates and times, how long
+ * ago something was, process ids, and the counters uptime and systemd print. Two looks at the same
+ * state then read the same, where before a clock in the output made every rollback "not as before".
+ * Kept short on purpose: a number that may be a setting (`timeout 30s`, a port, a count of workers)
+ * is left as it is, and so is anything this does not know.
+ */
+export function stableObservation(output: string): string {
+  return (
+    output
+      .replace(/\r\n?/g, "\n")
+      // uptime's line: the clock, how long the machine has been up, the users and the load.
+      .replace(/\bup\s+[^\n]{0,80}?load average:[^\n]*/g, "up <uptime>")
+      .replace(/\bload average:[ \d.,]+/g, "load average: <load>")
+      // A date with a time of day, a date alone, a time of day alone, and Unix time.
+      // eslint-disable-next-line security/detect-unsafe-regex -- every optional part is a fixed, bounded shape after a date; it cannot backtrack
+      .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: ?(?:Z|UTC|GMT|[+-]\d{2}:?\d{2}|[A-Z]{3,4})\b)?/g, "<time>")
+      // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a month name, each optional part bounded; it cannot backtrack
+      .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]{0,6} {1,2}\d{1,2}(?:,? \d{4})?(?: \d{1,2}:\d{2}(?::\d{2})?)?(?: (?:UTC|GMT|[A-Z]{3,4})\b)?(?: \d{4}\b)?/g, "<time>")
+      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, "<time>")
+      // eslint-disable-next-line security/detect-unsafe-regex -- a fixed shape of digits and colons; it cannot backtrack
+      .replace(/\b\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?: ?[AP]M\b)?/g, "<time>")
+      .replace(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]{0,6},? <time>/g, "<time>")
+      .replace(/\b1[5-9]\d{8}\b|\b1[5-9]\d{11}\b/g, "<time>")
+      // How long ago: "3s ago", "2min 5s ago", "1 day ago". And docker's "Up 3 minutes".
+      // eslint-disable-next-line security/detect-unsafe-regex -- each round begins with a digit and ends with a unit; it cannot backtrack
+      .replace(/\b(?:\d+(?:\.\d+)? ?(?:us|ms|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?|months?|y|years?)[, ]{0,2}){1,4}ago\b/g, "<ago>")
+      .replace(/\bUp (?:About )?(?:an?|\d+) (?:seconds?|minutes?|hours?|days?|weeks?|months?)\b/g, "Up <ago>")
+      // Process ids: "PID 1234", "pid=1234", "Main PID: 1234", "nginx[1234]:", systemd's "Process: 1234" and its tree.
+      .replace(/\b(pid)(\W{0,3})\d+/gi, "$1$2<pid>")
+      .replace(/\b([\w.@-]+)\[\d+\](?=:)/g, "$1[<pid>]")
+      .replace(/^(\s*Process:\s*)\d+/gm, "$1<pid>")
+      .replace(/([├└│]─)\d+(?=\s)/g, "$1<pid>")
+      // What systemd prints about a unit at this moment.
+      .replace(/^(\s*(?:Tasks|Memory|CPU|IO|IP):)[^\n]*/gm, "$1 <counter>")
+      .replace(/[ \t]+/g, " ")
+      .replace(/ ?\n ?/g, "\n")
+      .trim()
+  );
+}
+
+/** sha256 of a look at a check with the volatile parts left out: kept with the change, so a rollback made later can be compared the same way. */
+export const stableObservationHash = (id: string, observation: { exitCode: number; output: string }): string =>
+  exactHash(JSON.stringify([id, observation.exitCode, stableObservation(observation.output)]));
+
+/**
+ * Whether a look at the check after a rollback reads as the look before the change did, and by
+ * which comparison. Tried in this order:
+ *
+ * - `exact`: the same exit code and the same output.
+ * - `stable`: the same exit code, and the same output once what differs at every look is left out
+ *   (see `stableObservation`).
+ * - `expected`: the card's own word for "it works". The check passed before the change and passes
+ *   again. Only that way round: a check that failed before and fails again proves nothing by
+ *   itself, because there are many ways to fail.
+ *
+ * `baseline` is the earlier look when it is still at hand; a rollback made later has its hashes.
+ */
+export function comparedWithBaseline(args: {
+  id: string;
+  now: { exitCode: number; output: string };
+  baseline?: { exitCode: number; output: string };
+  exactHash?: string;
+  stableHash?: string;
+  /** Whether the check passed before the change. */
+  before?: boolean;
+  passes: (look: { exitCode: number; output: string }) => boolean;
+}): BaselineComparison | undefined {
+  const { id, now, baseline } = args;
+  if (baseline ? now.exitCode === baseline.exitCode && now.output === baseline.output : args.exactHash !== undefined && observationHash(id, now) === args.exactHash)
+    return "exact";
+  if (
+    baseline
+      ? now.exitCode === baseline.exitCode && stableObservation(now.output) === stableObservation(baseline.output)
+      : args.stableHash !== undefined && stableObservationHash(id, now) === args.stableHash
+  )
+    return "stable";
+  if (args.before === true && args.passes(now)) return "expected";
+  return undefined;
+}
+
+/** The comparison, said to the agent and kept in the audit log. */
+export const COMPARISON_TEXT: Record<BaselineComparison, string> = {
+  exact: "The check reads exactly as it did before the change.",
+  stable: "The check reads as it did before the change once times, process ids and counters are left out.",
+  expected: "The check passed before the change and passes again. Its output is not the same as before.",
+};
+const NOT_AS_BEFORE =
+  "The check does not read as it did before the change: its output differs also with times, process ids and counters left out, and it did not pass both before the change and now.";
+
 /** A wait in whole minutes, as said to the agent. */
 const minutes = (ms: number): string => {
   const n = Math.max(1, Math.round(ms / 60_000));
@@ -388,6 +485,8 @@ export interface ToolDependencies {
   };
   peerStillEligible?(actorId: string, tags: string[]): boolean;
   recordIntent?(task: AgentTask, change: AgentChange, rollback: boolean): Promise<void>;
+  /** A plain command has been running for a moment and has not ended: written down, without waiting for the write. */
+  recordStarted?(task: AgentTask, change: AgentChange): void;
   /** How long a person is given to approve, in milliseconds. Ten minutes unless set. */
   approvalWaitMs?(): number;
   /** Non-interactive fail-fast mode predicate for headless / scripted runs. */
@@ -479,7 +578,25 @@ export class ToolBroker {
     return [...(this.idempotencyLedgers.get(taskId)?.values() ?? [])];
   }
 
+  /** When the ledgers were last gone through for entries that are too old to matter. */
+  private ledgersPrunedAt = 0;
+
+  /**
+   * Drops idempotency entries older than `IDEMPOTENCY_KEEP_MS`, and ledgers that are empty then.
+   * A key guards against the same call being made twice by a retry, which happens within minutes.
+   * Kept for ever they only grew, until the app closed.
+   */
+  private pruneLedgers(now = Date.now()): void {
+    if (now - this.ledgersPrunedAt < IDEMPOTENCY_PRUNE_EVERY_MS) return;
+    this.ledgersPrunedAt = now;
+    for (const [taskId, ledger] of this.idempotencyLedgers) {
+      for (const [key, entry] of ledger) if (entry.status !== "in_progress" && now - entry.at > IDEMPOTENCY_KEEP_MS) ledger.delete(key);
+      if (ledger.size === 0) this.idempotencyLedgers.delete(taskId);
+    }
+  }
+
   private getOrCreateLedger(taskId: string): Map<string, IdempotencyEntry> {
+    this.pruneLedgers();
     let ledger = this.idempotencyLedgers.get(taskId);
     if (!ledger) {
       ledger = new Map();
@@ -941,6 +1058,7 @@ export class ToolBroker {
         code: "grant_busy",
       });
     grant.busy = true;
+    this.inFlight.set(grant.task.id, (this.inFlight.get(grant.task.id) ?? 0) + 1);
     try {
       const task = grant.task;
       this.validateRequest(request, task);
@@ -1031,6 +1149,11 @@ export class ToolBroker {
             return this.authorize(key, task, change, request);
           });
           this.deps.changed();
+          // What the person said with their yes is for the agent to act on: a call to a tool of
+          // another system and a settings change carry it as a change card does.
+          const note = (activeChange as AgentChange | undefined)?.decisionNote;
+          if (note && res && typeof res === "object" && !Array.isArray(res))
+            return { ...(res as Record<string, unknown>), personNote: `Approved with a note from the person: ${note}` };
           return res;
         }
         if (
@@ -1215,6 +1338,8 @@ export class ToolBroker {
         await this.authorize(key, task, change, request);
         change.status = "running";
         this.deps.changed();
+        // Set once the command itself is on its way into the terminal. Until then a failure means it did not run.
+        let typed = false;
         try {
           if (request.preflightCommand?.trim()) {
             const snap = await this.terminals.execute(
@@ -1223,15 +1348,30 @@ export class ToolBroker {
               task.id,
               request.preflightCommand.trim(),
             );
+            // A second command typed for this call: counted like the first.
+            task.commandsUsed = ++grant.commands;
             change.preflightSnapshot = boundedContext(snap.output, 4000);
           }
           this.checkCurrentPolicy(task, change);
-          const result = await this.terminals.execute(
+          // The registry refuses at once, before it types anything, when the terminal is not this run's
+          // to type into. What goes wrong after that comes back through the promise.
+          const running = this.terminals.execute(
             target.sessionId,
             target.generation,
             task.id,
             request.command!,
           );
+          typed = true;
+          // A command is written to the audit log once, when it has ended. One that is still running
+          // after a moment is written down as started as well, so that a command that never ends (it
+          // hangs, the app closes) is in the log all the same.
+          const startedNote = setTimeout(() => this.deps.recordStarted?.(task, change), this.startedNoteMs);
+          let result: Awaited<typeof running>;
+          try {
+            result = await running;
+          } finally {
+            clearTimeout(startedNote);
+          }
           change.status = result.exitCode === 0 ? "completed" : "failed";
           change.exitCode = result.exitCode;
           change.output = result.output;
@@ -1246,8 +1386,11 @@ export class ToolBroker {
           const demoNote = scriptedDemoNote(this.terminals.get(target.sessionId)?.profileId, target.label);
           this.deps.activity?.(task, change, target.sessionId);
           this.deps.changed();
+          // What the terminal printed before the command began is not its output: named as what it is.
+          const { printedBefore, ...ran } = result;
           return {
-            ...result,
+            ...ran,
+            ...(printedBefore ? { printedBeforeCommand: printedBefore } : {}),
             ...(checkPassed !== undefined ? { checkPassed } : {}),
             // Cite this in the report, in brackets, after what it shows.
             ref: change.ref,
@@ -1267,9 +1410,11 @@ export class ToolBroker {
             observedAt: Date.now(),
           };
         } catch (error) {
-          change.status = "uncertain";
-          change.output = safeError(error);
-          task.verification = "incomplete";
+          if (typed) {
+            change.status = "uncertain";
+            change.output = safeError(error);
+            task.verification = "incomplete";
+          } else this.notRun(task, change, error);
           this.deps.changed();
           throw error;
         }
@@ -1362,11 +1507,28 @@ export class ToolBroker {
       }
     } finally {
       grant.busy = false;
+      const left = (this.inFlight.get(grant.task.id) ?? 1) - 1;
+      if (left > 0) this.inFlight.set(grant.task.id, left);
+      else this.inFlight.delete(grant.task.id);
     }
+  }
+
+  /** Tool calls of each run that have begun and not yet returned, also after the run's capability was taken away. */
+  private readonly inFlight = new Map<string, number>();
+
+  /**
+   * Whether a tool call of this run is still on its way out. A run that was just stopped may have
+   * one: it says how its command ended in a moment, and until then nobody else should say it for it.
+   */
+  working(taskId: string): boolean {
+    return this.inFlight.has(taskId);
   }
 
   /** Between two looks at the check while a change is observed. Replaced in tests. */
   wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** How long a plain command may run before the audit log is told that it was started. Shortened in tests. */
+  startedNoteMs = 5000;
 
   /**
    * A change that carries its own proof and its own way back. Nothing runs
@@ -1414,8 +1576,16 @@ export class ToolBroker {
       expected: forApproval(expected || JSON.stringify(sc), 400, "expected output"),
       rollback: forApproval(rollback, 4000, "rollback"),
     };
-    const run = (c: string) =>
-      this.terminals.execute(target.sessionId, target.generation, task.id, c);
+    // Every command a card types is counted against the run's budget: its check, each later look
+    // at it, and its rollback, not only the change itself. The tool call paid for the first one.
+    // A card is never stopped half-way for the budget: what is over is refused at the next call.
+    const grant = this.grants.get(key);
+    let typed = 0;
+    const run = (c: string) => {
+      const running = this.terminals.execute(target.sessionId, target.generation, task.id, c);
+      if (++typed > 1 && grant) task.commandsUsed = ++grant.commands;
+      return running;
+    };
     // The rule the model is told in the tool's description: exit code 0 AND the expected text / structuredCheck.
     const passes = (r: { exitCode: number; output: string }): boolean =>
       r.exitCode === 0 && showsExpected(r.output, expected, sc);
@@ -1458,8 +1628,14 @@ export class ToolBroker {
 
     // Optional explicit preflight snapshot immediately prior to execution.
     if (request.preflightCommand?.trim()) {
-      const snap = await run(request.preflightCommand.trim());
-      change.preflightSnapshot = boundedContext(snap.output, 4000);
+      try {
+        const snap = await run(request.preflightCommand.trim());
+        change.preflightSnapshot = boundedContext(snap.output, 4000);
+      } catch (error) {
+        this.notRun(task, change, error);
+        this.deps.changed();
+        throw error;
+      }
     }
 
     // Keep the observation in memory. Equality of two failed health checks alone proves nothing.
@@ -1481,14 +1657,26 @@ export class ToolBroker {
       this.deps.changed();
       throw error;
     }
-    change.check = { ...change.check!, before, baselineHash: observationHash(change.id, baseline) };
+    change.check = { ...change.check!, before, baselineHash: observationHash(change.id, baseline), baselineStableHash: stableObservationHash(change.id, baseline) };
     this.deps.changed();
 
-    let result: { exitCode: number; output: string } | undefined;
+    let result: { exitCode: number; output: string; printedBefore?: string } | undefined;
     let last: { exitCode: number; output: string } | undefined;
-    this.checkCurrentPolicy(task, change);
+    let failure: unknown;
+    // The rules are looked at once more right before the change, and the registry refuses at once
+    // when the terminal is no longer this run's. Stopped at either, the change was not made: that
+    // is known, so it is not left as "uncertain".
+    let running: Promise<{ exitCode: number; output: string }>;
     try {
-      result = await run(command);
+      this.checkCurrentPolicy(task, change);
+      running = run(command);
+    } catch (error) {
+      this.notRun(task, change, error);
+      this.deps.changed();
+      throw error;
+    }
+    try {
+      result = await running;
       change.exitCode = result.exitCode;
       change.output = result.output;
       const observeMs = Math.max(0, Math.min(180, Math.round(request.observeSeconds ?? 0))) * 1000;
@@ -1527,6 +1715,7 @@ export class ToolBroker {
           ref: change.ref,
           exitCode: result.exitCode,
           output: result.output,
+          ...(result.printedBefore ? { printedBeforeCommand: result.printedBefore } : {}),
           checkPassed: true,
           checkPassedBefore: before,
           observedSeconds: observeMs / 1000,
@@ -1540,6 +1729,7 @@ export class ToolBroker {
         };
       }
     } catch (error) {
+      failure = error;
       change.output = [result?.output, safeError(error)].filter(Boolean).join("\n");
       task.verification = "incomplete";
       // Ownership and generation must still match before a rollback can be attempted.
@@ -1555,24 +1745,40 @@ export class ToolBroker {
       change.status = "uncertain";
       change.rollback = { ...change.rollback!, skipped: safeError(error) };
       this.deps.changed();
+      // The agent is told what went wrong first (a command that ran out of time says there whether it
+      // may still be running), and then that nothing was taken back.
+      if (failure) throw new Error(`${safeError(failure)} The rollback was not run: ${safeError(error)}`, { cause: error });
       throw error;
     }
     let undone: { exitCode: number; output: string };
+    let rollbackTyped = false;
     try {
-      undone = await run(rollback);
+      const running = run(rollback);
+      rollbackTyped = true;
+      undone = await running;
     } catch (error) {
+      if (!rollbackTyped) {
+        // Refused before anything was typed: the rollback did not run, and is not recorded as run.
+        change.status = "uncertain";
+        change.rollback = { ...change.rollback!, skipped: safeError(error) };
+        this.deps.changed();
+        throw new Error(`${failure ? `${safeError(failure)} ` : ""}The rollback was not run: ${safeError(error)}`, { cause: error });
+      }
       undone = { exitCode: -1, output: safeError(error) };
     }
     let checkAfter: boolean | undefined;
     let restored: boolean | undefined;
+    let comparison: BaselineComparison | undefined;
     try {
       const observation = await run(checkCommand);
       checkAfter = passes(observation);
-      restored = undone.exitCode === 0 && observation.exitCode === baseline.exitCode && observation.output === baseline.output;
+      // "Taken back" means the rollback exited 0 and the check reads as before. Not by its exact
+      // bytes alone: a time, a process id or a counter in the output differs at every look.
+      comparison = undone.exitCode === 0 ? comparedWithBaseline({ id: change.id, now: observation, baseline, before, passes }) : undefined;
+      restored = comparison !== undefined;
     } catch {
       checkAfter = undefined;
     }
-    // A successful rollback must reproduce the original observation.
     change.rollback = {
       command: change.rollback!.command,
       ran: true,
@@ -1580,6 +1786,7 @@ export class ToolBroker {
       output: boundedContext(undone.output, 2000),
       checkAfter,
       ...(restored !== undefined ? { restored, comparedWithBaseline: true } : {}),
+      ...(comparison ? { comparison } : {}),
     };
     change.status = restored ? "failed" : "uncertain";
     task.verification = "incomplete";
@@ -1590,6 +1797,7 @@ export class ToolBroker {
       ref: change.ref,
       exitCode: result?.exitCode ?? -1,
       output: result?.output ?? change.output ?? "",
+      ...(result?.printedBefore ? { printedBeforeCommand: result.printedBefore } : {}),
       checkPassed: false,
       checkOutput: last?.output,
       ...(last ? { checkExitCode: last.exitCode } : {}),
@@ -1601,6 +1809,8 @@ export class ToolBroker {
       rollbackOutput: undone.output,
       checkPassesAfterRollback: checkAfter,
       backAsBefore: restored,
+      // Which comparison says so, in words: the agent reports it as it is.
+      ...(restored !== undefined ? { comparedBy: comparison ? COMPARISON_TEXT[comparison] : NOT_AS_BEFORE } : {}),
       next:
         undone.exitCode !== 0
           ? "The change did not pass its check, and the rollback failed too. Stop making changes. Report exactly this state to the person, with the outputs above."
@@ -1608,6 +1818,20 @@ export class ToolBroker {
             ? "The change did not pass its check. The rollback ran, but the check does not read as it did before the change. Stop making changes and report this state to the person."
             : "The change did not pass its check and was rolled back. Do not make the same change again: find out why the check failed first.",
     };
+  }
+
+  /**
+   * A change that was stopped after it was allowed and before its command was typed: the rules
+   * changed, a freeze began, the run ended, or the terminal was no longer the run's. Nothing ran,
+   * and the change says so. "Uncertain" is for a command that was typed and whose end is not known.
+   */
+  private notRun(task: AgentTask, change: AgentChange, error: unknown): void {
+    change.status = "denied";
+    // Who decided last: the run's end, or the rules.
+    change.decidedHow = ["running", "waiting"].includes(task.status) ? "policy" : "stopped";
+    change.output = `Not run: ${safeError(error)}`;
+    if (change.check) change.check = { ...change.check, skipped: "the change was not made" };
+    if (change.rollback) change.rollback = { ...change.rollback, skipped: "the change was not made" };
   }
 
   private readonly policyAtDecision = new WeakMap<AgentChange, string>();

@@ -377,7 +377,9 @@ export function AuditLogView({
                   ? "Chain verification pending"
                   : verification.ok
                     ? `Chain verified · ${verification.entries} entries`
-                    : `Chain broken at #${verification.problem?.seq ?? "?"}`}
+                    : verification.unreadable
+                      ? "Log could not be read"
+                      : `Chain broken at #${verification.problem?.seq ?? "?"}`}
               </span>
             )}
             <span className={`ai-badge ${siemBadge.tone}`} data-testid="siem-sink-badge">
@@ -387,8 +389,8 @@ export function AuditLogView({
           {demoEmpty ? (
             <span data-testid="audit-demo-notice">
               Demo lab: audit entries are recorded locally inside the isolated demo workspace and are never sent outside.
-              The log is empty until an agent runs a command or makes a change. A command you type in a terminal, a
-              scripted walkthrough, starting an incident and a change of the safety rules are not recorded here.
+              The log is empty until an agent runs a command or makes a change, or the safety rules are changed. A
+              command you type in a terminal, a scripted walkthrough and starting an incident are not recorded here.
             </span>
           ) : emptyLog ? (
             <span data-testid="audit-empty-notice">
@@ -428,6 +430,8 @@ export function AuditLogView({
                 </span>
               )}
             </span>
+          ) : verification.unreadable ? (
+            <span>{verification.problem?.text}</span>
           ) : (
             <span>
               <strong>The log does not hold.</strong> {verification.problem?.text}{" "}
