@@ -813,7 +813,7 @@ may change it, what an address may be, what a token must look like.
 
 | Tool | What it sets up |
 | --- | --- |
-| `sshs3_manage_app_and_settings` | Also: model profiles (`list_model_profiles`, `save_model_profile`, `delete_model_profile`, `test_model`), the rules for everyone on a team server (`get_team_rules`, `update_team_rules`), `restore_builtin_agents`, `forget_history`. |
+| `sshs3_manage_app_and_settings` | Also: model profiles (`list_model_profiles`, `save_model_profile`, `delete_model_profile`, `test_model`), the rules for everyone on a team server (`get_team_rules`, `update_team_rules`), `restore_builtin_agents`. |
 | `sshs3_agent_and_mcp_manage` | Also: external agents' programs (`save_runner`, `delete_runner`, `test_runner`), what an MCP tool may do unasked (`set_mcp_tool_policy`), this app's own MCP server and its keys (`set_local_mcp_server`, `list_mcp_keys`, `create_mcp_key`, `revoke_mcp_key`). |
 | `sshs3_manage_team_chat` | The context bot (`context_*`: connect, test, disconnect, which channels it reads, read back, forget, how long messages are kept) and the agent bot (`agent_*`: connect, disconnect, answering on or off, direct messages, limits and budget, one channel's rule, its model, its SSH key, its conversations, a try in the simulated chat). `link_code` and `unlink` for a person's own chat account. |
 | `sshs3_manage_alerts_and_integrations` | Notification channels, quiet hours and reminders, Jira and Confluence, what is collected from servers, the address monitoring sends alerts to, and which agent starts on which alert. |
@@ -825,16 +825,27 @@ address or token in it, and asks nobody.
 guarded, except these, which only narrow or try: testing a connection, reading
 a chosen channel further back, stopping the context bot from reading a
 channel, taking a channel away from the agent bot, ending one's own chat link,
-syncing Jira now, and collecting server facts now. A test checks that each
-operation classed `guard` in `APP_OPS` asks, whatever the call carries.
+and syncing Jira now. Collecting server facts now is guarded: it runs
+commands on servers, also when collecting is switched off. A test checks that
+each operation classed `guard` in `APP_OPS` asks, whatever the call carries.
 
-**What a call leaves out is said first.** `precheckSettingsOp` refuses a call
-that lacks what its operation cannot do without (which service, which channel,
-a name) before anybody is asked: a person is not asked to approve a change
-that then cannot be made. A new key's `tools` are checked against the MCP
-server's own tool names for its scopes, so a key cannot be held to tools that
-do not exist. With one chat service connected, `link_code` and `unlink` need
-not name it.
+**What the person approves is what is done.** `precheckSettingsOp` looks at
+a call before anybody is asked, and refuses one whose card would not say what
+happens:
+
+- a call that leaves out what its operation needs (which service, which
+  channel, a name);
+- a value of the wrong kind. `"false"` where `false` was meant is refused, not
+  passed over: the card would say a switch goes off while it stayed on;
+- a server named by a part of its name. A server is its whole name, its id or
+  its host, and the card shows the name;
+- a new key's `tools` that the MCP server does not have for its scopes;
+- a call from a run nobody sits at, even if it arrives although the tools were
+  not offered.
+
+`facts_configure` takes `exclude` and `watchPaths` as whole lists, and its
+card says so. `atlassian_connect` keeps what it does not name. With one chat
+service connected, `link_code` and `unlink` need not name it.
 
 **Who may.** The request decides, as it does from the settings card. A member
 who approves a change to the agent bot or to the rules for everyone gets the
@@ -845,29 +856,38 @@ conversation is sent to the model's provider, so a token must not be written
 there.
 
 - *A secret a setting needs* (a bot token, an API key, a webhook address) is
-  not a parameter of any of these tools. `guardAsk` lists it in
+  not a parameter of any of these tools, and a call that carries one all the
+  same is refused before anybody is asked (`SECRET_PARAMS`): where a
+  notification channel sends is the whole question, and an address that rode
+  along in the call would be approved unseen. `guardAsk` lists the secrets in
   `GuardAsk.secrets`, the change carries the names in `secretFields`, and the
   approval card in the conversation shows a hidden field for each
   (`ChangeSecrets.tsx`). The values travel with the `approve` request, are
   held in memory until the waiting tool reads them once
   (`HubService.changeSecrets`), and are never stored or sent to the model.
-  Left empty, the secret already saved is kept. The inbox and the terminal
-  bar do not offer Approve for such a change: they send the person to the
-  conversation.
+  Left empty, the secret already saved is kept.
+- *Only its card answers such a change.* The card always sends what was typed,
+  also when that is nothing. An approval without it is refused, so the inbox,
+  its shortcut key and the terminal bar cannot say yes: they send the person
+  to the conversation. When two answers arrive at once, the first one's
+  secrets are the ones used; a late one neither replaces nor removes them.
 - *A secret a setting makes* (a new MCP key, a chat link code, the alert
   hook's address) is not in what the tool answers. It is kept in memory
   (`HubService.changeReveals`), the change is marked `reveal`, and the card
   shows it once when the person asks (`change-reveal`). The card stays open
-  until then, and while it shows the value. After a restart it is gone, and
-  the person makes a new one.
+  until then, and while it shows the value. It is kept for 30 minutes
+  (`REVEAL_KEPT_MS`) and is gone after a restart: then the person makes a new
+  one.
 
 **Not from Slack or Mattermost.** A conversation asked for from chat, a
 ticket's run and a schedule's run are given none of these tools
 (`MANAGEMENT_TOOLS`, `CHAT_APP_TOOLS`).
 
 **Not offered, on purpose.** Switching demo mode, quitting the app, and
-approving a change: those are a person's own actions. `test_model` asks only
-the model that is set up, never an address the call names.
+approving a change: those are a person's own actions. Forgetting every
+conversation is not offered either: history is not forgotten while a run is
+going, and the conversation that asks is one. `test_model` asks only the
+model that is set up, never an address the call names.
 
 Tests: `tests/main/settingsFromChat.test.ts` (through a real hub, and through
 the real web server with an administrator and a member) and
@@ -878,6 +898,12 @@ notification channel was asked for, its address typed on the card and saved;
 a key was asked for, approved, and shown once on the card and nowhere else on
 the page. Two things that run found are fixed: the card folded away the moment
 its key was asked for, and the model held a key to its own tool names.
+
+An independent review of the change then found, among other things, that a
+secret carried in the call was used and hidden from the card, that a plain yes
+from the inbox's shortcut key let a secret-taking change through, and that a
+second answer in flight took the first one's secrets away. Those are fixed as
+described above, each with a test that fails without the fix.
 
 Not guarded, on purpose, and worth knowing: an agent can create a ticket for
 another agent, and the heartbeat runs it in that agent's mode. That is the

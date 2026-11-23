@@ -33,6 +33,8 @@ afterEach(async () => {
 
 const known = { agents: [{ id: "a1", name: "Linux SRE", defaultMode: "assisted" as AgentMode }], schedules: [] };
 const NEW_TOOLS = ["sshs3_manage_team_chat", "sshs3_manage_alerts_and_integrations"] as const;
+/** What a call might bring beside its operation: switches set either way are in their own checks below. */
+const CROWDED = { service: "slack", channel: "ops", channelId: "C1", idOrName: "x", name: "x", enabled: false, days: 0, kind: "slack", product: "jira", text: "hello", theme: "dark", readOnly: true, approved: true, guard: false };
 const aTask = (extra: Partial<AgentTask> = {}): AgentTask =>
   ({ id: "t", title: "A run", mode: "assisted", status: "running", target: { sessionId: "s", generation: "g", label: "l" }, changes: [], messages: [], sources: [], ...extra }) as unknown as AgentTask;
 
@@ -55,9 +57,12 @@ describe("the settings a conversation can change", () => {
       for (const op of ops) {
         const kind = APP_OPS[tool].ops[op];
         for (const mode of ["autonomous", "assisted", "advice"] as const) {
-          const ask = guardAsk(tool, { operation: op }, { mode }, known);
-          if (kind === "guard") expect(ask, `${tool}.${op} in ${mode}`).toBeDefined();
-          if (kind === "read" || kind === "change") expect(ask, `${tool}.${op} in ${mode}`).toBeUndefined();
+          // Bare, and with every kind of value a call could bring along: neither talks the question away.
+          for (const payload of [{ operation: op }, { operation: op, ...CROWDED }]) {
+            const ask = guardAsk(tool, payload, { mode }, known);
+            if (kind === "guard") expect(ask, `${tool}.${op} in ${mode}`).toBeDefined();
+            if (kind === "read" || kind === "change") expect(ask, `${tool}.${op} in ${mode}`).toBeUndefined();
+          }
         }
       }
     }
@@ -92,11 +97,10 @@ describe("the settings a conversation can change", () => {
     expect(fields("sshs3_manage_alerts_and_integrations", { operation: "atlassian_connect", product: "jira", baseUrl: "https://acme.atlassian.net" })).toEqual(["token"]);
     expect(fields("sshs3_manage_app_and_settings", { operation: "save_model_profile", name: "fast", provider: "openai-compatible", model: "m" })).toEqual(["apiKey"]);
 
-    // One that came with the call all the same is used, is not asked for again, and is never shown.
+    // The card asks for them whatever the call says, and what it shows is never a secret.
     const carried = guardAsk("sshs3_manage_team_chat", { operation: "agent_connect", service: "slack", token: "xoxb-do-not-show", appToken: "xapp-do-not-show" }, { mode: "assisted" }, known)!;
-    expect(carried.secrets).toBeUndefined();
+    expect(carried.secrets?.map((f) => f.key)).toEqual(["token", "appToken"]);
     expect(carried.detail).not.toContain("do-not-show");
-    expect(carried.detail).toContain("token: (given in the conversation, so the model's provider has read it)");
   });
 
   it("gives none of it to a run nobody sits at: asked for from chat, a ticket's, or a schedule's", () => {
@@ -137,13 +141,21 @@ async function startRun(hub: HubService, mode: AgentMode = "assisted", id = `run
   return { task, call, pending, approve };
 }
 
-async function makeHub() {
+async function makeHub(servers: Array<{ id: string; name: string; host: string }> = []) {
   const { HubService: Hub } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-settings-chat-"));
   const hub = new Hub(
-    { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json") } as never,
+    {
+      changed: () => {},
+      inventoryTargets: async () => [],
+      backgroundChanged: async () => {},
+      openSchedule: async () => "s1",
+      show: () => {},
+      aiConfigFilePath: path.join(dir, "ai.json"),
+      workspaceServers: async () => servers.map((x) => ({ ...x, port: 22, username: "ops", shared: true })),
+    } as never,
     dir,
   );
   disposals.push(async () => {
@@ -180,10 +192,11 @@ describe("a secret a setting needs", () => {
     expect(JSON.stringify(result)).not.toContain(KEY);
     expect(JSON.stringify(task)).not.toContain(KEY);
     await hub.store.save();
-    for (const file of await fs.readdir(dir)) {
-      const full = path.join(dir, file);
-      if ((await fs.stat(full)).isFile() && file !== "ai.json") expect(await fs.readFile(full, "utf8"), file).not.toContain(KEY);
-    }
+    // Every file the hub wrote, in every folder: the audit log is where a setting change is written down.
+    // The model settings file keeps the key itself, encrypted, and is the one place it belongs.
+    const files = (await fs.readdir(dir, { recursive: true, withFileTypes: true })).filter((f) => f.isFile()).map((f) => path.join(f.parentPath, f.name));
+    expect(files.some((f) => f.includes(`${path.sep}audit${path.sep}`))).toBe(true);
+    for (const file of files) if (path.basename(file) !== "ai.json") expect(await fs.readFile(file, "utf8"), file).not.toContain(KEY);
     // Nothing typed is left behind in memory.
     expect((hub as unknown as { changeSecrets: Map<string, unknown> }).changeSecrets.size).toBe(0);
   });
@@ -204,6 +217,37 @@ describe("a secret a setting needs", () => {
     expect(secrets.size).toBe(0);
   });
 
+  it("survives a second answer in flight: a double press does not take the key away", async () => {
+    const { hub } = await makeHub();
+    const run = await startRun(hub);
+    const asked = run.call("sshs3_manage_app_and_settings", { operation: "save_model_profile", name: "Fast", provider: "openai-compatible", model: "small-1" });
+    const change = await run.pending();
+    // The same answer twice at once, as a double press or two windows send it. One of them is taken,
+    // the other finds nothing waiting. Whichever comes first, the key it carried reaches the setting:
+    // the late one must not take away what the first one left for the tool.
+    const answers = await Promise.allSettled([run.approve(change.id, { apiKey: KEY }), run.approve(change.id, { apiKey: KEY })]);
+    expect(answers.map((a) => a.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect(((await asked) as { profile?: { hasApiKey?: boolean } }).profile?.hasApiKey).toBe(true);
+    expect((hub as unknown as { changeSecrets: Map<string, unknown> }).changeSecrets.size).toBe(0);
+  });
+
+  it("is refused when the call itself carries it, before anybody is asked", async () => {
+    const { hub } = await makeHub();
+    const run = await startRun(hub);
+    // Where a notification channel sends is the whole question: an address in the call would be approved unseen.
+    for (const [tool, payload, key] of [
+      ["sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", kind: "webhook", name: "ops", includeCommand: true, url: "http://attacker.example/collect" }, "url"],
+      ["sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", idOrName: "ops", secret: "s" }, "secret"],
+      ["sshs3_manage_alerts_and_integrations", { operation: "atlassian_connect", product: "jira", baseUrl: "https://acme.atlassian.net", token: "t" }, "token"],
+      ["sshs3_manage_team_chat", { operation: "agent_connect", service: "slack", token: "xoxb-1", appToken: "xapp-1" }, "token"],
+      ["sshs3_manage_team_chat", { operation: "context_connect", service: "slack", token: "xoxb-1" }, "token"],
+      ["sshs3_manage_app_and_settings", { operation: "save_model_profile", name: "Fast", provider: "openai-compatible", model: "m", apiKey: KEY }, "apiKey"],
+    ] as const)
+      await expect(run.call(tool, payload), JSON.stringify(payload)).rejects.toThrow(`Leave "${key}"`);
+    expect(run.task.changes).toEqual([]);
+    expect((await hub.snapshot()).notifications?.channels ?? []).toEqual([]);
+  });
+
   it("keeps the saved one when the field is left empty, and says so when a new thing needs it", async () => {
     const { hub } = await makeHub();
     const run = await startRun(hub);
@@ -211,7 +255,11 @@ describe("a secret a setting needs", () => {
     const first = run.call("sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", kind: "slack", name: "ops", events: ["approval", "alert"] });
     const noAddress = await run.pending();
     expect(noAddress.secretFields?.map((f) => f.key)).toEqual(["url"]);
-    await run.approve(noAddress.id);
+    // A plain yes, as a shortcut or another list would send it, does not answer a change that takes a secret.
+    await expect(run.approve(noAddress.id)).rejects.toThrow("This one takes a token or key. Answer it on its card in the conversation.");
+    expect(noAddress.status).toBe("pending");
+    // Its card always says what was typed, also when that is nothing.
+    await run.approve(noAddress.id, {});
     await expect(first).rejects.toThrow("A new channel needs its address");
     expect(noAddress.status).toBe("failed");
 
@@ -246,6 +294,97 @@ describe("a secret a setting needs", () => {
     await run.approve(gone.id);
     await removal;
     expect((await hub.snapshot()).notifications?.channels).toEqual([]);
+  });
+});
+
+describe("what the person approves is what is done", () => {
+  it("refuses a value of the wrong kind instead of passing it over", async () => {
+    const { hub } = await makeHub();
+    const run = await startRun(hub);
+    for (const [tool, payload, said] of [
+      // "false" where false was meant would leave answering on while the card said it goes off.
+      ["sshs3_manage_team_chat", { operation: "agent_settings", enabled: "false", dmsEnabled: true }, '"enabled" must be true or false.'],
+      // "90" where 90 was meant would remove the limit while the card said 90 days.
+      ["sshs3_manage_team_chat", { operation: "context_retention", days: "90" }, '"days" must be a number.'],
+      ["sshs3_manage_team_chat", { operation: "context_retention" }, 'context_retention requires "days"'],
+      ["sshs3_manage_team_chat", { operation: "agent_set_channel", service: "slack", channelId: 12345 }, '"channelId" must be text.'],
+      ["sshs3_manage_alerts_and_integrations", { operation: "facts_configure", exclude: "all" , intervalHours: "6" }, '"intervalHours" must be a number.'],
+      ["sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", kind: "slack", name: "ops", includeCommand: "no" }, '"includeCommand" must be true or false.'],
+    ] as const)
+      await expect(run.call(tool, payload), JSON.stringify(payload)).rejects.toThrow(said);
+    expect(run.task.changes).toEqual([]);
+  });
+
+  it("names servers whole, and keeps them out of collection when it says so", async () => {
+    const { hub } = await makeHub([
+      { id: "srv-1", name: "prod-db-01", host: "10.0.0.1" },
+      { id: "srv-2", name: "db-test", host: "10.0.0.2" },
+    ]);
+    const run = await startRun(hub);
+    // A part of a name names nothing: "db" is two servers here.
+    await expect(run.call("sshs3_manage_alerts_and_integrations", { operation: "facts_configure", exclude: ["db"] })).rejects.toThrow('No server is called "db"');
+    await expect(run.call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "k", scopes: ["read", "run"], serverIdOrName: "db" })).rejects.toThrow('No server is called "db"');
+    await expect(run.call("sshs3_manage_alerts_and_integrations", { operation: "facts_collect_now", serverIdOrName: "db" })).rejects.toThrow('No server is called "db"');
+    expect(run.task.changes).toEqual([]);
+
+    // Named by host: the card shows the server's name, and the list holds its id.
+    const asked = run.call("sshs3_manage_alerts_and_integrations", { operation: "facts_configure", exclude: ["10.0.0.1"] });
+    const change = await run.pending();
+    expect(change.command).toContain('exclude: ["prod-db-01"]');
+    expect(change.command).toContain("exclude is the whole list");
+    await run.approve(change.id);
+    expect(((await asked) as { serverFacts: { exclude: string[] } }).serverFacts.exclude).toEqual(["prod-db-01"]);
+    expect((await hub.snapshot()).serverFacts?.exclude).toEqual(["srv-1"]);
+
+    // Collecting now is a person's decision, and never reaches a server that is kept out.
+    await expect(run.call("sshs3_manage_alerts_and_integrations", { operation: "facts_collect_now", serverIdOrName: "prod-db-01" })).rejects.toThrow(
+      "prod-db-01 is on the list of servers nothing is collected from",
+    );
+    const collecting = run.call("sshs3_manage_alerts_and_integrations", { operation: "facts_collect_now", serverIdOrName: "db-test" });
+    const collect = await run.pending();
+    expect(collect.description).toBe("Collect facts from servers now");
+    expect(collect.command).toContain("serverIdOrName: db-test");
+    await hub.request({ action: "approve", taskId: run.task.id, changeId: collect.id, approved: false });
+    await expect(collecting).rejects.toThrow("Action not approved");
+
+    // A key held to a server says which one, whole, on its card.
+    const key = run.call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", idOrName: "k", scopes: ["read"], serverIdOrName: "10.0.0.2" });
+    const made = await run.pending();
+    expect(made.command).toContain("name: k");
+    expect(made.command).toContain("serverIdOrName: db-test");
+    await hub.request({ action: "approve", taskId: run.task.id, changeId: made.id, approved: false });
+    await expect(key).rejects.toThrow("Action not approved");
+  });
+
+  it("keeps what a change to a connection does not name", async () => {
+    const { hub } = await makeHub();
+    const run = await startRun(hub);
+    // An address by number: there is no name to look up where the tests run.
+    const first = run.call("sshs3_manage_alerts_and_integrations", {
+      operation: "atlassian_connect", product: "jira", variant: "datacenter", baseUrl: "http://127.0.0.1:9", projects: ["OPS"], doneTransition: "Resolve", closeOnApprove: false,
+    });
+    await run.approve((await run.pending()).id, { token: "typed-jira-token" });
+    expect(((await first) as { connection: Record<string, unknown> }).connection).toMatchObject({ projects: ["OPS"], doneTransition: "Resolve", closeOnApprove: false, enabled: true, hasToken: true });
+
+    // Switched off, and nothing else said: the transition, the closing rule, the projects and the token stay.
+    const second = run.call("sshs3_manage_alerts_and_integrations", { operation: "atlassian_connect", product: "jira", enabled: false });
+    const change = await run.pending();
+    expect(change.command).toContain("What is not named here stays as it is.");
+    await run.approve(change.id, {});
+    await second;
+    expect((await hub.snapshot()).atlassian?.jira).toMatchObject({ enabled: false, projects: ["OPS"], doneTransition: "Resolve", closeOnApprove: false, hasToken: true });
+  });
+
+  it("says how long the team's chat is kept in the terms it will be kept", () => {
+    const chat = "sshs3_manage_team_chat";
+    expect(guardAsk(chat, { operation: "context_retention", days: 30 }, { mode: "assisted" }, known)?.detail).toBe("days: 30\nMessages older than this are removed.");
+    expect(guardAsk(chat, { operation: "context_retention", days: 0 }, { mode: "assisted" }, known)?.detail).toBe("days: 0\n0 days: messages are kept until somebody removes them.");
+  });
+
+  it("has no way to forget every conversation from inside one", () => {
+    // The conversation that asks is itself running, and history is not forgotten while a run is: a person does this in the settings.
+    expect(Object.keys(APP_OPS.sshs3_manage_app_and_settings.ops)).not.toContain("forget_history");
+    expect(SETTINGS_OPS.sshs3_manage_app_and_settings).not.toContain("forget_history");
   });
 });
 
@@ -334,6 +473,23 @@ describe("what belongs to a team server", () => {
     expect((await asked) as { ok: boolean; key: { tools?: string[] } }).toMatchObject({ ok: true, key: { tools: ["kb_search", "list_servers"] } });
     const listed = (await run.call("sshs3_agent_and_mcp_manage", { operation: "list_mcp_keys" })) as { localMcp: { keys: Array<{ name: string }> } };
     expect(listed.localMcp.keys.map((k) => k.name)).toEqual(["laptop-agent"]);
+  });
+
+  it("refuses a run nobody sits at even when the call arrives all the same", async () => {
+    const { hub } = await makeHub();
+    for (const extra of [{ ticketId: "T-1" }, { scheduleId: "s1" }]) {
+      const run = await startRun(hub);
+      Object.assign(run.task, extra);
+      for (const [tool, payload] of [
+        ["sshs3_manage_alerts_and_integrations", { operation: "status" }],
+        ["sshs3_manage_alerts_and_integrations", {}],
+        ["sshs3_manage_team_chat", { operation: "agent_settings", enabled: true }],
+        ["sshs3_manage_app_and_settings", { operation: "update_team_rules", requirePeerApprovalOnProd: false }],
+        ["sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "k" }],
+      ] as const)
+        await expect(run.call(tool, payload), `${JSON.stringify(extra)} ${JSON.stringify(payload)}`).rejects.toThrow("This run works on its own.");
+      expect(run.task.changes).toEqual([]);
+    }
   });
 
   it("does not try an address the call names when the model is tested", async () => {

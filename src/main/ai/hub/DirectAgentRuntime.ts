@@ -1630,7 +1630,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_manage_app_and_settings",
     description:
-      "Read or configure ALL sshs3 application settings, AI model & context window parameters, AST Shell Safety & Policy Guard rules, keyboard shortcuts, Dotfile Pools & synced dotfiles (~/.bashrc, ~/.vimrc, ~/.tmux.conf, etc.), and reusable command snippets, or open a local terminal session. Also: model profiles (list_model_profiles, save_model_profile, delete_model_profile, test_model), the rules a team server's administrators set for everyone (get_team_rules, update_team_rules: the two person rule and change freezes), restore_builtin_agents and forget_history. An API key is never passed here: the person types it on the approval card of the change.",
+      "Read or configure ALL sshs3 application settings, AI model & context window parameters, AST Shell Safety & Policy Guard rules, keyboard shortcuts, Dotfile Pools & synced dotfiles (~/.bashrc, ~/.vimrc, ~/.tmux.conf, etc.), and reusable command snippets, or open a local terminal session. Also: model profiles (list_model_profiles, save_model_profile, delete_model_profile, test_model), the rules a team server's administrators set for everyone (get_team_rules, update_team_rules: the two person rule and change freezes), and restore_builtin_agents. An API key is never passed here: the person types it on the approval card of the change.",
     parameters: {
       type: "object",
       properties: {
@@ -1656,7 +1656,6 @@ const AGENT_TOOLS: FunctionToolDef[] = [
             "get_team_rules",
             "update_team_rules",
             "restore_builtin_agents",
-            "forget_history",
           ],
           description:
             "Operation: 'get_state' (inspect full sshs3 state), 'update_settings' (update any AppSettings, AI parameter, safety policy, or shortcut), 'configure_ai' (update AI model/provider/context window/reasoning), 'update_shortcuts' (update or reset keyboard shortcuts), 'update_safety_policy' (update AST Shell Safety & Policy Guard rules), 'list_dotfiles' / 'save_dotfile' / 'delete_dotfile' (manage Dotfile Pools and synced dotfiles), 'list_snippets' / 'save_snippet' / 'delete_snippet' (manage command snippets), or 'open_local_terminal'.",
@@ -2227,7 +2226,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           description: "HTTP endpoint URL for http MCP server.",
         },
         cwd: { type: "string", description: "save_runner: the folder the external agent's program works in." },
-        serverIdOrName: { type: "string", description: "set_mcp_tool_policy: the MCP server. create_mcp_key: an SSH server the key is held to." },
+        serverIdOrName: { type: "string", description: "set_mcp_tool_policy: the MCP server. create_mcp_key: an SSH server the key is held to, by its whole name, id or host." },
         toolName: { type: "string", description: "set_mcp_tool_policy: the tool on that MCP server." },
         policy: { type: "string", enum: ["allow", "ask", "deny"], description: "set_mcp_tool_policy: allow (runs unasked), ask (a person approves each call) or deny." },
         scopes: { type: "array", items: { type: "string", enum: ["read", "tickets", "run"] }, description: "create_mcp_key: what the key may do." },
@@ -2285,7 +2284,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         forget: { type: "boolean", description: "context_disconnect: also remove what the bot read." },
         channel: { type: "string", description: "Context bot operations: the channel's id or name. agent_try: a channel id that has a rule, or 'dm' for a direct message." },
         selected: { type: "boolean", description: "context_select_channel: true to read the channel, false to stop." },
-        days: { type: "number", description: "context_read_back: how many days back. context_retention: how many days messages are kept." },
+        days: { type: "number", description: "context_read_back: how many days back. context_retention: how many days messages are kept; 0 keeps them until somebody removes them." },
         channelId: { type: "string", description: "agent_set_channel / agent_remove_channel: the channel's id in the chat service." },
         channelName: { type: "string", description: "agent_set_channel: the channel's name, for showing." },
         servers: { type: "array", items: { type: "string" }, description: 'agent_set_channel: the servers people in the channel may make the agent work on, by exact name, id or host. ["*"] is every server the chat agent has.' },
@@ -2375,9 +2374,9 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         doneTransition: { type: "string", description: "atlassian_connect (Jira): the transition that closes an issue." },
         closeOnApprove: { type: "boolean", description: "atlassian_connect (Jira): close the issue when its ticket is approved here." },
         intervalHours: { type: "number", description: "facts_configure: hours between collections." },
-        exclude: { type: "array", items: { type: "string" }, description: "facts_configure: servers that are not collected from." },
-        watchPaths: { type: "array", items: { type: "string" }, description: "facts_configure: files whose changes are noted." },
-        serverIdOrName: { type: "string", description: "facts_collect_now: one server. Left out: all." },
+        exclude: { type: "array", items: { type: "string" }, description: "facts_configure: the WHOLE list of servers that are not collected from, each by its whole name, id or host. A server left off the list is collected from: read 'status' first and send the list with your change made." },
+        watchPaths: { type: "array", items: { type: "string" }, description: "facts_configure: the WHOLE list of files whose changes are noted." },
+        serverIdOrName: { type: "string", description: "facts_collect_now: one server, by its whole name, id or host. Left out: all that are not excluded." },
         rules: {
           type: "array",
           description: "alert_rules_save: the whole list. Each alert whose text matches starts the agent named.",

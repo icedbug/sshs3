@@ -689,10 +689,11 @@ export async function handleAppAction(
       };
     }
 
-    // A setting that is asked for with something missing is refused before a person is asked about it.
+    // A setting is looked at before a person is asked about it: what they approve is what will be done.
     if (!request.action.startsWith("mcp__")) {
-      const settingsOp = typeof p.operation === "string" ? p.operation.trim() : "";
-      if (settingsOp && isSettingsOp(request.action, settingsOp)) await precheckSettingsOp(hub, request.action, settingsOp, p);
+      const wholly = request.action === "sshs3_manage_team_chat" || request.action === "sshs3_manage_alerts_and_integrations";
+      const settingsOp = typeof p.operation === "string" ? p.operation.trim() : wholly ? "status" : "";
+      if (settingsOp && isSettingsOp(request.action, settingsOp)) await precheckSettingsOp(hub, request.action, settingsOp, p, task);
     }
     // What moves the fence agents run inside waits for a person, in every mode (see AppGuard.ts).
     const ask = guardAsk(request.action, p, task, { agents: hub.getAgentsList(), schedules: hub.store.data.schedules });
@@ -727,7 +728,8 @@ export async function handleAppAction(
       hub.changed();
     }
     const settingsCtx: SettingsCtx = {
-      secret: (key) => typed[key] ?? (typeof p[key] === "string" && (p[key] as string).trim() ? (p[key] as string).trim() : undefined),
+      // Only what was typed on the card. A secret in the call itself was refused before anybody was asked.
+      secret: (key) => typed[key],
       reveal: (label, value) => {
         // Only a change a person approved has a card to show it on.
         if (!guarded) return false;

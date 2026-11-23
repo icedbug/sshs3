@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AgentChange, HubRequest, HubSnapshot } from "../../../../shared/types/aiHub";
+import { copyToClipboard } from "../../lib/clipboard";
 
 /**
  * The secrets a setting needs, typed where it is approved, and the one-time things a setting makes,
@@ -27,24 +28,39 @@ export function ChangeSecretInputs({
   values: Record<string, string>;
   onChange: (next: Record<string, string>) => void;
 }): JSX.Element | null {
+  // A long address typed blind is typed wrong: the person may look at it while they type.
+  const [visible, setVisible] = useState(false);
   if (!takesSecrets(change)) return null;
+  const hintId = `ai-change-secrets-hint-${change.id}`;
   return (
     <div className="ai-form" data-testid={`ai-change-secrets-${change.id}`}>
       {change.secretFields!.map((field) => (
         <label key={field.key}>
-          <span>Type {field.label}</span>
+          <span>
+            Type {field.label}
+            {field.optional ? ". Leave it empty to keep the one already saved." : ""}
+          </span>
           <input
-            type="password"
-            autoComplete="off"
+            type={visible ? "text" : "password"}
+            // Not a sign-in: a browser or a password manager is asked not to fill it in or to keep it.
+            autoComplete="new-password"
+            data-1p-ignore=""
+            data-lpignore="true"
             spellCheck={false}
             aria-label={`Type ${field.label}`}
-            placeholder={field.optional ? "Leave empty to keep the one already saved" : ""}
+            aria-describedby={hintId}
             value={values[field.key] ?? ""}
             onChange={(e) => onChange({ ...values, [field.key]: e.target.value })}
           />
         </label>
       ))}
-      <small className="ai-hint">What you type here goes to sshs3 with your approval. It is not part of the conversation and is not sent to the model.</small>
+      <label className="ai-check">
+        <input type="checkbox" checked={visible} onChange={(e) => setVisible(e.target.checked)} />
+        <span>Show what I type</span>
+      </label>
+      <small className="ai-hint" id={hintId}>
+        What you type here goes to sshs3 with your approval. It is not part of the conversation and is not sent to the model.
+      </small>
     </div>
   );
 }
@@ -71,7 +87,8 @@ export function ChangeReveal({ taskId, change, act, onShown }: { taskId: string;
               type="button"
               className="ai-mini-btn"
               onClick={() => {
-                void navigator.clipboard?.writeText(shown.value).then(() => setCopied(true));
+                // Also where the page is not served over https, which a team server may not be.
+                void copyToClipboard(shown.value).then((ok) => setCopied(ok));
               }}
             >
               {copied ? "Copied" : "Copy"}

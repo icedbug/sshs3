@@ -31,7 +31,7 @@ import { boundedContext, boundedPrompt, clip, PERSON_PROMPT_MAX, safeError } fro
 import { resolveTargetSelector } from "../WorkforceRunner";
 import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, todosFromPlan } from "../PlanMode";
 import { requiredText, integer } from "../hubHelpers";
-import { log, BOOLEAN_POLICY_NAMES, active } from "../hubShared";
+import { log, BOOLEAN_POLICY_NAMES, active, REVEAL_KEPT_MS } from "../hubShared";
 import { chatServiceLabel } from "../chatFence";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
@@ -652,8 +652,14 @@ export class SafetyPart {
         // A setting that needs a secret is approved together with it: the person types the token on the
         // card, and it goes from here straight to the tool that waits. It is never part of a message.
         const waiting = this.store.data.tasks.find((t) => t.id === request.taskId)?.changes.find((c) => c.id === request.changeId);
+        let stored = false;
         if (request.approved === true && waiting?.status === "pending" && waiting.secretFields?.length) {
-          const given: Record<string, unknown> = request.secrets && typeof request.secrets === "object" ? request.secrets : {};
+          // Only its own card answers such a change: the card always sends what was typed, even when
+          // that is nothing. A plain yes from elsewhere (a shortcut, another list) would let it through
+          // without the person having seen the fields.
+          if (!request.secrets || typeof request.secrets !== "object" || Array.isArray(request.secrets))
+            throw new Error("This one takes a token or key. Answer it on its card in the conversation.");
+          const given: Record<string, unknown> = request.secrets;
           const kept: Record<string, string> = {};
           for (const field of waiting.secretFields) {
             const raw = given[field.key];
@@ -662,7 +668,12 @@ export class SafetyPart {
             if (value.length > 8192) throw new Error(`${field.label} is too long.`);
             if (value) kept[field.key] = value;
           }
-          this.changeSecrets.set(waiting.id, kept);
+          // The first answer's secrets are the ones the waiting tool reads. A second answer that arrives
+          // while the first is still being written down must neither replace them nor take them away.
+          if (this.broker.waitingFor(waiting.id) && !this.changeSecrets.has(waiting.id)) {
+            this.changeSecrets.set(waiting.id, kept);
+            stored = true;
+          }
         }
         let resolved: boolean;
         try {
@@ -675,8 +686,9 @@ export class SafetyPart {
             { actor, actorId: this.localApproverId(), adminException: request.adminException === true && this.host.teamAdmin?.() === true },
           );
         } catch (error) {
-          // Nothing waits for this answer any more: what was typed with it is not kept either.
-          this.changeSecrets.delete(request.changeId);
+          // Nothing waits for this answer: what was typed with it is not kept. Only what this answer
+          // itself stored is dropped, never what an earlier one left for the tool.
+          if (stored) this.changeSecrets.delete(request.changeId);
           throw error;
         }
         // Who answered is written down once the broker resolves or records the final decision.
@@ -694,8 +706,9 @@ export class SafetyPart {
         const kept = this.changeReveals.get(change.id);
         this.changeReveals.delete(change.id);
         change.reveal.shown = true;
-        // An empty value says it is gone: shown before, or sshs3 restarted since.
-        return { reply: { changeReveal: kept ?? { label: change.reveal.label, value: "" } } };
+        const fresh = kept && Date.now() - kept.at <= REVEAL_KEPT_MS ? { label: kept.label, value: kept.value } : undefined;
+        // An empty value says it is gone: shown before, kept too long, or sshs3 restarted since.
+        return { reply: { changeReveal: fresh ?? { label: change.reveal.label, value: "" } } };
       }
       case "peer-approve": {
         if (!this.host.peerDecide) throw new Error("Approvals are not passed between people here.");

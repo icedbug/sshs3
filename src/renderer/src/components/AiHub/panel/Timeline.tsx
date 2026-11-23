@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GitFork, Pencil, RotateCcw, Terminal } from "lucide-react";
 import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS } from "@shared/types/aiHub";
 import { AnsiLogView, DiffViewer } from "../DiffViewer";
@@ -39,6 +39,12 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
     approvalNotes,
     setApprovalNotes,
   } = p;
+  // What was typed for a change that no longer waits (answered elsewhere, stopped, timed out) is dropped.
+  const waitingIds = (task?.changes ?? []).filter((c) => c.status === "pending").map((c) => c.id).join(" ");
+  useEffect(() => {
+    const waiting = new Set(waitingIds.split(" ").filter(Boolean));
+    setSecretValues((all) => (Object.keys(all).every((id) => waiting.has(id)) ? all : Object.fromEntries(Object.entries(all).filter(([id]) => waiting.has(id)))));
+  }, [waitingIds]);
   return (
     <>
                 {timeline.map((item, idx) =>
@@ -409,7 +415,8 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                                 changeId,
                                 approved: true,
                                 note: approvalNotes[changeId]?.trim() || undefined,
-                                ...(item.change!.secretFields?.length && typed ? { secrets: typed } : {}),
+                                // The card of a change that takes secrets always says what was typed, also when that is nothing.
+                                ...(item.change!.secretFields?.length ? { secrets: typed ?? {} } : {}),
                               }).then((sent) => {
                                 // Sent: what was typed is not kept in the window any longer.
                                 if (sent) setSecretValues((all) => Object.fromEntries(Object.entries(all).filter(([id]) => id !== changeId)));
@@ -421,15 +428,18 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                           <button
                             disabled={busy}
                             title="The run goes on; the agent is told no, and why if you wrote a note"
-                            onClick={() =>
+                            onClick={() => {
+                              const changeId = item.change!.id;
+                              // Said no: what was typed is not kept.
+                              setSecretValues((all) => Object.fromEntries(Object.entries(all).filter(([id]) => id !== changeId)));
                               void act({
                                 action: "approve",
                                 taskId: task.id,
-                                changeId: item.change!.id,
+                                changeId,
                                 approved: false,
-                                note: approvalNotes[item.change!.id]?.trim() || undefined,
-                              })
-                            }
+                                note: approvalNotes[changeId]?.trim() || undefined,
+                              });
+                            }}
                           >
                             Decline
                           </button>

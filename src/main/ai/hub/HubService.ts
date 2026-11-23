@@ -53,7 +53,7 @@ import { integer } from "./hubHelpers";
 import { worksOnItsOwn } from "./DirectAgentRuntime";
 import { handleAppAction } from "./AppActions";
 import type { HubHost } from "./hubHost";
-import { log, taskForSnapshot, READ_ONLY_ACTIONS, active, RUN_STOP_GRACE_MS, isBackgroundRun } from "./hubShared";
+import { log, taskForSnapshot, READ_ONLY_ACTIONS, REVEAL_KEPT_MS, active, RUN_STOP_GRACE_MS, isBackgroundRun } from "./hubShared";
 import { areaOf, type AreaName, type Handled, type RequestsOf } from "./areas/routes";
 import { mixParts } from "./areas/mix";
 import { InboxPart } from "./areas/inbox";
@@ -946,7 +946,7 @@ export class HubService {
    */
   readonly changeSecrets = new Map<string, Record<string, string>>();
   /** What a setting change made for the person alone (a key, a code), until it is shown once. Memory only. */
-  readonly changeReveals = new Map<string, { label: string; value: string }>();
+  readonly changeReveals = new Map<string, { label: string; value: string; at: number }>();
   readonly writingAudit = new Set<string>();
   readonly restoringChanges = new Set<string>();
   auditShipper?: AuditShipper;
@@ -1330,7 +1330,10 @@ export class HubService {
       },
       /** Keeps what a change made for the person alone, to be shown once on its card. */
       keepChangeReveal: (changeId: string, label: string, value: string): void => {
-        this.changeReveals.set(changeId, { label, value });
+        const now = Date.now();
+        // Ones nobody came for are dropped as new ones arrive.
+        for (const [id, kept] of this.changeReveals) if (now - kept.at > REVEAL_KEPT_MS) this.changeReveals.delete(id);
+        this.changeReveals.set(changeId, { label, value, at: now });
       },
     };
   }

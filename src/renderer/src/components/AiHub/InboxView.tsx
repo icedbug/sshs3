@@ -433,6 +433,8 @@ export function InboxView({
       if (event.key === "a") {
         if (active.kind === "approval" && active.taskId && active.changeId) {
           event.preventDefault();
+          // A setting that takes a token is answered on its own card: the key does what the button does not offer.
+          if (takesSecrets(hub.tasks.find((t) => t.id === active.taskId)?.changes.find((c) => c.id === active.changeId))) return;
           const destructive = active.risk === "destructive" || active.risk === "critical";
           if (destructive && armedDestructiveId !== active.id) {
             setArmedDestructiveId(active.id);
@@ -458,6 +460,7 @@ export function InboxView({
     armedDestructiveId,
     armedDoneId,
     dispatch,
+    hub.tasks,
     openItem,
     resolveOrArchiveItem,
     selectedId,

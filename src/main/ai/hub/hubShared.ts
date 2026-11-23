@@ -98,6 +98,13 @@ export function taskForSnapshot(task: AgentTask): AgentTask {
  * store is not rewritten and no window is told to refetch: a search that runs
  * as a person types must not cost a save and a broadcast per keystroke.
  */
+/**
+ * How long a value a setting made for the person alone (a key, a link code) waits to be shown on its
+ * card. After that it is dropped: nobody came for it, and a secret is not kept in memory for the life
+ * of the process.
+ */
+export const REVEAL_KEPT_MS = 30 * 60_000;
+
 export const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest["action"]>([
   "task-read",
   // The answer goes to another member's hub: nothing of this one's is written.

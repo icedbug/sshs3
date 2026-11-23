@@ -43,7 +43,7 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
     ops: { get_state: "read", update_settings: "guard-if", configure_ai: "guard-if", update_shortcuts: "guard-if", update_safety_policy: "guard", list_dotfiles: "read", save_dotfile: "guard-if", delete_dotfile: "change", list_snippets: "read", save_snippet: "change", delete_snippet: "change", open_local_terminal: "change",
       // Which model profiles there are, and the rules a team server's administrators set for everyone.
       list_model_profiles: "read", save_model_profile: "guard", delete_model_profile: "guard", test_model: "change",
-      get_team_rules: "read", update_team_rules: "guard", restore_builtin_agents: "guard", forget_history: "guard",
+      get_team_rules: "read", update_team_rules: "guard", restore_builtin_agents: "guard",
     },
   },
   sshs3_kb_manage: { fallback: "list", ops: { list: "read", add_document: "guard-if", delete_document: "change", ingest_local_folder: "guard", ingest_s3_prefix: "guard" } },
@@ -79,7 +79,7 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
       status: "read",
       save_notify_channel: "guard", delete_notify_channel: "guard", test_notify_channel: "change", notify_settings: "guard",
       atlassian_connect: "guard", atlassian_test: "change", atlassian_disconnect: "guard", jira_sync_now: "change",
-      facts_configure: "guard", facts_collect_now: "change",
+      facts_configure: "guard", facts_collect_now: "guard",
       alert_hook_create: "guard", alert_hook_disable: "guard", alert_rules_save: "guard",
     },
   },
@@ -181,17 +181,12 @@ const REMOVES_BY_OP: Record<string, string> = {
   delete_notify_channel: "a notification channel",
 };
 
-/** A secret the call did not carry is asked for on the card. One it did carry is used, and never shown. */
-function askFor(payload: Record<string, unknown>, fields: ChangeSecretField[]): ChangeSecretField[] | undefined {
-  const missing = fields.filter((f) => !has(payload, f.key));
-  return missing.length ? missing : undefined;
-}
-/** A line saying a secret came with the call, without the secret. */
-const given = (payload: Record<string, unknown>, keys: string[]): string =>
-  keys
-    .filter((k) => has(payload, k))
-    .map((k) => `${k}: (given in the conversation, so the model's provider has read it)`)
-    .join("\n");
+/**
+ * The secrets a setting takes are always asked for on the card. A call that carries one itself never
+ * gets here: it is refused before anybody is asked (precheckSettingsOp), so nothing a person approves
+ * rides along unseen.
+ */
+const askFor = (fields: ChangeSecretField[]): ChangeSecretField[] => fields;
 const lines = (...parts: Array<string | undefined>): string => parts.filter((part): part is string => Boolean(part)).join("\n");
 
 /** The settings tools that are wholly about the rules agents run under: one question per operation. */
@@ -201,11 +196,10 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
       return {
         title: "Add or change a model profile",
         detail: lines(
-          show(payload, ["idOrName", "name", "provider", "model", "baseUrl", "apiProtocol", "activeRole", "egressPolicy"]),
-          given(payload, ["apiKey"]),
+          show(payload, ["idOrName", "name", "provider", "model", "baseUrl", "apiProtocol", "activeRole", "egressPolicy", "embeddingModel", "reasoningEffort", "temperature", "maxOutputTokens", "contextWindowTokens"]),
           "Conversations that use this profile are sent to its address, with its key.",
         ),
-        secrets: askFor(payload, [{ key: "apiKey", label: "the API key", optional: true }]),
+        secrets: askFor([{ key: "apiKey", label: "the API key", optional: true }]),
       };
     if (op === "update_team_rules")
       return {
@@ -213,7 +207,6 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
         detail: lines(show(payload, ["requirePeerApprovalOnProd", "freezeCluster", "freezeHours", "freezeWhy", "endFreeze"]), "Only an administrator of the server can change these."),
       };
     if (op === "restore_builtin_agents") return { title: "Put the built-in agents back as they were", detail: "Changes made to the built-in agents are lost." };
-    if (op === "forget_history") return { title: "Forget every conversation's history", detail: "Conversations and what agents did in them are removed from this account. This cannot be undone." };
     return undefined;
   }
 
@@ -223,7 +216,7 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
         title: "Add or change a program that runs as an external agent",
         detail: lines(show(payload, ["idOrName", "name", "command", "args", "cwd"]), "The program is started on this computer, as you."),
       };
-    if (op === "test_runner") return { title: "Start an external agent's program once, to see that it answers", detail: show(payload, ["idOrName", "id", "name"]) || op };
+    if (op === "test_runner") return { title: "Start an external agent's program once, to see that it answers", detail: show(payload, ["idOrName"]) || op };
     if (op === "set_mcp_tool_policy")
       return {
         title: "Change what an MCP tool may do without asking",
@@ -234,7 +227,7 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
         title: "Make a key that lets another agent reach this app",
         detail: lines(show(payload, ["name", "scopes", "serverIdOrName", "expiresInDays", "tools"]), "The key is shown to you once, on this card. It is not given to the agent in this conversation."),
       };
-    if (op === "revoke_mcp_key") return { title: "Take back a key another agent reaches this app with", detail: show(payload, ["idOrName", "id", "name"]) || op };
+    if (op === "revoke_mcp_key") return { title: "Take back a key another agent reaches this app with", detail: show(payload, ["idOrName"]) || op };
     if (op === "set_local_mcp_server")
       return { title: payload.enabled === false ? "Switch off this app's own MCP server" : "Switch on this app's own MCP server", detail: lines(show(payload, ["enabled", "port"]), "Other agents on this computer reach sshs3 through it, with a key.") };
     return undefined;
@@ -244,20 +237,24 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
     if (op === "context_connect")
       return {
         title: "Connect the context bot, which reads chosen channels",
-        detail: lines(show(payload, ["service", "baseUrl", "enabled"]), given(payload, ["token"]), "What the team writes in the channels you then choose is kept here and given to agents that search it."),
-        secrets: askFor(payload, [{ key: "token", label: "the context bot's token", optional: true }]),
+        detail: lines(show(payload, ["service", "baseUrl", "enabled"]), "What the team writes in the channels you then choose is kept here and given to agents that search it."),
+        secrets: askFor([{ key: "token", label: "the context bot's token", optional: true }]),
       };
     if (op === "context_disconnect")
       return { title: "Disconnect the context bot", detail: lines(show(payload, ["service", "forget"]), payload.forget === true ? "What it read is removed too." : undefined) };
     if (op === "context_select_channel" && payload.selected !== false)
       return { title: "Let the context bot read one more channel", detail: lines(show(payload, ["service", "channel"]), "What is written there is kept here and given to agents that search it.") };
     if (op === "context_forget") return { title: "Remove what the context bot read", detail: show(payload, ["service", "channel"]) || "Everything it read, in every channel." };
-    if (op === "context_retention") return { title: "Change how long the team's chat is kept", detail: lines(show(payload, ["days"]), "Messages older than this are removed.") };
+    if (op === "context_retention")
+      return {
+        title: "Change how long the team's chat is kept",
+        detail: lines(show(payload, ["days"]), payload.days === 0 ? "0 days: messages are kept until somebody removes them." : "Messages older than this are removed."),
+      };
     if (op === "agent_connect")
       return {
         title: "Connect the agent bot, which answers people in chat",
-        detail: lines(show(payload, ["service", "baseUrl", "enabled"]), given(payload, ["token", "appToken"]), "It must be its own Slack app or bot account, not the context bot's."),
-        secrets: askFor(payload, [
+        detail: lines(show(payload, ["service", "baseUrl", "enabled"]), "It must be its own Slack app or bot account, not the context bot's."),
+        secrets: askFor([
           { key: "token", label: "the agent bot's token", optional: true },
           ...(text(payload, "service").toLowerCase() === "slack" ? [{ key: "appToken", label: "the Slack app-level token (xapp-)", optional: true }] : []),
         ]),
@@ -275,6 +272,7 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
         detail: lines(
           show(payload, ["service", "channelId", "channelName", "servers", "clusters", "reach", "agentId", "approvers", "historyFrom"]),
           "Anyone in that channel can then make the agent work on these servers, as far as the reach allows.",
+          has(payload, "channelName") ? "The channel's name is as the assistant wrote it. The id decides which channel it is: check it in the chat." : undefined,
         ),
       };
     if (op === "agent_copy_model") return { title: "Give the chat agent your model", detail: "Its conversations are then sent to your model's address, with your key and your data policy." };
@@ -300,10 +298,9 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
         title: "Add or change where notifications are sent",
         detail: lines(
           show(payload, ["idOrName", "kind", "name", "enabled", "events", "includeCommand", "alertMinSeverity"]),
-          given(payload, ["url", "secret"]),
-          "What waits for an answer is sent to that address, with the command when includeCommand is on.",
+          "What waits for an answer is sent to the address you type below, with the command when includeCommand is on. Left empty, the address already saved is kept.",
         ),
-        secrets: askFor(payload, [
+        secrets: askFor([
           { key: "url", label: "the channel's address (the webhook URL)", optional: true },
           ...(text(payload, "kind").toLowerCase() === "webhook" ? [{ key: "secret", label: "the secret that signs the webhook", optional: true }] : []),
         ]),
@@ -318,16 +315,25 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
         title: `Connect ${text(payload, "product").toLowerCase() === "confluence" ? "Confluence" : "Jira"}`,
         detail: lines(
           show(payload, ["product", "variant", "baseUrl", "email", "enabled", "projects", "doneTransition", "closeOnApprove"]),
-          given(payload, ["token"]),
-          "sshs3 then reads from that address as you, and writes ticket comments and moves there.",
+          "sshs3 then reads from that address as you, and writes ticket comments and moves there. What is not named here stays as it is.",
         ),
-        secrets: askFor(payload, [{ key: "token", label: "the API token", optional: true }]),
+        secrets: askFor([{ key: "token", label: "the API token", optional: true }]),
       };
     if (op === "atlassian_disconnect") return { title: "Disconnect Jira or Confluence", detail: show(payload, ["product"]) || op };
     if (op === "facts_configure")
       return {
         title: "Change what sshs3 collects from servers by itself",
-        detail: lines(show(payload, ["enabled", "intervalHours", "exclude", "watchPaths"]), "It runs read-only commands on every server that is not excluded, on a timer, and reads the watched files."),
+        detail: lines(
+          show(payload, ["enabled", "intervalHours", "exclude", "watchPaths"]),
+          "It runs read-only commands on every server that is not excluded, on a timer, and reads the watched files.",
+          has(payload, "exclude") ? "exclude is the whole list: a server that is not on it is collected from." : undefined,
+          has(payload, "watchPaths") ? "watchPaths is the whole list." : undefined,
+        ),
+      };
+    if (op === "facts_collect_now")
+      return {
+        title: "Collect facts from servers now",
+        detail: lines(show(payload, ["serverIdOrName"]) || "Every server that is not excluded.", "It runs its read-only commands there now, also when collecting is switched off."),
       };
     if (op === "alert_hook_create")
       return {

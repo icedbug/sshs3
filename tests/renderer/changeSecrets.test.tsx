@@ -15,6 +15,8 @@ import { InboxView } from "../../src/renderer/src/components/AiHub/InboxView";
 
 let fixture: HubSnapshot;
 const request = vi.fn();
+const copied = vi.fn(async (_text: string) => true);
+vi.mock("../../src/renderer/src/lib/clipboard", () => ({ copyToClipboard: (text: string) => copied(text) }));
 vi.mock("../../src/renderer/src/lib/aiHub", () => ({
   useHub: () => fixture,
   useSelectedTerminal: () => "",
@@ -74,6 +76,7 @@ function snapshot(changes: AgentChange[], status?: AgentTask["status"]): HubSnap
 
 beforeEach(() => {
   request.mockReset();
+  copied.mockClear();
   window.sessionStorage.clear();
   window.localStorage.clear();
   fixture = snapshot([connect]);
@@ -95,12 +98,20 @@ describe("a setting that takes a token", () => {
     const card = await screen.findByTestId("ai-change-secrets-c1");
     const token = within(card).getByLabelText("Type the agent bot's token");
     const appToken = within(card).getByLabelText("Type the Slack app-level token (xapp-)");
-    // What is typed is hidden, and the browser is not asked to remember it.
+    // What is typed is hidden, a browser or a password manager is told this is no sign-in, and the
+    // fields are tied to the line that says where the value goes.
     for (const field of [token, appToken]) {
       expect(field).toHaveAttribute("type", "password");
-      expect(field).toHaveAttribute("autocomplete", "off");
+      expect(field).toHaveAttribute("autocomplete", "new-password");
+      expect(field).toHaveAttribute("data-1p-ignore");
+      expect(field).toHaveAccessibleDescription(/It is not part of the conversation and is not sent to the model\./);
     }
-    expect(card).toHaveTextContent("It is not part of the conversation and is not sent to the model.");
+    expect(card).toHaveTextContent("Leave it empty to keep the one already saved.");
+    // A long token may be looked at while it is typed, and is hidden again on request.
+    fireEvent.click(within(card).getByLabelText("Show what I type"));
+    expect(token).toHaveAttribute("type", "text");
+    fireEvent.click(within(card).getByLabelText("Show what I type"));
+    expect(token).toHaveAttribute("type", "password");
     fireEvent.change(token, { target: { value: TOKEN } });
     fireEvent.change(appToken, { target: { value: "xapp-typed" } });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
@@ -109,6 +120,42 @@ describe("a setting that takes a token", () => {
     // Once sent, the window keeps none of it.
     await waitFor(() => expect((screen.getByLabelText("Type the agent bot's token") as HTMLInputElement).value).toBe(""));
     expect(document.body.innerHTML).not.toContain(TOKEN);
+  });
+
+  it("says what was typed also when that is nothing, so the server knows the card was used", async () => {
+    render(<Panel />);
+    fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
+    await screen.findByTestId("ai-change-secrets-c1");
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(sent("approve")).toHaveLength(1));
+    expect(sent("approve")[0]).toMatchObject({ approved: true, secrets: {} });
+  });
+
+  it("forgets what was typed when the person says no", async () => {
+    render(<Panel />);
+    fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
+    const card = await screen.findByTestId("ai-change-secrets-c1");
+    fireEvent.change(within(card).getByLabelText("Type the agent bot's token"), { target: { value: TOKEN } });
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    await waitFor(() => expect(sent("approve")).toHaveLength(1));
+    expect(sent("approve")[0]).toMatchObject({ approved: false });
+    expect(sent("approve")[0]).not.toHaveProperty("secrets");
+    await waitFor(() => expect((screen.getByLabelText("Type the agent bot's token") as HTMLInputElement).value).toBe(""));
+  });
+
+  it("forgets what was typed when the change stops waiting some other way", async () => {
+    const view = render(<Panel />);
+    fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
+    const card = await screen.findByTestId("ai-change-secrets-c1");
+    fireEvent.change(within(card).getByLabelText("Type the agent bot's token"), { target: { value: TOKEN } });
+    // Timed out, stopped, or answered in another window: the card is gone, and so is the token.
+    fixture = snapshot([{ ...connect, status: "denied" }], "completed");
+    view.rerender(<Panel />);
+    await waitFor(() => expect(screen.queryByTestId("ai-change-secrets-c1")).toBeNull());
+    // Waiting again under the same id (it cannot, but nothing typed may come back if it did).
+    fixture = snapshot([connect]);
+    view.rerender(<Panel />);
+    await waitFor(() => expect((screen.getByLabelText("Type the agent bot's token") as HTMLInputElement).value).toBe(""));
   });
 
   it("sends no secrets with a change that asks for none", async () => {
@@ -133,6 +180,10 @@ describe("a setting that takes a token", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+    // Nor does the key that approves the item under the cursor.
+    fireEvent.keyDown(window, { key: "a" });
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(act).not.toHaveBeenCalled();
   });
 });
 
@@ -188,7 +239,10 @@ describe("what a setting made for the person alone", () => {
     expect(await screen.findByTestId("ai-change-reveal-value-c2")).toHaveTextContent("sshs3_mcp_abc123");
     expect(act).toHaveBeenCalledWith({ action: "change-reveal", taskId: "t1", changeId: "c2" });
     expect(screen.getByTestId("ai-change-reveal-c2")).toHaveTextContent("It is shown this once: copy it now.");
-    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    // Copy works through the helper that also copies where the page is not served over https.
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => expect(copied).toHaveBeenCalledWith("sshs3_mcp_abc123"));
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 
   it("says so when it is no longer kept, and does not offer it a second time", async () => {

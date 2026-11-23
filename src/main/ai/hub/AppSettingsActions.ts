@@ -1,5 +1,6 @@
 import type {
   AgentBotInput,
+  AgentTask,
   AtlassianConnectionInput,
   ChatAnsweringInput,
   ChatChannelRule,
@@ -11,6 +12,7 @@ import type {
   NotifyChannelKind,
   NotifyChannelView,
   NotifyEventKind,
+  WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import type { AiProfileRole, ProviderProfile } from "../../../shared/types/ai";
 import type { McpScope } from "../../web/McpTokenStore";
@@ -28,14 +30,16 @@ import type { AppActionHost } from "./HubService";
  * decided before this runs (AppGuard.ts); nearly all of these are.
  *
  * Secrets do not pass through the model. One the setting needs is typed on the approval card and
- * arrives here through `ctx.secret`; one the setting makes (a key, a link code, a hook's address) is
- * kept for the card with `ctx.reveal` and is left out of what the tool answers.
+ * arrives here through `ctx.secret`; a call that carries one itself is refused before anybody is asked
+ * (`precheckSettingsOp`), so what a person approves is all on the card and nothing rides along unseen.
+ * One the setting makes (a key, a link code, a hook's address) is kept for the card with `ctx.reveal`
+ * and is left out of what the tool answers.
  */
 
 type P = Record<string, unknown>;
 
 export interface SettingsCtx {
-  /** A secret for this call: what the person typed on the approval card, else what the call carried. */
+  /** A secret for this call: what the person typed on the approval card. Never what the call carried. */
   secret(key: string): string | undefined;
   /** Keeps something made for the person alone, to be shown once on the approval card. False: there is no card. */
   reveal(label: string, value: string): boolean;
@@ -51,7 +55,6 @@ export const SETTINGS_OPS = {
     "get_team_rules",
     "update_team_rules",
     "restore_builtin_agents",
-    "forget_history",
   ],
   sshs3_agent_and_mcp_manage: [
     "save_runner",
@@ -110,20 +113,41 @@ export function isSettingsOp(tool: string, op: string): tool is SettingsTool {
   return Boolean(ops?.includes(op));
 }
 
-const str = (p: P, key: string): string | undefined => (typeof p[key] === "string" && (p[key] as string).trim() ? (p[key] as string).trim() : undefined);
+/**
+ * What a call gives under a name, or nothing. A value of the wrong kind is refused, not passed over:
+ * "false" where false was meant would leave a switch on while the card said it goes off.
+ */
+const given = (p: P, key: string): boolean => p[key] !== undefined && p[key] !== null;
+const str = (p: P, key: string): string | undefined => {
+  if (!given(p, key)) return undefined;
+  if (typeof p[key] !== "string") throw new Error(`"${key}" must be text.`);
+  return (p[key] as string).trim() || undefined;
+};
 const need = (p: P, key: string, op: string): string => {
   const value = str(p, key);
   if (!value) throw new Error(`${op} requires "${key}".`);
   return value;
 };
-const bool = (p: P, key: string): boolean | undefined => (typeof p[key] === "boolean" ? (p[key] as boolean) : undefined);
-const num = (p: P, key: string): number | undefined => (typeof p[key] === "number" && Number.isFinite(p[key] as number) ? (p[key] as number) : undefined);
+const bool = (p: P, key: string): boolean | undefined => {
+  if (!given(p, key)) return undefined;
+  if (typeof p[key] !== "boolean") throw new Error(`"${key}" must be true or false.`);
+  return p[key] as boolean;
+};
+const num = (p: P, key: string): number | undefined => {
+  if (!given(p, key)) return undefined;
+  if (typeof p[key] !== "number" || !Number.isFinite(p[key] as number)) throw new Error(`"${key}" must be a number.`);
+  return p[key] as number;
+};
 /** A list given as a list, or as one text with commas. */
 const list = (p: P, key: string): string[] | undefined => {
+  if (!given(p, key)) return undefined;
   const raw = p[key];
-  if (Array.isArray(raw)) return raw.map((x) => String(x).trim()).filter(Boolean);
-  if (typeof raw === "string" && raw.trim()) return raw.split(",").map((x) => x.trim()).filter(Boolean);
-  return undefined;
+  if (Array.isArray(raw)) {
+    if (raw.some((x) => typeof x !== "string")) throw new Error(`"${key}" must be a list of texts.`);
+    return (raw as string[]).map((x) => x.trim()).filter(Boolean);
+  }
+  if (typeof raw === "string") return raw.split(",").map((x) => x.trim()).filter(Boolean);
+  throw new Error(`"${key}" must be a list.`);
 };
 function oneOf<T extends string>(p: P, key: string, allowed: readonly T[], op: string): T | undefined {
   const value = str(p, key);
@@ -139,6 +163,7 @@ const service = (p: P, op: string): ChatServiceName => {
 };
 /** The servers a rule names: a list, or "*" for every server of the chat agent. */
 const servers = (p: P, key: string): string[] | "*" | undefined => {
+  if (!given(p, key)) return undefined;
   if (p[key] === "*") return "*";
   const names = list(p, key);
   if (!names) return undefined;
@@ -238,20 +263,121 @@ async function linkService(hub: AppActionHost, p: P, op: string): Promise<ChatSe
   );
 }
 
+/** The secrets of each operation: asked for on the card, and never taken from the call. */
+export const SECRET_PARAMS: Partial<Record<SettingsTool, Record<string, string[]>>> = {
+  sshs3_manage_app_and_settings: { save_model_profile: ["apiKey"] },
+  sshs3_manage_team_chat: { context_connect: ["token"], agent_connect: ["token", "appToken"] },
+  sshs3_manage_alerts_and_integrations: { save_notify_channel: ["url", "secret"], atlassian_connect: ["token"] },
+};
+
+/** What each operation reads, by the kind of value it must be. Everything else it reads is text. */
+const KINDS: Record<SettingsTool, { numbers: string[]; booleans: string[]; lists: string[] }> = {
+  sshs3_manage_app_and_settings: {
+    numbers: ["temperature", "maxOutputTokens", "contextWindowTokens", "freezeHours"],
+    booleans: ["requirePeerApprovalOnProd"],
+    lists: [],
+  },
+  sshs3_agent_and_mcp_manage: { numbers: ["expiresInDays", "port"], booleans: ["enabled"], lists: ["args", "scopes", "tools"] },
+  sshs3_manage_team_chat: {
+    numbers: ["days", "personNewPerHour", "personMessagesPerHour", "channelPerHour", "concurrentRuns", "monthlyTokenBudget", "approvalWaitMinutes"],
+    booleans: ["enabled", "forget", "selected", "dmsEnabled"],
+    lists: ["clusters", "historyFrom", "dmsClusters"],
+  },
+  sshs3_manage_alerts_and_integrations: {
+    numbers: ["reminderMinutes", "noiseBudgetPerHour", "intervalHours"],
+    booleans: ["enabled", "includeCommand", "closeOnApprove"],
+    lists: ["events", "projects", "exclude", "watchPaths"],
+  },
+};
+/** The text values each tool's operations read. A value under another name is not read at all. */
+const TEXTS: Record<SettingsTool, string[]> = {
+  sshs3_manage_app_and_settings: ["idOrName", "name", "provider", "model", "baseUrl", "apiProtocol", "reasoningEffort", "embeddingModel", "egressPolicy", "activeRole", "freezeCluster", "freezeWhy", "endFreeze"],
+  sshs3_agent_and_mcp_manage: ["idOrName", "name", "command", "cwd", "serverIdOrName", "toolName", "policy"],
+  sshs3_manage_team_chat: ["service", "baseUrl", "channel", "channelId", "channelName", "reach", "agentId", "approvers", "dmsUnlinked", "taskId", "as", "text", "thread", "chatUserId"],
+  sshs3_manage_alerts_and_integrations: ["idOrName", "kind", "name", "alertMinSeverity", "publicUrl", "product", "variant", "baseUrl", "email", "doneTransition", "serverIdOrName"],
+};
+
+/** A server named exactly: its id, its name or its host. A part of a name names nothing. */
+async function exactServer(hub: AppActionHost, query: string): Promise<WorkspaceServerSummary> {
+  const all = (await hub.collectExtraContext()).workspaceServers ?? [];
+  const found = all.find((x) => x.id === query) ?? all.find((x) => same(x.name, query)) ?? all.find((x) => same(x.host, query));
+  if (!found) throw new Error(`No server is called "${query}". Give its whole name, its id or its host.`);
+  return found;
+}
+
+/** How long the context bot keeps messages: a number of days, or 0 for "until somebody removes them". */
+function retentionDays(p: P, op: string): number {
+  const days = num(p, "days");
+  if (days === undefined || days < 0 || !Number.isInteger(days)) throw new Error(`${op} requires "days": a whole number of days, or 0 to keep messages until somebody removes them.`);
+  return days;
+}
+
 /**
- * Says what a call leaves out, before anybody is asked to approve it: a person should not be asked
- * about a change that then cannot be made. Throws what the model is told.
+ * Looks at a call before anybody is asked to approve it. A person is asked about exactly what will be
+ * done: so a call that would do something else than its card says is refused here, with what the
+ * model is told. That is a call from a run nobody sits at, one that carries a secret itself, one whose
+ * values are of the wrong kind, one that leaves out what the operation needs, and one that names a
+ * server by a part of its name.
  */
-export async function precheckSettingsOp(hub: AppActionHost, tool: SettingsTool, op: string, p: P): Promise<void> {
-  const missing = (REQUIRED[tool]?.[op] ?? []).filter((key) => p[key] === undefined || p[key] === null || p[key] === "");
+export async function precheckSettingsOp(hub: AppActionHost, tool: SettingsTool, op: string, p: P, task?: Pick<AgentTask, "ticketId" | "scheduleId" | "chat">): Promise<void> {
+  // The tool list already leaves these out for such a run. This holds also when a call arrives anyway.
+  if (task && (task.ticketId || task.scheduleId || task.chat))
+    throw new Error("sshs3's settings are changed from a conversation in the app, with the person there. This run works on its own.");
+
+  const secrets = SECRET_PARAMS[tool]?.[op] ?? [];
+  const carried = secrets.filter((key) => given(p, key));
+  if (carried.length)
+    throw new Error(
+      `Leave ${carried.map((k) => `"${k}"`).join(" and ")} out of the call. The person types it on the approval card, where it is not sent to the model. If they wrote it in this conversation, tell them it was sent to the model's provider and should be replaced.`,
+    );
+
+  const kinds = KINDS[tool];
+  for (const key of kinds.numbers) num(p, key);
+  for (const key of kinds.booleans) bool(p, key);
+  for (const key of kinds.lists) list(p, key);
+  for (const key of TEXTS[tool]) str(p, key);
+  for (const key of ["servers", "dmsServers"]) if (tool === "sshs3_manage_team_chat") servers(p, key);
+
+  const missing = (REQUIRED[tool]?.[op] ?? []).filter((key) => !given(p, key) || p[key] === "");
   if (missing.length) throw new Error(`${op} requires ${missing.map((k) => `"${k}"`).join(" and ")}.`);
-  if (tool === "sshs3_manage_team_chat" && (op === "link_code" || op === "unlink")) await linkService(hub, p, op);
-  if (tool === "sshs3_agent_and_mcp_manage" && op === "create_mcp_key") {
-    if (!str(p, "name") && !str(p, "idOrName")) throw new Error(`${op} requires "name".`);
-    keyTools(p, op);
+
+  if (tool === "sshs3_manage_team_chat") {
+    if (op === "link_code" || op === "unlink") await linkService(hub, p, op);
+    if (op === "context_retention") retentionDays(p, op);
+    if (op === "context_read_back" && num(p, "days") === undefined) throw new Error(`${op} requires "days".`);
   }
-  if (tool === "sshs3_agent_and_mcp_manage" && op === "set_local_mcp_server" && bool(p, "enabled") === undefined) throw new Error(`${op} requires "enabled": true or false.`);
-  if (tool === "sshs3_manage_alerts_and_integrations" && op === "alert_rules_save" && !Array.isArray(p.rules)) throw new Error(`${op} requires "rules": a list of { match, agent }. An empty list removes every rule.`);
+  if (tool === "sshs3_agent_and_mcp_manage") {
+    if (op === "create_mcp_key") {
+      // A model sometimes puts the new key's name where a thing is usually named: the card shows it as the name.
+      if (!str(p, "name") && str(p, "idOrName")) {
+        p.name = str(p, "idOrName");
+        delete p.idOrName;
+      }
+      if (!str(p, "name")) throw new Error(`${op} requires "name".`);
+      keyTools(p, op);
+      // The key is held to the server the card names, so the card names it whole.
+      const held = str(p, "serverIdOrName");
+      if (held) p.serverIdOrName = (await exactServer(hub, held)).name;
+    }
+    if (op === "set_local_mcp_server" && bool(p, "enabled") === undefined) throw new Error(`${op} requires "enabled": true or false.`);
+  }
+  if (tool === "sshs3_manage_alerts_and_integrations") {
+    if (op === "alert_rules_save" && !Array.isArray(p.rules)) throw new Error(`${op} requires "rules": a list of { match, agent }. An empty list removes every rule.`);
+    if (op === "facts_configure") {
+      // The card lists the servers by their whole names, as they are saved.
+      const exclude = list(p, "exclude");
+      if (exclude) p.exclude = await Promise.all(exclude.map(async (name) => (await exactServer(hub, name)).name));
+    }
+    if (op === "facts_collect_now") {
+      const one = str(p, "serverIdOrName");
+      if (one) {
+        const server = await exactServer(hub, one);
+        p.serverIdOrName = server.name;
+        const excluded = (await hub.request({ action: "snapshot" })).serverFacts?.exclude ?? [];
+        if (excluded.includes(server.id)) throw new Error(`${server.name} is on the list of servers nothing is collected from. Take it off the list first (facts_configure).`);
+      }
+    }
+  }
 }
 
 export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, op: string, p: P, ctx: SettingsCtx): Promise<unknown> {
@@ -327,25 +453,22 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       });
       return { ok: true, teamRules: snap.teamRules };
     }
-    if (op === "restore_builtin_agents") {
-      await hub.request({ action: "restore-builtins" });
-      return { ok: true, agents: hub.getAgentsList().map((a) => ({ id: a.id, name: a.name })) };
-    }
-    // forget_history
-    await hub.request({ action: "forget-history" });
-    return { ok: true };
+    // restore_builtin_agents
+    await hub.request({ action: "restore-builtins" });
+    return { ok: true, agents: hub.getAgentsList().map((a) => ({ id: a.id, name: a.name })) };
   }
 
   if (tool === "sshs3_agent_and_mcp_manage") {
     const runnerNamed = async (opName: string) => {
-      const query = str(p, "idOrName") ?? str(p, "id") ?? str(p, "name");
+      const query = str(p, "idOrName");
       if (!query) throw new Error(`${opName} requires "idOrName".`);
       const found = ((await snapshot()).externalRunners ?? []).find((r) => r.id === query || same(r.name, query));
       if (!found) throw new Error(`No external agent's program is called "${query}".`);
       return found;
     };
     if (op === "save_runner") {
-      const query = str(p, "idOrName") ?? str(p, "id");
+      // The card shows "idOrName": nothing else names the program that is replaced.
+      const query = str(p, "idOrName");
       const existing = query ? ((await snapshot()).externalRunners ?? []).find((r) => r.id === query || same(r.name, query)) : undefined;
       const name = str(p, "name") ?? existing?.name;
       const command = str(p, "command") ?? existing?.command;
@@ -384,12 +507,10 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
     if (op === "create_mcp_key") {
       const { scopes, tools } = keyTools(p, op);
       const serverQuery = str(p, "serverIdOrName");
-      const server = serverQuery ? await hub.resolveServerTarget(serverQuery) : undefined;
-      if (serverQuery && !server) throw new Error(`No server matches "${serverQuery}".`);
+      const server = serverQuery ? await exactServer(hub, serverQuery) : undefined;
       const snap = await hub.request({
         action: "mcp-key-create",
-        // A model sometimes puts the new key's name where a thing is usually named.
-        name: str(p, "name") ?? need(p, "idOrName", op),
+        name: need(p, "name", op),
         scopes,
         ...(server ? { serverId: server.id } : {}),
         ...(num(p, "expiresInDays") !== undefined ? { expiresInDays: num(p, "expiresInDays") } : {}),
@@ -407,8 +528,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       };
     }
     if (op === "revoke_mcp_key") {
-      const query = str(p, "idOrName") ?? str(p, "id") ?? str(p, "name");
-      if (!query) throw new Error(`${op} requires "idOrName".`);
+      const query = need(p, "idOrName", op);
       const keys = (((await hub.request({ action: "mcp-key-list" })).localMcp?.keys ?? []) as Array<{ id?: string; name?: string }>).filter((k) => k && typeof k === "object");
       const found = keys.find((k) => k.id === query || (k.name !== undefined && same(k.name, query)));
       if (!found?.id) throw new Error(`No key is called "${query}".`);
@@ -493,9 +613,10 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       return { ok: true, forgot: channel ? channel.name : `everything read in ${svc}` };
     }
     if (op === "context_retention") {
-      const days = num(p, "days");
-      const snap = await hub.request({ action: "chat-retention", ...(days !== undefined ? { days } : {}) });
-      return { ok: true, retentionDays: snap.chatSources?.retentionDays ?? null };
+      const days = retentionDays(p, op);
+      // 0 is "until somebody removes them": the request says that by leaving the days out.
+      const snap = await hub.request({ action: "chat-retention", ...(days > 0 ? { days } : {}) });
+      return { ok: true, retentionDays: snap.chatSources?.retentionDays ?? "kept until somebody removes them" };
     }
     if (op === "agent_connect") {
       const svc = service(p, op);
@@ -621,7 +742,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
 
   // sshs3_manage_alerts_and_integrations
   const notifyChannel = async (opName: string) => {
-    const query = str(p, "idOrName") ?? str(p, "id") ?? str(p, "name");
+    const query = str(p, "idOrName");
     if (!query) throw new Error(`${opName} requires "idOrName".`);
     const found = ((await snapshot()).notifications?.channels ?? []).find((c) => c.id === query || same(c.name, query));
     if (!found) throw new Error(`No notification channel is called "${query}".`);
@@ -634,12 +755,21 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       // Addresses and tokens are not in any of these: only whether one is saved.
       notifications: snap.notifications ? { ...snap.notifications, channels: snap.notifications.channels.map(channelForModel) } : null,
       atlassian: snap.atlassian ?? null,
-      serverFacts: snap.serverFacts ? { enabled: snap.serverFacts.enabled, intervalHours: snap.serverFacts.intervalHours, exclude: snap.serverFacts.exclude, watchPaths: snap.serverFacts.watchPaths } : null,
+      // The excluded servers by name, as facts_configure takes them back.
+      serverFacts: snap.serverFacts
+        ? {
+            enabled: snap.serverFacts.enabled,
+            intervalHours: snap.serverFacts.intervalHours,
+            exclude: snap.serverFacts.exclude.map((id) => (snap.workspaceServers ?? []).find((x) => x.id === id)?.name ?? id),
+            watchPaths: snap.serverFacts.watchPaths,
+          }
+        : null,
       alertIntake: snap.alertIntake ?? null,
     };
   }
   if (op === "save_notify_channel") {
-    const query = str(p, "idOrName") ?? str(p, "id");
+    // The card shows "idOrName": nothing else names the channel that is changed.
+    const query = str(p, "idOrName");
     const existing = query ? ((await snapshot()).notifications?.channels ?? []).find((c) => c.id === query || same(c.name, query)) : undefined;
     if (query && !existing) throw new Error(`No notification channel is called "${query}". Leave "idOrName" out to add one.`);
     const kind = oneOf(p, "kind", NOTIFY_KINDS, op) ?? existing?.kind;
@@ -713,8 +843,10 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       ...(str(p, "email") ?? had?.email ? { email: str(p, "email") ?? had?.email } : {}),
       ...(token ? { token } : {}),
       ...(list(p, "projects") ? { projects: list(p, "projects") } : {}),
-      ...(str(p, "doneTransition") ? { doneTransition: str(p, "doneTransition") } : {}),
-      ...(bool(p, "closeOnApprove") !== undefined ? { closeOnApprove: bool(p, "closeOnApprove") } : {}),
+      // What the call does not name stays as it is: the request itself would clear the transition
+      // and switch closing back on.
+      ...(str(p, "doneTransition") ?? had?.doneTransition ? { doneTransition: str(p, "doneTransition") ?? had?.doneTransition } : {}),
+      closeOnApprove: bool(p, "closeOnApprove") ?? had?.closeOnApprove ?? true,
     };
     const snap = await hub.request({ action: "atlassian-save", connection });
     return { ok: true, connection: snap.atlassian?.[which] ?? null };
@@ -733,21 +865,24 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
     return { ok: true };
   }
   if (op === "facts_configure") {
+    // The list is kept by server id; the call and its card name servers by their whole names.
+    const excluded = list(p, "exclude");
+    const excludeIds = excluded ? await Promise.all(excluded.map(async (name) => (await exactServer(hub, name)).id)) : undefined;
     const change = {
       ...(bool(p, "enabled") !== undefined ? { enabled: bool(p, "enabled") } : {}),
       ...(num(p, "intervalHours") !== undefined ? { intervalHours: num(p, "intervalHours") } : {}),
-      ...(list(p, "exclude") ? { exclude: list(p, "exclude") } : {}),
+      ...(excludeIds ? { exclude: excludeIds } : {}),
       ...(list(p, "watchPaths") ? { watchPaths: list(p, "watchPaths") } : {}),
     };
     if (!Object.keys(change).length) throw new Error(`${op} takes "enabled", "intervalHours", "exclude" or "watchPaths".`);
     const snap = await hub.request({ action: "facts-configure", ...change });
     const facts = snap.serverFacts;
-    return { ok: true, serverFacts: facts ? { enabled: facts.enabled, intervalHours: facts.intervalHours, exclude: facts.exclude, watchPaths: facts.watchPaths } : null };
+    const names = new Map(((await hub.collectExtraContext()).workspaceServers ?? []).map((x) => [x.id, x.name]));
+    return { ok: true, serverFacts: facts ? { enabled: facts.enabled, intervalHours: facts.intervalHours, exclude: facts.exclude.map((id) => names.get(id) ?? id), watchPaths: facts.watchPaths } : null };
   }
   if (op === "facts_collect_now") {
     const query = str(p, "serverIdOrName");
-    const server = query ? await hub.resolveServerTarget(query) : undefined;
-    if (query && !server) throw new Error(`No server matches "${query}".`);
+    const server = query ? await exactServer(hub, query) : undefined;
     await hub.request({ action: "facts-collect-now", ...(server ? { serverId: server.id } : {}) });
     return { ok: true, collecting: server ? server.name : "every server that is not excluded" };
   }
