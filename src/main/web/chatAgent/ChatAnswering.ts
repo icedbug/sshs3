@@ -638,8 +638,9 @@ export class ChatAnswering implements ChatAnsweringBackend {
   private async tryIt(userId: string, name: string, request: Extract<ChatAnsweringRequest, { action: 'chat-answering-try' }>): Promise<ChatTryResult> {
     if (!this.started) throw new Error('The agent bot is not running.');
     if (!this.mayTry()) throw new Error('"Try it" is for the demo, or for before the agent bot is connected. Now ask the agent bot in your chat.');
+    const interaction = request.interaction;
     const text = typeof request.text === 'string' ? request.text.trim() : '';
-    if (!text) throw new Error('Write something for the agent bot.');
+    if (!text && !interaction) throw new Error('Write something for the agent bot.');
     const dm = request.channel === 'dm';
     const channelId = dm ? '' : String(request.channel ?? '').trim();
     if (!dm && !/^[A-Za-z0-9_-]{1,64}$/.test(channelId)) throw new Error('Choose a channel the agent bot answers in, or "dm" for a direct message.');
@@ -660,8 +661,20 @@ export class ChatAnswering implements ChatAnsweringBackend {
     const thread = typeof request.thread === 'string' && request.thread.trim() ? request.thread.trim() : undefined;
     if (thread && !trial.chat.posts.get(thread)) throw new Error('That thread is not in the tried chat. Start a new one.');
     const from = trial.chat.log.length;
-    const said = trial.chat.say(channel, chatUser, clip(text, 4000), { dm, ...(thread && !dm ? { thread } : {}) });
-    // The message is handed on after this turn, as a socket would: wait for it to be handled.
+    let said: string | undefined;
+    if (interaction) {
+      const targetPost = trial.chat.posts.get(interaction.postId);
+      if (!targetPost) throw new Error('That card or message is not in the tried chat.');
+      if (interaction.kind === 'click') {
+        trial.chat.click(interaction.postId, interaction.action, chatUser);
+      } else {
+        trial.chat.react(interaction.postId, interaction.emoji, chatUser);
+      }
+      said = targetPost.threadId ?? targetPost.id;
+    } else {
+      said = trial.chat.say(channel, chatUser, clip(text, 4000), { dm, ...(thread && !dm ? { thread } : {}) });
+    }
+    // The message or interaction is handed on after this turn, as a socket would: wait for it to be handled.
     await new Promise((resolve) => setImmediate(resolve));
     await Promise.allSettled([...trial.pending]);
     const threadId = dm ? DM_THREAD : (thread ?? said);
@@ -670,6 +683,7 @@ export class ChatAnswering implements ChatAnsweringBackend {
     const privateNotes: string[] = [];
     for (const entry of trial.chat.log.slice(from)) {
       if (entry.op === 'post') ids.add(entry.post.id);
+      else if (entry.op === 'edit') ids.add(entry.postId);
       else if (entry.op === 'ephemeral' && entry.userId === chatUser) privateNotes.push(entry.text);
     }
     // The cards in the thread that still wait for an answer: the page says how they are answered.

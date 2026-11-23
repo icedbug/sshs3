@@ -4735,3 +4735,93 @@
     padding: 8px;
   }
 }
+
+/* Persistent demo lab scenario bar and simulation UX helpers */
+.ai-scenario-bar {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ai-line);
+  background: var(--ai-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-scenario-bar-running {
+  background: var(--ai-surface-2);
+  border-bottom-color: var(--ai-accent-line);
+}
+
+.ai-scenario-bar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-scenario-bar-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ai-scenario-bar-title {
+  font-size: 12.5px;
+  color: var(--ai-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-scenario-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ai-scenario-bar-drawer {
+  border-top: 1px solid var(--ai-line);
+  padding-top: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-scenario-replay {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-scenario-replay .ai-code-pre {
+  margin: 0;
+  max-height: 150px;
+  overflow: auto;
+  font-size: 11.5px;
+}
+
+.ai-tag-list {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: 6px;
+}
+
+.ai-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ai-row-incident {
+  border-left: 3px solid var(--ai-danger);
+  padding-left: 9px;
+  background: var(--ai-accent-soft);
+}

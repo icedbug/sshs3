@@ -156,6 +156,7 @@ export class ChatBridge {
           bot: c.bot,
           workspace: c.workspace,
           lastError: c.lastError,
+          ...(c.simulated ? { simulated: true } : {}),
           channels: this.index.list(service).map((ch) => ({
             id: ch.id,
             name: ch.name,

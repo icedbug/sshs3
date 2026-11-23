@@ -115,6 +115,11 @@ export function DependencyLinks({
         </button>
       </div>
 
+      {hub.demoMode && (
+        <p className="ai-hint" data-testid="deps-demo-notice">
+          Demo lab: seeded links describe the simulated servers in this demo workspace.
+        </p>
+      )}
       {open && (
         <form
           className="ai-form"

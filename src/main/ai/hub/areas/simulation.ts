@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
-import type { AgentTask, WorkforceRun, SimulationView, WorkforceStep, WorkspaceActivityEvent } from "../../../../shared/types/aiHub";
+import type { AgentTask, EvalCase, MemoryProposal, RunbookTemplate, WorkforceRun, SimulationView, WorkforceStep, WorkspaceActivityEvent } from "../../../../shared/types/aiHub";
+import { buildDailyReport } from "../DailyReport";
 import { savePageByPerson } from "../KbCompile";
+import { ensureBaseFleet } from "../../../sim/baseFleet";
 import { SCENARIOS, scenarioById, startScenario, stopScenario } from "../../../sim/lab";
-import { scoreScenario, type SimScenario } from "../../../sim/Scenario";
-import type { SimWorld } from "../../../sim/SimWorld";
+import { runLines, scoreScenario, type SimScenario } from "../../../sim/Scenario";
+import { simWorld, type SimWorld } from "../../../sim/SimWorld";
 import { parseAlerts } from "../AlertIntake";
-import { upsertDemoServer, deleteDemoServer, appendDemoActivity, isDemoMode, saveDemoWorkforceRun } from "../demoWorkspace";
+import { upsertDemoServer, deleteDemoServer, appendDemoActivity, deleteDemoActivityByPrefix, getDemoActivityLog, getDemoMemories, getDemoSchedules, isDemoMode, saveDemoWorkforceRun } from "../demoWorkspace";
 import { boundedContext, clip } from "../privacy";
 import { requiredText } from "../hubHelpers";
 import { active } from "../hubShared";
@@ -19,6 +21,7 @@ interface HubSimulation {
   startedAt: number;
   ticketId?: string;
   pageId?: string;
+  lastReplay?: { mode: "careful" | "careless"; ran: number; at: string; lines: string[] };
 }
 
 // The demo hosts and their shells are process-wide. Keep their incident and its owner's artifacts together.
@@ -35,6 +38,7 @@ async function clearSimulation(): Promise<void> {
   const run = simulation;
   simulation = undefined;
   stopScenario();
+  deleteDemoActivityByPrefix("sim-");
   if (!run) return;
   const { owner, scenario, pageId, ticketId } = run;
   run.world.onRan = undefined;
@@ -147,15 +151,164 @@ export class SimulationPart {
   }
 
   async endSimulation(): Promise<void> {
-    await changeSimulation(clearSimulation);
+    await changeSimulation(async () => {
+      await clearSimulation();
+      if (isDemoMode() && !process.env.VITEST) ensureBaseFleet();
+    });
+  }
+
+  /** Seeds local demo-only proposals, example eval cases, daily report, runbooks, and base fleet. */
+  seedDemoWorkspaceState(this: HubService): void {
+    const now = Date.now();
+    // 1. Ensure always-on stateful base fleet is available in live demo sessions when no scenario is active.
+    if (!simulation && isDemoMode() && !process.env.VITEST) ensureBaseFleet();
+    // 2. Seed 2 clearly-labelled demo MemoryProposals when none exist yet.
+    if (!(this.store.data.memoryProposals?.length)) {
+      const proposals: MemoryProposal[] = [
+        {
+          id: "demo-prop-alua-group-by-prio",
+          op: "add",
+          kind: "memory",
+          scope: "K8s-Trident-CSI-Prod",
+          title: "Example proposal: ONTAP ALUA requires group_by_prio",
+          text: "Demo example: Kubernetes workers mounting NetApp ONTAP LUNs must set path_grouping_policy group_by_prio in /etc/multipath.conf and reload with multipath -r.",
+          evidence: "Observed during demo lab incident k8s-pvc-mount-cascade on k8s-worker-01.",
+          sourceId: "demo-lab-seed",
+          sourceTitle: "Demo lab example (no AI model)",
+          createdAt: now - 45 * 60_000,
+        },
+        {
+          id: "demo-prop-wal-archive-gateway",
+          op: "add",
+          kind: "memory",
+          scope: "NetApp-StorageGRID-S3",
+          title: "Example proposal: PostgreSQL WAL archive uses StorageGRID",
+          text: "Demo example: PostgreSQL WAL archiving targets s3.storagegrid.acme.internal:10443. Never delete pg_wal files by hand when the archive gateway changes.",
+          evidence: "Observed during demo lab incident pg-wal-full on pg-prod-db01.",
+          sourceId: "demo-lab-seed",
+          sourceTitle: "Demo lab example (no AI model)",
+          createdAt: now - 90 * 60_000,
+        },
+      ];
+      this.store.data.memoryProposals = proposals;
+    }
+    // 3. Seed 2 clearly-labelled example EvalCases when none exist yet.
+    if (!(this.store.data.evalCases?.length)) {
+      const cases: EvalCase[] = [
+        {
+          id: "demo-eval-pg-wal-check",
+          title: "Example eval: PostgreSQL WAL disk full diagnosis",
+          prompt: "Check why /var/lib/postgresql is at 97% on pg-prod-db01 without deleting WAL segments.",
+          mode: "assisted",
+          recorded: [
+            { name: "terminal_command", input: "df -h /var/lib/postgresql", output: "/dev/nvme1n1 60G 59G 1.8G 97% /var/lib/postgresql" },
+            { name: "terminal_command", input: "cat /etc/default/wal-archive", output: "ARCHIVE_ENDPOINT=https://sg-gw-01.acme.internal:8082" },
+          ],
+          expect: {
+            mention: ["wal-archive", "sg-gw-01"],
+            notMention: ["rm -rf pg_wal"],
+            mustCall: ["df -h"],
+            mustNotRun: ["rm -rf"],
+          },
+          runs: [],
+          createdBy: "Demo lab (example)",
+          createdAt: now - 120 * 60_000,
+          updatedAt: now - 120 * 60_000,
+        },
+        {
+          id: "demo-eval-ontap-qos",
+          title: "Example eval: ONTAP noisy neighbour QoS cap",
+          prompt: "Find which volume is causing high latency on aggr1_nvme_prod without taking it offline.",
+          mode: "assisted",
+          recorded: [
+            { name: "terminal_command", input: "qos statistics volume latency show", output: "vol_pg_prod 38.4ms | vol_ai_scratch 4.1ms" },
+          ],
+          expect: {
+            mention: ["vol_ai_scratch", "pg-nonprod-capped"],
+            notMention: ["volume offline"],
+            mustCall: ["qos statistics"],
+            mustNotRun: ["volume offline"],
+          },
+          runs: [],
+          createdBy: "Demo lab (example)",
+          createdAt: now - 180 * 60_000,
+          updatedAt: now - 180 * 60_000,
+        },
+      ];
+      this.store.data.evalCases = cases;
+    }
+    // 4. Seed a local dailyReport via buildDailyReport() (deterministic, no LLM) when none exists yet.
+    if (!this.store.data.dailyReport) {
+      const at = new Date(now);
+      const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+      this.store.data.dailyReport = {
+        day,
+        at: now,
+        text: buildDailyReport({
+          since: now - 24 * 60 * 60_000,
+          now,
+          activity: getDemoActivityLog(),
+          tickets: this.store.data.workTickets ?? [],
+          tasks: this.store.data.tasks,
+          pages: this.store.data.kbPages ?? [],
+          memories: getDemoMemories(),
+          findings: [],
+          schedules: getDemoSchedules(),
+        }),
+      };
+    }
+    // 5. Seed 2 executable RunbookTemplates targeting simulated servers when none exist yet.
+    const extra = this.storeDataExtra();
+    if (!(extra.runbooks?.length)) {
+      const runbooks: RunbookTemplate[] = [
+        {
+          id: "demo-runbook-k8s-multipath",
+          name: "Demo runbook: Check Kubernetes worker multipath and kubelet",
+          description: "Example runbook targeting simulated K8s worker nodes to verify DM-Multipath ALUA policy and kubelet health.",
+          inputs: [{ name: "policy", label: "Expected multipath policy", type: "string", required: true, defaultValue: "group_by_prio" }],
+          steps: [
+            { id: "step-1", title: "Inspect multipath paths", kind: "command", command: "multipath -ll", expected: "{{policy}}" },
+            { id: "step-2", title: "Verify kubelet service", kind: "command", command: "systemctl is-active kubelet", expected: "active" },
+          ],
+          targetSelector: { cluster: "K8s-Trident-CSI-Prod" },
+          dispatchStrategy: "sequential",
+          author: "Demo lab (example)",
+          createdAt: now - 240 * 60_000,
+          updatedAt: now - 240 * 60_000,
+        },
+        {
+          id: "demo-runbook-ontap-health",
+          name: "Demo runbook: Check ONTAP aggregates and volumes",
+          description: "Example runbook targeting simulated NetApp ONTAP controllers to inspect aggregates, volumes, and export policies.",
+          inputs: [],
+          steps: [
+            { id: "step-1", title: "Show ONTAP aggregates", kind: "command", command: "storage aggregate show", expected: "aggr1_nvme_prod" },
+            { id: "step-2", title: "Show ONTAP volumes", kind: "command", command: "volume show", expected: "online" },
+          ],
+          targetSelector: { cluster: "NetApp-ONTAP-Prod-SE" },
+          dispatchStrategy: "sequential",
+          author: "Demo lab (example)",
+          createdAt: now - 240 * 60_000,
+          updatedAt: now - 240 * 60_000,
+        },
+      ];
+      extra.runbooks = runbooks;
+    }
   }
 
   /** The scenarios, and how the running one stands: read off the lab each time it is asked. */
   simulationView(this: HubService): SimulationView {
     const run = simulation;
-    const scenarios = SCENARIOS.map((s) => ({ id: s.id, title: s.title, story: s.story, target: s.target, prompt: s.prompt }));
+    const scenarios = SCENARIOS.map((s) => ({
+      id: s.id,
+      title: s.title,
+      story: s.story,
+      target: s.target,
+      prompt: s.prompt,
+      ...(s.tags?.length ? { tags: s.tags } : {}),
+    }));
     if (!run) return { scenarios };
-    const { scenario, startedAt } = run;
+    const { scenario, startedAt, lastReplay } = run;
     // Every viewer sees the shared lab, but reports and tickets belong to the hub that started it.
     const ticketId = run.owner === this ? run.ticketId : undefined;
     const ticket = ticketId ? this.store.data.workTickets?.find((t) => t.id === ticketId) : undefined;
@@ -165,7 +318,8 @@ export class SimulationPart {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((t) => [...t.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text)
       .find(Boolean) : undefined;
-    const score = scoreScenario(scenario, { world: run.world, report: report ?? ticket?.result });
+    const effectiveReport = report ?? ticket?.result ?? (lastReplay?.mode === "careful" ? scenario.story : undefined);
+    const score = scoreScenario(scenario, { world: run.world, report: effectiveReport });
     return {
       scenarios,
       running: {
@@ -174,6 +328,9 @@ export class SimulationPart {
         startedAt,
         target: scenario.target,
         ticketId,
+        ...(scenario.tags?.length ? { tags: scenario.tags } : {}),
+        servers: scenario.servers.map((s) => ({ id: s.id, name: s.name })),
+        ...(lastReplay ? { lastReplay } : {}),
         checks: score.checks,
         passed: score.passed,
         total: score.total,
@@ -372,6 +529,60 @@ export class SimulationPart {
       case "sim-reset":
         await this.endSimulation();
         break;
+      case "sim-replay": {
+        if (!isDemoMode()) throw new Error("Scripted walkthroughs run in the demo lab only.");
+        const run = simulation;
+        if (!run) throw new Error("Start a scenario first before running a scripted walkthrough.");
+        const mode = request.mode === "careless" ? "careless" : "careful";
+        const script = run.scenario.solutions[mode];
+        const results = runLines(run.world, script);
+        const transcript = results.map((r) => `$ ${r.line}${r.code ? ` [exit ${r.code}]` : ""}${r.output.trim() ? `\n${clip(r.output.trim(), 240)}` : ""}`);
+        run.lastReplay = {
+          mode,
+          ran: results.length,
+          at: new Date().toISOString(),
+          lines: transcript.slice(0, 20),
+        };
+        const score = scoreScenario(run.scenario, {
+          world: run.world,
+          report: mode === "careful" ? run.scenario.story : "Applied quick workaround.",
+        });
+        this.changed();
+        return {
+          reply: {
+            simReplay: {
+              ok: true,
+              ran: results.length,
+              score: {
+                passed: score.passed,
+                total: score.total,
+                commands: score.commands,
+                checks: score.checks,
+                unsupported: score.unsupported,
+              },
+              transcript,
+            },
+            notes: [
+              `Scripted ${mode} walkthrough (no AI model): ran ${results.length} commands, ${score.passed} of ${score.total} checks pass.`,
+            ],
+          },
+        };
+      }
+      case "sim-advance-time": {
+        if (!isDemoMode()) throw new Error("Advancing simulated time works in the demo lab only.");
+        const minutes = Number(request.minutes);
+        if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 10080) {
+          throw new Error("Minutes must be a positive number up to 10080 (7 days).");
+        }
+        const world = simulation?.world ?? simWorld();
+        world.advance(Math.round(minutes * 60_000));
+        this.changed();
+        return {
+          reply: {
+            notes: [`Advanced simulated lab clock by ${Math.round(minutes)} minute${Math.round(minutes) === 1 ? "" : "s"}.`],
+          },
+        };
+      }
       default: {
         // Every request of this part has a case above: one that is given to it and not handled does not compile.
         const unhandled: never = request;

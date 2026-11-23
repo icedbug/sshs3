@@ -154,4 +154,136 @@ const nc: SimCommand = (ctx, args) => {
   return { out: "", err: flags.has("v") ? `Connection to ${name} (${got.address}) ${port} port [tcp/*] succeeded!\n` : "", code: 0 };
 };
 
-export const netCommands: Record<string, SimCommand> = { curl, getent, host: hostCmd, nslookup, dig, ping, nc, wget: () => { throw new NotSimulated("wget (use curl)"); } };
+/** Runs a command on another host in the same SimWorld: `ssh [opts] [user@]host command...`. */
+const ssh: SimCommand = (ctx, args) => {
+  const world = ctx.shell.world;
+  const valueFlags = new Set(["-o", "-i", "-p", "-l", "-F", "-J", "-W", "-c", "-b", "-m", "-S", "-E", "-D", "-L", "-R"]);
+  let idx = 0;
+  while (idx < args.length && args[idx].startsWith("-")) {
+    const a = args[idx];
+    if (a === "--") {
+      idx += 1;
+      break;
+    }
+    if (valueFlags.has(a)) idx += 2;
+    else idx += 1;
+  }
+  const dest = args[idx];
+  if (!dest) return fail("usage: ssh [options] [user@]hostname [command]\n", 255);
+  const cmdParts = args.slice(idx + 1);
+  const targetRef = dest.includes("@") ? dest.slice(dest.indexOf("@") + 1) : dest;
+  const address = lookup(ctx, targetRef);
+  if (!address) return fail(`ssh: Could not resolve hostname ${targetRef}: Name or service not known\n`, 255);
+  const target = world?.host(targetRef, address);
+  if (!target) return fail(`ssh: connect to host ${targetRef} port 22: Connection refused\n`, 255);
+  if (!cmdParts.length) return fail(`Pseudo-terminal will not be allocated because stdin is not a terminal.\nUse: ssh ${dest} '<command>'\n`, 1);
+  const remoteLine = cmdParts.length === 1 ? cmdParts[0] : cmdParts.map((part) => (/[\s"'$`\\|&;<>()[\]*?~]/.test(part) ? `'${part.replace(/'/g, "'\\''")}'` : part)).join(" ");
+  const remoteShell = world!.shell(target);
+  const res = remoteShell.run(remoteLine);
+  return { out: res.output, err: "", code: res.code };
+};
+
+interface FirewallFact {
+  active: boolean;
+  allow: string[];
+}
+
+const firewallRulesOf = (host: SimHost): { active: boolean; allow: string[] } => {
+  const fw = host.facts.get("ufw") as FirewallFact | undefined;
+  if (fw && typeof fw.active === "boolean" && Array.isArray(fw.allow)) return fw;
+  const ports = host.listening().map((l) => `${l.port}/${l.proto}`);
+  return { active: false, allow: [...new Set(ports)] };
+};
+
+const iptables: SimCommand = (ctx, args) => {
+  if (!ctx.root) return fail("iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Permission denied (you must be root)\n", 4);
+  const { flags, values } = parseArgs(args, ["t", "table"]);
+  const table = values.get("t") ?? values.get("table") ?? "filter";
+  const fw = firewallRulesOf(ctx.host);
+  const showS = flags.has("S");
+  const showL = flags.has("L");
+  if (!showS && !showL) throw new NotSimulated(`iptables ${args.join(" ")}`);
+  if (table !== "filter") {
+    return ok(showS ? "-P PREROUTING ACCEPT\n-P INPUT ACCEPT\n-P OUTPUT ACCEPT\n-P POSTROUTING ACCEPT\n" : "Chain PREROUTING (policy ACCEPT)\nChain INPUT (policy ACCEPT)\nChain OUTPUT (policy ACCEPT)\nChain POSTROUTING (policy ACCEPT)\n");
+  }
+  const policy = fw.active ? "DROP" : "ACCEPT";
+  if (showS) {
+    const out = [
+      `-P INPUT ${policy}`,
+      "-P FORWARD DROP",
+      "-P OUTPUT ACCEPT",
+      "-A INPUT -i lo -j ACCEPT",
+      "-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+    ];
+    if (fw.active) {
+      for (const r of fw.allow) {
+        const [port, proto = "tcp"] = r.split("/");
+        out.push(`-A INPUT -p ${proto} --dport ${port} -j ACCEPT`);
+      }
+    }
+    return ok(lines(out));
+  }
+  const out = [
+    `Chain INPUT (policy ${policy})`,
+    "target     prot opt source               destination",
+    "ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0",
+    "ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0            ctstate RELATED,ESTABLISHED",
+  ];
+  if (fw.active) {
+    for (const r of fw.allow) {
+      const [port, proto = "tcp"] = r.split("/");
+      out.push(`ACCEPT     ${proto.padEnd(4)} --  0.0.0.0/0            0.0.0.0/0            ${proto} dpt:${port}`);
+    }
+  }
+  out.push("", "Chain FORWARD (policy DROP)", "target     prot opt source               destination", "", "Chain OUTPUT (policy ACCEPT)", "target     prot opt source               destination");
+  return ok(lines(out));
+};
+
+const nft: SimCommand = (ctx, args) => {
+  if (!ctx.root) return fail("Operation not permitted (you must be root)\n", 1);
+  const sub = args.join(" ").trim();
+  if (sub === "list tables") return ok("table inet filter\n");
+  if (sub !== "list ruleset" && !sub.startsWith("list table")) throw new NotSimulated(`nft ${sub}`);
+  const fw = firewallRulesOf(ctx.host);
+  const policy = fw.active ? "drop" : "accept";
+  const allowLines = fw.active
+    ? fw.allow.map((r) => {
+        const [port, proto = "tcp"] = r.split("/");
+        return `        ${proto} dport ${port} accept`;
+      })
+    : [];
+  return ok(
+    lines([
+      "table inet filter {",
+      "    chain input {",
+      `        type filter hook input priority 0; policy ${policy};`,
+      "        iifname \"lo\" accept",
+      "        ct state established,related accept",
+      ...allowLines,
+      "    }",
+      "    chain forward {",
+      "        type filter hook forward priority 0; policy drop;",
+      "    }",
+      "    chain output {",
+      "        type filter hook output priority 0; policy accept;",
+      "    }",
+      "}",
+    ]),
+  );
+};
+
+export const netCommands: Record<string, SimCommand> = {
+  curl,
+  getent,
+  host: hostCmd,
+  nslookup,
+  dig,
+  ping,
+  nc,
+  ssh,
+  iptables,
+  nft,
+  wget: () => {
+    throw new NotSimulated("wget (use curl)");
+  },
+};

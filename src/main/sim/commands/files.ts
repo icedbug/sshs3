@@ -1589,6 +1589,7 @@ const find: SimCommand = (ctx, args) => {
   let minDepth = 0;
   let remove = false;
   let nul = false;
+  let printfFmt: string | undefined;
   let negate = false;
   const add = (test: (seen: Seen) => boolean): void => {
     const flipped = negate;
@@ -1653,6 +1654,7 @@ const find: SimCommand = (ctx, args) => {
       } else if (word === "-empty") add((seen) => (seen.entry.dir ? ctx.host.list(seen.entry.path).length === 0 : seen.entry.size === 0));
       else if (word === "-print") add(() => true);
       else if (word === "-print0") nul = true;
+      else if (word === "-printf") printfFmt = value(word);
       else if (word === "-delete") remove = true;
       else if (word === "-depth" || word === "-xdev" || word === "-mount" || word === "-noleaf") continue;
       else if (word === "-exec" || word === "-execdir" || word === "-ok") throw new NotSimulated("find -exec");
@@ -1662,6 +1664,30 @@ const find: SimCommand = (ctx, args) => {
     if (error instanceof Complaint) return fail(`find: ${error.message}\n`, 1);
     throw error;
   }
+  const formatPrintf = (fmt: string, seen: Seen): string => {
+    const d = new Date(seen.entry.mtime);
+    const pad2 = (n: number): string => String(n).padStart(2, "0");
+    return fmt
+      .replace(/\\([nt\\])/g, (_m, c: string) => (c === "n" ? "\n" : c === "t" ? "\t" : "\\"))
+      .replace(/%(%|p|f|h|s|m|u|y|T@|TY|Tm|Td|TH|TM|TS)/g, (_m, tok: string) => {
+        if (tok === "%") return "%";
+        if (tok === "p") return seen.shown;
+        if (tok === "f") return seen.entry.path === "/" ? "/" : basename(seen.entry.path);
+        if (tok === "h") return seen.shown.includes("/") ? seen.shown.slice(0, seen.shown.lastIndexOf("/")) || "/" : ".";
+        if (tok === "s") return String(seen.entry.size);
+        if (tok === "m") return (seen.entry.mode & 0o7777).toString(8);
+        if (tok === "u") return seen.entry.owner;
+        if (tok === "y") return seen.entry.dir ? "d" : "f";
+        if (tok === "T@") return (seen.entry.mtime / 1000).toFixed(2);
+        if (tok === "TY") return String(d.getUTCFullYear());
+        if (tok === "Tm") return pad2(d.getUTCMonth() + 1);
+        if (tok === "Td") return pad2(d.getUTCDate());
+        if (tok === "TH") return pad2(d.getUTCHours());
+        if (tok === "TM") return pad2(d.getUTCMinutes());
+        if (tok === "TS") return pad2(d.getUTCSeconds());
+        return `%${tok}`;
+      });
+  };
   const out: string[] = [];
   for (const start of starts) {
     const top = abs(ctx, start);
@@ -1672,7 +1698,7 @@ const find: SimCommand = (ctx, args) => {
     for (const seen of tree(ctx, top, start, remove, maxDepth)) {
       if (seen.depth < minDepth || !groups.some((group) => group.every((test) => test(seen)))) continue;
       if (!remove) {
-        out.push(seen.shown);
+        out.push(printfFmt !== undefined ? formatPrintf(printfFmt, seen) : seen.shown);
         continue;
       }
       if (seen.entry.dir && ctx.host.list(seen.entry.path).length) err.push(`find: cannot delete '${seen.shown}': Directory not empty`);
@@ -1680,7 +1706,7 @@ const find: SimCommand = (ctx, args) => {
       else if (seen.entry.path !== "/") ctx.host.remove(seen.entry.path);
     }
   }
-  return { out: nul ? out.map((path) => `${path}\u0000`).join("") : lines(out), err: lines(err), code: err.length ? 1 : 0 };
+  return { out: printfFmt !== undefined ? out.join("") : nul ? out.map((path) => `${path}\u0000`).join("") : lines(out), err: lines(err), code: err.length ? 1 : 0 };
 };
 
 const du: SimCommand = (ctx, args) => {
@@ -2428,6 +2454,284 @@ const testAs =
     }
   };
 
+// ---- jq, xargs, column ---------------------------------------------------------
+
+function jqEvalExpr(values: unknown[], expr: string): unknown[] {
+  const trimmed = expr.trim();
+  if (!trimmed || trimmed === ".") return values;
+  // Split on top-level pipes `|`, respecting quotes and parentheses.
+  const stages: string[] = [];
+  let cur = "";
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (quote) {
+      cur += ch;
+      if (ch === "\\" && i + 1 < trimmed.length) {
+        cur += trimmed[++i];
+      } else if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === "\"" || ch === "'") {
+      quote = ch;
+      cur += ch;
+    } else if (ch === "(" || ch === "[") {
+      depth += 1;
+      cur += ch;
+    } else if (ch === ")" || ch === "]") {
+      depth = Math.max(0, depth - 1);
+      cur += ch;
+    } else if (ch === "|" && depth === 0) {
+      stages.push(cur.trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) stages.push(cur.trim());
+  if (stages.length > 1) return stages.reduce((acc, st) => jqEvalExpr(acc, st), values);
+
+  const stage = stages[0];
+  if (stage === "length") {
+    return values.map((v) => (Array.isArray(v) || typeof v === "string" ? v.length : v && typeof v === "object" ? Object.keys(v).length : v === null ? 0 : 1));
+  }
+  if (stage === "keys" || stage === "keys_unsorted") {
+    return values.map((v) => {
+      if (Array.isArray(v)) return v.map((_x, i) => i);
+      if (v && typeof v === "object") {
+        const ks = Object.keys(v);
+        return stage === "keys" ? ks.sort() : ks;
+      }
+      return [];
+    });
+  }
+  if (stage === "type") {
+    return values.map((v) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v));
+  }
+  const sel = /^select\(([\s\S]+)\)$/.exec(stage);
+  if (sel) {
+    const cond = sel[1].trim();
+    const cmp = /^(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+)$/.exec(cond);
+    return values.filter((v) => {
+      if (cmp) {
+        const left = jqEvalExpr([v], cmp[1].trim())[0];
+        const rawRight = cmp[3].trim();
+        let right: unknown;
+        try {
+          right = JSON.parse(rawRight);
+        } catch {
+          right = jqEvalExpr([v], rawRight)[0];
+        }
+        if (cmp[2] === "==") return JSON.stringify(left) === JSON.stringify(right);
+        if (cmp[2] === "!=") return JSON.stringify(left) !== JSON.stringify(right);
+        if (typeof left === "number" && typeof right === "number") {
+          if (cmp[2] === ">") return left > right;
+          if (cmp[2] === "<") return left < right;
+          if (cmp[2] === ">=") return left >= right;
+          if (cmp[2] === "<=") return left <= right;
+        }
+        return false;
+      }
+      const res = jqEvalExpr([v], cond)[0];
+      return Boolean(res);
+    });
+  }
+  // Path navigation: .foo.bar[0][]
+  if (stage.startsWith(".")) {
+    let acc = values;
+    const tokens = stage.slice(1).match(/\[(?:\d+|"[^"]*"|'[^']*')?\]|[^.[\]]+/g) ?? [];
+    for (const tok of tokens) {
+      if (tok === "[]") {
+        acc = acc.flatMap((v) => (Array.isArray(v) ? v : v && typeof v === "object" ? Object.values(v) : []));
+      } else if (/^\[\d+\]$/.test(tok)) {
+        const idx = Number(tok.slice(1, -1));
+        acc = acc.map((v) => (Array.isArray(v) ? v[idx] ?? null : null));
+      } else if (/^\[["'].*["']\]$/.test(tok)) {
+        const key = tok.slice(2, -2);
+        acc = acc.map((v) => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>)[key] ?? null : null));
+      } else {
+        const key = tok.endsWith("?") ? tok.slice(0, -1) : tok;
+        acc = acc.map((v) => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>)[key] ?? null : null));
+      }
+    }
+    return acc;
+  }
+  throw new NotSimulated(`jq filter '${stage}'`);
+}
+
+const jq: SimCommand = (ctx, args) => {
+  const { flags, rest } = parseArgs(args);
+  const raw = flags.has("r") || flags.has("raw-output");
+  const compact = flags.has("c") || flags.has("compact-output");
+  const exitStatus = flags.has("e") || flags.has("exit-status");
+  const filter = rest[0] ?? ".";
+  const files = rest.slice(1);
+  let input = ctx.stdin;
+  if (files.length) {
+    const parts: string[] = [];
+    for (const f of files) {
+      const p = abs(ctx, f);
+      const file = ctx.host.read(p);
+      if (!file) return fail(`jq: error: Could not open file ${f}: No such file or directory\n`, 2);
+      if (!ctx.shell.mayRead(p, ctx.root)) return fail(`jq: error: Could not open file ${f}: Permission denied\n`, 2);
+      parts.push(file.content);
+    }
+    input = parts.join("\n");
+  }
+  const trimmed = input.trim();
+  if (!trimmed) return ok();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    return fail(`parse error: ${err instanceof Error ? err.message : "Invalid JSON"}\n`, 4);
+  }
+  const results = jqEvalExpr([parsed], filter);
+  const formatted = results.map((v) => {
+    if (raw && typeof v === "string") return v;
+    return compact ? JSON.stringify(v) : JSON.stringify(v, null, 2);
+  });
+  const last = results[results.length - 1];
+  const code = exitStatus && (results.length === 0 || last === false || last === null) ? 1 : 0;
+  return { out: formatted.length ? `${formatted.join("\n")}\n` : "", err: "", code };
+};
+
+const xargs: SimCommand = (ctx, args) => {
+  let nul = false;
+  let noEmpty = false;
+  let replaceStr: string | undefined;
+  let maxArgs: number | undefined;
+  let delimiter: string | undefined;
+  let cmdArgs: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") {
+      cmdArgs = args.slice(i + 1);
+      break;
+    }
+    if (!a.startsWith("-") || a === "-") {
+      cmdArgs = args.slice(i);
+      break;
+    }
+    if (a.startsWith("--")) {
+      if (a === "--null") {
+        nul = true;
+      } else if (a === "--no-run-if-empty") {
+        noEmpty = true;
+      } else if (a === "--max-args") {
+        if (i + 1 < args.length) maxArgs = Math.max(1, Number(args[++i]) || 1);
+      } else if (a.startsWith("--max-args=")) {
+        maxArgs = Math.max(1, Number(a.slice("--max-args=".length)) || 1);
+      } else if (a === "--replace") {
+        replaceStr = "{}";
+      } else if (a.startsWith("--replace=")) {
+        replaceStr = a.slice("--replace=".length) || "{}";
+      } else if (a === "--delimiter") {
+        if (i + 1 < args.length) delimiter = args[++i];
+      } else if (a.startsWith("--delimiter=")) {
+        delimiter = a.slice("--delimiter=".length);
+      }
+      continue;
+    }
+    for (let j = 1; j < a.length; j++) {
+      const ch = a[j];
+      if (ch === "0") {
+        nul = true;
+      } else if (ch === "r") {
+        noEmpty = true;
+      } else if (ch === "I") {
+        const inline = a.slice(j + 1);
+        if (inline.length > 0) replaceStr = inline;
+        else if (i + 1 < args.length) replaceStr = args[++i];
+        break;
+      } else if (ch === "n") {
+        const inline = a.slice(j + 1);
+        const val = inline.length > 0 ? inline : i + 1 < args.length ? args[++i] : undefined;
+        if (val !== undefined) maxArgs = Math.max(1, Number(val) || 1);
+        break;
+      } else if (ch === "d") {
+        const inline = a.slice(j + 1);
+        if (inline.length > 0) delimiter = inline;
+        else if (i + 1 < args.length) delimiter = args[++i];
+        break;
+      }
+    }
+  }
+
+  const unescapeDelim = (d: string): string =>
+    d === "\\n" ? "\n" : d === "\\t" ? "\t" : d === "\\0" ? "\u0000" : d;
+  const rawItems = nul
+    ? ctx.stdin.split("\u0000").filter((s) => s.length > 0)
+    : delimiter !== undefined && delimiter.length > 0
+      ? ctx.stdin.split(unescapeDelim(delimiter)).filter((s) => s.length > 0)
+      : ctx.stdin.trim().split(/\s+/).filter(Boolean);
+  if (!rawItems.length && noEmpty) return ok();
+  const baseCmd = cmdArgs.length ? cmdArgs : ["echo"];
+  const quoteArg = (s: string): string => (/[\s"'$`\\|&;<>()[\]*?~]/.test(s) ? `'${s.replace(/'/g, "'\\''")}'` : s);
+  let out = "";
+  let err = "";
+  let code = 0;
+  if (replaceStr !== undefined) {
+    for (const item of rawItems) {
+      const cmdLine = baseCmd.map((tok) => (tok.includes(replaceStr) ? quoteArg(tok.split(replaceStr).join(item)) : quoteArg(tok))).join(" ");
+      const res = ctx.shell.exec(cmdLine, { root: ctx.root, stdin: "" });
+      out += res.out;
+      err += res.err;
+      if (res.code !== 0) code = res.code;
+    }
+    return { out, err, code };
+  }
+  const batches: string[][] = [];
+  if (!rawItems.length) {
+    batches.push([]);
+  } else if (maxArgs) {
+    for (let i = 0; i < rawItems.length; i += maxArgs) batches.push(rawItems.slice(i, i + maxArgs));
+  } else {
+    batches.push(rawItems);
+  }
+  for (const batch of batches) {
+    const cmdLine = [...baseCmd, ...batch].map(quoteArg).join(" ");
+    const res = ctx.shell.exec(cmdLine, { root: ctx.root, stdin: "" });
+    out += res.out;
+    err += res.err;
+    if (res.code !== 0) code = res.code;
+  }
+  return { out, err, code };
+};
+
+const column: SimCommand = (ctx, args) => {
+  const { flags, values, rest } = parseArgs(args, ["s", "o"]);
+  const sep = values.get("s");
+  const outSep = values.get("o") ?? "  ";
+  let text = ctx.stdin;
+  if (rest.length) {
+    const parts: string[] = [];
+    for (const f of rest) {
+      const p = abs(ctx, f);
+      const file = ctx.host.read(p);
+      if (!file) return fail(`column: cannot open ${f}: No such file or directory\n`, 1);
+      parts.push(file.content);
+    }
+    text = parts.join("\n");
+  }
+  const rawLines = text.split("\n").filter((l, i, arr) => !(i === arr.length - 1 && l === ""));
+  if (!flags.has("t")) return ok(lines(rawLines));
+  const splitRow = (line: string): string[] => {
+    if (sep) return line.split(new RegExp(`[${sep.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")}]`));
+    return line.trim().split(/\s+/);
+  };
+  const rows = rawLines.map(splitRow);
+  const widths: number[] = [];
+  for (const row of rows) {
+    row.forEach((cell, i) => {
+      widths[i] = Math.max(widths[i] ?? 0, cell.length);
+    });
+  }
+  return ok(lines(rows.map((row) => row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]))).join(outSep))));
+};
+
 // ---- the table -----------------------------------------------------------------
 
 export const fileCommands: Record<string, SimCommand> = {
@@ -2478,6 +2782,9 @@ export const fileCommands: Record<string, SimCommand> = {
   sha256sum: checksum("sha256sum", "sha256"),
   sha512sum: checksum("sha512sum", "sha512"),
   diff,
+  jq,
+  xargs,
+  column,
   test: testAs("test"),
   "[": testAs("["),
   "[[": testAs("[["),

@@ -259,7 +259,7 @@ export function ComposerInput({ p }: { p: PanelState }): JSX.Element {
                     <button
                       className="ai-icon-button"
                       aria-label="Attach image or text file"
-                      title="Attach image (PNG/JPG/WebP) or text file — or paste with Ctrl+V"
+                      title="Attach image (PNG/JPG/WebP) or text file, or paste with Ctrl+V"
                       onClick={() => fileInput.current?.click()}
                     >
                       <Paperclip size={16} />

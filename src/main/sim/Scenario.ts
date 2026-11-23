@@ -58,6 +58,8 @@ export interface ScenarioChat {
 export interface SimScenario {
   id: string;
   title: string;
+  /** Short category labels shown in the CLI and scenario picker. */
+  tags?: string[];
   /** What is going on, for the person who picks the scenario. Not shown to the agent. */
   story: string;
   /** What the agent is asked, when the scenario is run as a test. */

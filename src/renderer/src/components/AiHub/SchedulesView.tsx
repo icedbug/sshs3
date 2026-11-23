@@ -30,8 +30,8 @@ interface Draft {
 }
 
 export const SCHEDULE_MODES: Record<AgentMode, string> = {
-  advice: "Reports only — runs no commands",
-  plan: "Plans first — proposes steps before running",
+  advice: "Reports only: runs no commands",
+  plan: "Plans first: proposes steps before running",
   assisted: "Asks before each command (waits for you)",
   autonomous: "Runs commands on its own",
 };
@@ -275,6 +275,11 @@ export function Schedules({
           every morning, a capacity report every week, or a quiet sentinel that
           notifies only on anomalies.
         </p>
+        {hub.demoMode && (
+          <p className="ai-hint" data-testid="schedules-demo-notice">
+            Demo lab: seeded jobs are examples for the simulated fleet and do not contact real servers.
+          </p>
+        )}
       </header>
 
       <div className="ai-section-head">
@@ -580,7 +585,7 @@ export function Schedules({
                   setDraft({ ...draft, runbookId: e.target.value })
                 }
               >
-                <option value="">None — AI prompt only</option>
+                <option value="">None: AI prompt only</option>
                 {hub.runbooks!.map((rb) => (
                   <option key={rb.id} value={rb.id}>
                     {rb.name}
@@ -654,7 +659,7 @@ export function Schedules({
                   ? `cron "${s.cron}" (${s.timezone ?? "UTC"})`
                   : every(s.intervalMinutes)}{" "}
                 ·{" "}
-                {SCHEDULE_MODES[s.mode].split(" — ")[0].split(" (")[0].toLowerCase()}
+                {SCHEDULE_MODES[s.mode].split(": ")[0].split(" (")[0].toLowerCase()}
                 {/* The demo lab's own schedules name a model nobody connected: not shown as if it ran them. */}
                 {s.id.startsWith("demo-sched-") ? "" : ` · ${s.model}`}
               </small>

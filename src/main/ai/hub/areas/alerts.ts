@@ -153,7 +153,7 @@ export class AlertsPart {
         ? undefined
         : correlateAlert(alert, live(this.store.data.workTickets), {
             servers,
-            edges: this.store.data.infraEdges ?? [],
+            edges: this.getInfraEdgesList(),
             now,
           });
       if (bundled) {

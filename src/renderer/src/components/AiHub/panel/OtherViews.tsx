@@ -148,6 +148,20 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
                 chooseTask("");
                 setView("Work");
               }}
+              onOpenTerminal={(serverId) => {
+                const srv = (hub.workspaceServers ?? []).find((s) => s.id === serverId || s.name === serverId);
+                const existing = hub.sessions.find(
+                  (s) =>
+                    s.state !== "disconnected" &&
+                    (s.id === serverId || (srv && s.label.toLowerCase().includes(srv.name.toLowerCase()))),
+                );
+                if (existing) {
+                  selectAiTerminal(existing.id);
+                } else {
+                  window.dispatchEvent(new CustomEvent("sshs3:open-cluster-split", { detail: { serverIds: [srv?.id ?? serverId] } }));
+                }
+                if (p.mode === "hub") p.setMode("panel");
+              }}
               onAsk={(text, attach, sessionId) => {
                 if (sessionId) selectAiTerminal(sessionId);
                 if (attach)

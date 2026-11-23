@@ -1303,7 +1303,7 @@ export interface ExternalIssueRef {
  * from what was run on them, never by a model.
  */
 export interface SimulationView {
-  scenarios: { id: string; title: string; story: string; target: string; prompt: string }[];
+  scenarios: { id: string; title: string; story: string; target: string; prompt: string; tags?: string[] }[];
   running?: {
     id: string;
     title: string;
@@ -1312,6 +1312,9 @@ export interface SimulationView {
     target: string;
     /** The ticket the scenario's alert became. */
     ticketId?: string;
+    tags?: string[];
+    servers?: Array<{ id: string; name: string }>;
+    lastReplay?: { mode: "careful" | "careless"; ran: number; at: string; lines: string[] };
     checks: { id: string; kind: "resolved" | "root-cause" | "no-damage" | "report"; title: string; pass: boolean; why: string }[];
     passed: number;
     total: number;
@@ -1350,6 +1353,8 @@ export interface ChatConnectionView {
   bot?: string;
   workspace?: string;
   lastError?: string;
+  /** True when backed by the demo lab's in-process chat simulator. */
+  simulated?: boolean;
   channels: ChatChannelView[];
 }
 
@@ -2185,6 +2190,19 @@ export interface HubReply {
   /** What an answer given in the app to a change or plan of the chat agent's came to. */
   chatAnswer?: { outcome: "approved" | "denied" | "waiting" | "refused"; message: string; remaining?: number };
   chatTry?: ChatTryResult;
+  /** Result of running a scripted scenario walkthrough (`sim-replay`, no AI model). */
+  simReplay?: {
+    ok: true;
+    ran: number;
+    score: {
+      passed: number;
+      total: number;
+      commands: number;
+      checks: { id: string; kind: "resolved" | "root-cause" | "no-damage" | "report"; title: string; pass: boolean; why: string }[];
+      unsupported: string[];
+    };
+    transcript: string[];
+  };
 }
 export interface TerminalCommandFailure {
   sessionId: string;
@@ -2586,6 +2604,8 @@ export type HubRequest =
   | { action: "kb-page-publish"; id: string; spaceKey?: string; parentId?: string }
   | { action: "sim-start"; scenarioId: string }
   | { action: "sim-reset" }
+  | { action: "sim-replay"; mode: "careful" | "careless" }
+  | { action: "sim-advance-time"; minutes: number }
   | { action: "chat-source-save"; connection: ChatConnectionInput }
   | { action: "chat-source-test"; service: ChatServiceName }
   | { action: "chat-source-disconnect"; service: ChatServiceName; forget?: boolean }
@@ -2611,8 +2631,17 @@ export type HubRequest =
   | { action: "chat-answering-task"; taskId: string }
   /** An answer in the app to a change or plan of the chat agent's, by the same rules as from chat. */
   | { action: "chat-answering-answer"; taskId: string; id: string; kind: "change" | "plan"; approved: boolean; note?: string }
-  /** An administrator, in the demo or before a bot is connected: a message to the agent bot in a simulated chat. */
-  | { action: "chat-answering-try"; channel: string; as: "me" | "guest"; text: string; thread?: string }
+  /** An administrator, in the demo or before a bot is connected: a message or card interaction in a simulated chat. */
+  | {
+      action: "chat-answering-try";
+      channel: string;
+      as: "me" | "guest";
+      text: string;
+      thread?: string;
+      interaction?:
+        | { kind: "click"; postId: string; action: "approve" | "deny" }
+        | { kind: "react"; postId: string; emoji: string };
+    }
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }

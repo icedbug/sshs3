@@ -65,11 +65,11 @@ describe("audit log verdicts", () => {
       expect(screen.getByRole("button", { name })).toBeDisabled();
   });
 
-  it("says in the demo lab that nothing is written, instead of a green verdict", async () => {
+  it("says in the demo lab that entries stay isolated locally, instead of a green verdict", async () => {
     const request = audit(makeHub({ demoMode: true }), [], { ok: true, entries: 0 } as AuditVerificationView);
     await waitFor(() => expect(request).toHaveBeenCalled());
     expect(screen.getByTestId("audit-demo-notice")).toHaveTextContent(
-      "Demo lab: nothing is written to the audit log here. The Timeline shows invented example data.",
+      "Demo lab: audit entries are recorded locally inside the isolated demo workspace and are never sent outside.",
     );
     expect(screen.queryByTestId("audit-chain-badge")).not.toBeInTheDocument();
     expect(screen.queryByText(/Every command an agent runs/)).not.toBeInTheDocument();

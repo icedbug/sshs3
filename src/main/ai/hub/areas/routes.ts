@@ -88,6 +88,8 @@ export const AREA_OF = {
   "kb-page-publish": "chatAndAtlassian",
   "sim-start": "simulation",
   "sim-reset": "simulation",
+  "sim-replay": "simulation",
+  "sim-advance-time": "simulation",
   "chat-source-save": "chatAndAtlassian",
   "chat-source-test": "chatAndAtlassian",
   "chat-source-disconnect": "chatAndAtlassian",

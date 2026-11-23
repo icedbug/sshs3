@@ -4,6 +4,7 @@ import "./aiHub.css";
 import { usePanelState } from "./panel/usePanelState";
 import { PanelHeader } from "./panel/PanelHeader";
 import { PanelNav } from "./panel/PanelNav";
+import { ScenarioBar } from "./panel/ScenarioBar";
 import { WorkSidebar } from "./panel/WorkSidebar";
 import { Welcome } from "./panel/Welcome";
 import { TaskContextBar } from "./panel/TaskContextBar";
@@ -90,6 +91,7 @@ export function AiHubPanel(props: AiHubPanelProps): JSX.Element {
       )}
       <PanelHeader p={p} />
       <PanelNav p={p} />
+      <ScenarioBar p={p} />
       {!hub ? (
         <p className="ai-empty">Connecting…</p>
       ) : (

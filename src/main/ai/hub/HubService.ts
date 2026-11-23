@@ -478,7 +478,7 @@ export class HubService {
     // showed, masked, with a marker per command. What a person types is never recorded.
     this.terminals.on("claimed", (session: TerminalSession, owner: string) => {
       const task = this.store.data.tasks.find((t) => t.id === owner);
-      if (!task || isBackgroundRun(task) || isDemoMode() || this.store.data.preferences.recordSessions === false) return;
+      if (!task || isBackgroundRun(task) || this.store.data.preferences.recordSessions === false) return;
       const recorder = this.recordings();
       recorder.setPolicy({ allowHumanOptIn: true });
       void recorder
@@ -508,7 +508,7 @@ export class HubService {
       void this.recorder
         ?.stop(session.id)
         .then(async (info) => {
-          if (!info || isDemoMode()) return;
+          if (!info) return;
           const task = this.store.data.tasks.find((t) => t.id === info.taskId);
           const before = this.recordingBefore.get(info.id);
           this.recordingBefore.delete(info.id);
@@ -561,6 +561,7 @@ export class HubService {
       // Demo mode is decided once at launch (demo/demoMode.ts) and is never stored: drop the Demo-Lab
       // preference that older builds persisted, so it is neither read nor written back.
       Reflect.deleteProperty(this.store.data.preferences, "demoLabEnabled");
+      if (isDemoMode()) this.seedDemoWorkspaceState();
       await this.s3Workspace.start().catch((e) =>
         log.warn("S3 workspace start failed", safeError(e)),
       );

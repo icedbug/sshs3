@@ -385,8 +385,13 @@ export function Memory({
         <h2>Memory &amp; skills</h2>
         <p className="ai-hint">
           What the assistant knows about your systems before you say anything: facts about how things are set up, and
-          skills — procedures that worked. Team entries are shared with everyone in the workspace.
+          skills: procedures that worked. Team entries are shared with everyone in the workspace.
         </p>
+        {hub.demoMode && (
+          <p className="ai-hint" data-testid="memory-demo-notice">
+            Demo lab: seeded entries are invented examples stored only in this demo workspace.
+          </p>
+        )}
         <p className="ai-hint" data-testid="memory-legend">
           <strong>pinned</strong>: always read first. <strong>global</strong>: for the team, on every server.{" "}
           <strong>Useful</strong> and <strong>Not useful</strong> rank an entry higher or lower when the assistant

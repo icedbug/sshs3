@@ -613,15 +613,13 @@ export async function handleAppAction(
       if (resolved.tool.inputSchema) {
         validateMcpInputSchema(resolved.toolName, resolved.tool.inputSchema, p);
       }
-      if (isDemoTarget(resolved.server.id)) {
-        // A demo MCP fixture answers from its script; its command/URL is never started or contacted.
-        return {
-          ok: true,
-          mcpServer: resolved.server.name,
-          tool: resolved.toolName,
-          output: simulateDemoMcpTool(resolved.toolName, p),
-        };
-      }
+      const callResolvedTool = async (): Promise<{ ok: boolean; output?: unknown; error?: string }> => {
+        if (isDemoTarget(resolved.server.id)) {
+          // A demo MCP fixture answers in-process; its command/URL is never started or contacted.
+          return { ok: true, output: simulateDemoMcpTool(resolved.toolName, p, resolved.server.id) };
+        }
+        return hub.mcp.callTool(resolved.server, resolved.toolName, p);
+      };
       // Respect per-tool toolPolicies (allow | ask | deny) and trustReadOnlyHint instead of blindly
       // trusting server-supplied annotations.readOnlyHint.
       const trustReadOnly = resolved.server.trustReadOnlyHint === true;
@@ -658,7 +656,7 @@ export async function handleAppAction(
           change.status = "running";
           hub.changed();
           try {
-            const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
+            const res = await callResolvedTool();
             change.status = res.ok ? "completed" : "failed";
             change.output = clip(res.ok ? JSON.stringify(res.output ?? "") : (res.error ?? ""), 4000);
             if (!res.ok) throw new Error(res.error || "The MCP tool did not do its work.");
@@ -675,7 +673,7 @@ export async function handleAppAction(
         }
         throw new Error(`MCP tool "${resolved.toolName}" requires a run with an approval check.`);
       }
-      const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
+      const res = await callResolvedTool();
       if (!res.ok) {
         throw new Error(res.error || "The MCP tool did not do its work.");
       }

@@ -355,7 +355,7 @@ export function AgentsAndMcpView({
                 value={draft.targetCluster}
                 onChange={(e) => setDraft({ ...draft, targetCluster: e.target.value })}
               >
-                <option value="">Any — works where you point it</option>
+                <option value="">Any: works where you point it</option>
                 {clusters.map((c) => (
                   <option key={c} value={c}>
                     {c}

@@ -4,6 +4,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { createTwoFilesPatch } from "diff";
+import { querySimMcpTool } from "../../sim/SimMcpBridge";
 
 
 export function insideDataDirectory(file: string): boolean {
@@ -387,7 +388,10 @@ export function simulateDemoStorageOps(
 export function simulateDemoMcpTool(
   toolName: string,
   args: Record<string, unknown>,
+  serverId?: string,
 ): string {
+  const live = querySimMcpTool(toolName, args, serverId);
+  if (live !== undefined) return live;
   if (toolName === "ontap_get_volume_metrics") {
     return JSON.stringify(
       {

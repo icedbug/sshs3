@@ -354,15 +354,24 @@ export class InboxPart {
         const channel = this.notifyStore.data.channels.find((c) => c.id === request.id);
         if (!channel) throw new Error("Channel not found");
         const link = this.inboxLink();
-        const result = await deliver(
-          renderNotification(
-            channel,
-            [{ id: "test", kind: "report", headline: "A test from sshs3", title: "If you can read this, the channel works.", link }],
-            { inboxLink: link },
-          ),
-          this.outboundGuard(),
-          { waits: [] },
+        const rendered = renderNotification(
+          channel,
+          [{ id: "test", kind: "report", headline: "A test from sshs3", title: "If you can read this, the channel works.", link }],
+          { inboxLink: link },
         );
+        if (isDemoMode()) {
+          const preview = clip(rendered.body || rendered.url, 180);
+          const result = {
+            ok: true,
+            status: 200,
+            error: `Demo lab (simulated): nothing was sent over the network. Preview: ${preview}`,
+          };
+          channel.last = { at: Date.now(), ...result };
+          await this.notifyStore.save();
+          reply = { notifyTest: result, notes: [result.error] };
+          break;
+        }
+        const result = await deliver(rendered, this.outboundGuard(), { waits: [] });
         channel.last = { at: Date.now(), ...result };
         await this.notifyStore.save();
         reply = { notifyTest: result };

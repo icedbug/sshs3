@@ -211,7 +211,7 @@ export const DEMO_SHOWCASE_RESPONSE = [
   "| `netapp-aff-a800-01a` | HA node A (DC1) | `aggr1_nvme_prod` (72% of 220 TB) | `0.38 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
   "| `netapp-aff-a800-01b` | HA node B (DC1) | `aggr2_nvme_db` (68% of 180 TB) | `2.45 ms` | `00:02:44` | **ONLINE · QoS warning** |",
   "| `netapp-fas9000-dr-01` | SnapVault DR (DC2) | `aggr_dr_nlsas` (71% of 1.6 PB) | `1.12 ms` | In sync (XDP) | **ONLINE · SNAPMIRRORED** |",
-  "| `ontap-aiq-um-01` | Active IQ and Harvest | Prometheus / Grafana | — | — | **TELEMETRY OK** |",
+  "| `ontap-aiq-um-01` | Active IQ and Harvest | Prometheus / Grafana | - | - | **TELEMETRY OK** |",
   "",
   "> **Cause:** the scratch volume `vol_ai_scratch_03` (`svm-prod-nfs`) on `netapp-aff-a800-01b` has no QoS policy. Its read peaks (`48 200 IOPS`) drive up the queue depth on `aggr2_nvme_db`, which also holds the production database volume `vol_pg_prod_db01` (`1.88 ms`). On `k8s-gpu-io-worker-01`, multipath uses `multibus` instead of ALUA `group_by_prio`, which the Trident multipath standard in the knowledge base requires.",
   "",

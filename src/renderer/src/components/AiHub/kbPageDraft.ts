@@ -27,7 +27,7 @@ export const KINDS: { kind: KbPageKind; title: string; hint: string; template: s
     kind: "troubleshooting",
     title: "Troubleshooting",
     hint: "One symptom: likely causes in order, the check that tells them apart, red herrings.",
-    template: "## Symptom\n\n## Likely causes, most likely first\n1. Cause — the check that confirms it — the fix\n\n## Red herrings\n",
+    template: "## Symptom\n\n## Likely causes, most likely first\n1. Cause: the check that confirms it, and the fix\n\n## Red herrings\n",
   },
 ];
 

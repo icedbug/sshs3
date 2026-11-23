@@ -106,22 +106,26 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
                 {task?.sources && task.sources.length > 0 && (
                   <div className="ai-sources-bar" data-testid="ai-task-sources" aria-label="Conversation context">
                     <small className="ai-hint">Conversation context</small>
-                    {task.sources.map((src) =>
-                      // What was read in the team's chat opens the thread it came from.
-                      src.kind === "chat" && src.link ? (
-                        <a key={src.id} className="ai-pill" title={src.text.slice(0, 200)} href={src.link} target="_blank" rel="noreferrer noopener">
-                          {src.label}
-                        </a>
-                      ) : (
-                        <span
-                          key={src.id}
-                          className="ai-pill"
-                          title={src.text.slice(0, 200)}
-                        >
-                          {src.label}
-                        </span>
-                      ),
-                    )}
+                    {(() => {
+                      const hasSimulatedChat = Boolean(hub.chatSources?.connections.some((c) => c.simulated));
+                      return task.sources.map((src) =>
+                        // What was read in the team's chat opens the thread it came from, unless simulated in the demo lab.
+                        src.kind === "chat" && src.link && !hasSimulatedChat ? (
+                          <a key={src.id} className="ai-pill" title={src.text.slice(0, 200)} href={src.link} target="_blank" rel="noreferrer noopener">
+                            {src.label}
+                          </a>
+                        ) : (
+                          <span
+                            key={src.id}
+                            className="ai-pill"
+                            title={src.text.slice(0, 200)}
+                          >
+                            {src.label}
+                            {src.kind === "chat" && hasSimulatedChat ? " (simulated)" : ""}
+                          </span>
+                        ),
+                      );
+                    })()}
                   </div>
                 )}
                 {streamingState &&

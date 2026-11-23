@@ -21,7 +21,17 @@ function verdict(check: { kind: string; pass: boolean }): string {
  * agent or you work on it. The servers are simulated and hold state; the
  * checks are read off them, not judged by a model.
  */
-export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; act: Act; onOpenTicket?: (ticketId: string) => void }): JSX.Element | null {
+export function ScenariosCard({
+  hub,
+  act,
+  onOpenTicket,
+  onOpenTerminal,
+}: {
+  hub: HubSnapshot;
+  act: Act;
+  onOpenTicket?: (ticketId: string) => void;
+  onOpenTerminal?: (serverId: string) => void;
+}): JSX.Element | null {
   const sim = hub.simulation;
   const [busy, setBusy] = useState("");
   const [shownStory, setShownStory] = useState("");
@@ -30,6 +40,23 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
   const start = (scenarioId: string): void => {
     setBusy(scenarioId);
     void act({ action: "sim-start", scenarioId }).finally(() => setBusy(""));
+  };
+  const replay = (mode: "careful" | "careless"): void => {
+    setBusy(`replay:${mode}`);
+    void act({ action: "sim-replay", mode }).finally(() => setBusy(""));
+  };
+  const openTerminal = (): void => {
+    if (!running) return;
+    const matchServer =
+      running.servers?.find((s) => s.name.toLowerCase() === running.target.toLowerCase()) ??
+      running.servers?.[0] ??
+      (hub.workspaceServers ?? []).find((s) => s.name.toLowerCase() === running.target.toLowerCase());
+    const serverId = matchServer?.id ?? running.target;
+    if (onOpenTerminal) {
+      onOpenTerminal(serverId);
+    } else {
+      window.dispatchEvent(new CustomEvent("sshs3:open-cluster-split", { detail: { serverIds: [serverId] } }));
+    }
   };
   return (
     <details className="ai-fold ai-set-fold" data-testid="scenarios" open={Boolean(running)}>
@@ -44,6 +71,15 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
         </p>
         {running ? (
           <>
+            {(running.tags ?? []).length > 0 && (
+              <div className="ai-tag-list" data-testid="scenario-running-tags">
+                {running.tags!.map((tag) => (
+                  <span key={tag} className="ai-badge">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
             <ul className="ai-link-list" data-testid="scenario-checks">
               {running.checks.map((c) => (
                 <li key={c.id} className="ai-link" data-pass={c.pass}>
@@ -67,16 +103,44 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
               </small>
             )}
             <div className="ai-card-actions">
+              <button type="button" data-testid="scenario-open-terminal" onClick={openTerminal}>
+                Open terminal
+              </button>
               {running.ticketId && onOpenTicket && (
                 <button type="button" className="ai-btn-accent" onClick={() => onOpenTicket(running.ticketId!)}>
                   Open the alert&apos;s ticket
                 </button>
               )}
+              <button
+                type="button"
+                disabled={Boolean(busy)}
+                data-testid="scenario-replay-careful"
+                onClick={() => replay("careful")}
+              >
+                {busy === "replay:careful" ? "Running…" : "Watch careful fix (no model)"}
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(busy)}
+                data-testid="scenario-replay-careless"
+                onClick={() => replay("careless")}
+              >
+                {busy === "replay:careless" ? "Running…" : "Watch careless trap (no model)"}
+              </button>
               <button type="button" disabled={Boolean(busy)} onClick={() => start(running.id)}>
-                {busy ? "Starting…" : "Start it over"}
+                {busy === running.id ? "Starting…" : "Start it over"}
               </button>
               <ConfirmButton label="End the scenario" confirmLabel="Remove its servers and ticket?" className="" onConfirm={() => void act({ action: "sim-reset" })} />
             </div>
+            {running.lastReplay && (
+              <div className="ai-scenario-replay" data-testid="scenario-replay-transcript">
+                <small className="ai-hint">
+                  Scripted walkthrough (no AI model): {running.lastReplay.mode} · {running.lastReplay.ran} command
+                  {running.lastReplay.ran === 1 ? "" : "s"}
+                </small>
+                <pre className="ai-code-pre">{running.lastReplay.lines.join("\n")}</pre>
+              </div>
+            )}
           </>
         ) : (
           <ul className="ai-link-list" data-testid="scenario-list">
@@ -85,6 +149,15 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
                 <span>
                   <strong>{s.title}</strong>
                   {s.target && <small> · {s.target}</small>}
+                  {(s.tags ?? []).length > 0 && (
+                    <span className="ai-tag-list" data-testid={`scenario-tags-${s.id}`}>
+                      {s.tags!.map((tag) => (
+                        <span key={tag} className="ai-badge">
+                          {tag}
+                        </span>
+                      ))}
+                    </span>
+                  )}
                   {/* The story names the cause and the fix: hidden until asked for, so a person can try it first. */}
                   <br />
                   <button

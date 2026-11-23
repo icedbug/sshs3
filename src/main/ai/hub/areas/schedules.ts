@@ -24,10 +24,26 @@ export function nextScheduleTime(schedule: Pick<AgentSchedule, "cron" | "timezon
 
 export class SchedulesPart {
   async scheduleEvent(this: HubService, kind: "facts_drift" | "unreachable" | "alert", profileIds: string[]): Promise<void> {
-    const matches = this.store.data.schedules.filter((s) => s.enabled && s.eventTrigger?.kind === kind && profileIds.includes(s.profileId));
+    const storedById = new Map(this.store.data.schedules.map((s) => [s.id, s]));
+    const candidates: AgentSchedule[] = [...this.store.data.schedules];
+    if (isDemoMode()) {
+      const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
+      for (const demo of getDemoSchedules()) {
+        if (!storedById.has(demo.id) && !dismissed.has(demo.id)) {
+          candidates.push(demo);
+        }
+      }
+    }
+    const matches = candidates.filter((s) => s.enabled && s.eventTrigger?.kind === kind && profileIds.includes(s.profileId));
     if (!matches.length || this.disposed || !(await this.config.getView()).enabled) return;
     const now = Date.now();
-    for (const s of matches) {
+    for (const candidate of matches) {
+      let s = storedById.get(candidate.id);
+      if (!s) {
+        s = { ...candidate };
+        this.store.data.schedules.push(s);
+        storedById.set(s.id, s);
+      }
       if (!s.enabled || !this.store.data.schedules.includes(s) || this.scheduleInProgress(s)) continue;
       if (s.lastEventAt !== undefined && now - s.lastEventAt < (s.eventTrigger?.cooldownMinutes ?? 30) * 60_000) continue;
       s.lastEventAt = now;

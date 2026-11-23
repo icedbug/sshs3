@@ -89,6 +89,37 @@ export function Welcome({ p, hub }: { p: PanelState; hub: NonNullable<PanelState
                           </div>
                         </article>
                       )}
+                    {hub.demoMode && !hub.simulation?.running && (hub.simulation?.scenarios?.length ?? 0) > 0 && (
+                      <article
+                        className="ai-card ai-card-active"
+                        data-testid="welcome-try-incident"
+                        style={{ marginBottom: 14, textAlign: "left" }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <strong>Try a live incident</strong>
+                          <span className="ai-badge">
+                            {hub.simulation!.scenarios.length} simulated incidents
+                          </span>
+                        </div>
+                        <p style={{ fontSize: 12, margin: "6px 0 10px" }}>
+                          Start a stateful fault on simulated servers. Open a terminal, inspect the alert ticket, or watch a scripted walkthrough with no AI model required.
+                        </p>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {hub.simulation!.scenarios.slice(0, 3).map((s) => (
+                            <button
+                              key={s.id}
+                              type="button"
+                              className="ai-btn-accent"
+                              disabled={busy}
+                              data-testid={`welcome-start-${s.id}`}
+                              onClick={() => void act({ action: "sim-start", scenarioId: s.id })}
+                            >
+                              {s.title}
+                            </button>
+                          ))}
+                        </div>
+                      </article>
+                    )}
                     {(hub.agents ?? []).length > 0 && (
                       <div className="ai-agent-quick-bar" aria-label="Quick select Mission Agent">
                         <button

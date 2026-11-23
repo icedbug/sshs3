@@ -32,7 +32,7 @@ function serverContext(server: WorkspaceServerSummary, check?: InventoryEntry): 
     server.description ? `Description: ${server.description}` : "",
     server.tags?.length ? `Tags: ${server.tags.join(", ")}` : "",
     check && check.status !== "unknown"
-      ? `Reachability check ${new Date(check.observedAt).toISOString()}: ${check.status} — ${check.detail}`
+      ? `Reachability check ${new Date(check.observedAt).toISOString()}: ${check.status}: ${check.detail}`
       : "",
   ]
     .filter(Boolean)
@@ -49,6 +49,7 @@ export function InfrastructureView({
   busy,
   onAsk,
   onUseTerminal,
+  onOpenTerminal,
 }: {
   hub: HubSnapshot;
   act: Act;
@@ -56,6 +57,7 @@ export function InfrastructureView({
   /** Opens the chat with a prompt and, optionally, a piece of context attached. */
   onAsk: (prompt: string, attach?: Pick<ContextSource, "label" | "text">, sessionId?: string) => void;
   onUseTerminal: (sessionId: string) => void;
+  onOpenTerminal?: (serverId: string) => void;
 }): JSX.Element {
   const [filter, setFilter] = useState("");
   const [checking, setChecking] = useState(false);
@@ -202,62 +204,100 @@ export function InfrastructureView({
         </p>
       )}
       {servers.length > 0 && shown.length === 0 && <p className="ai-empty">No server matches.</p>}
-      {groupNames.map((name) => (
-        <section key={name || "ungrouped"} className="ai-group">
-          <h4>
-            {name || "No cluster"} <span className="ai-count">{groups.get(name)!.length}</span>
-          </h4>
-          <div className="ai-rows">
-            {groups.get(name)!.map((server) => {
-              const check = checkOf(server);
-              const down = check?.status === "unreachable" || (check?.status === "blocked" && !check.reasonKind);
-              return (
-                <div className="ai-row" key={server.id} data-testid={`infra-server-${server.id}`}>
-                  <div>
-                    <strong>{server.name}</strong>
-                    <small>
-                      <span className="ai-mono">
-                        {server.username}@{server.host}
-                        {server.port !== 22 ? `:${server.port}` : ""}
-                      </span>
-                      {server.nodeRole || server.role ? ` · ${server.nodeRole || server.role}` : ""}
-                      {/* A scenario's server in the demo lab is nobody's own: it is simulated. */}
-                      {server.shared ? "" : hub.demoMode ? " · simulated" : " · personal"}
-                    </small>
-                  </div>
-                  <span className="ai-tags">
-                    {(() => {
-                      const about = (hub.kbPages ?? []).filter((p) =>
-                        p.targets.some((t) => [server.name, server.cluster].filter(Boolean).map((x) => x!.toLowerCase()).includes(t.toLowerCase())),
-                      );
-                      return about.length ? (
-                        <span className="ai-badge" title={`Knowledge base pages about it: ${about.map((p) => p.title).join("; ")}`}>
-                          {about.length} page{about.length === 1 ? "" : "s"}
-                        </span>
-                      ) : null;
-                    })()}
-                    {statusBadge(check)}
-                  </span>
-                  <button
-                    type="button"
-                    className={down ? "ai-btn-accent" : ""}
-                    onClick={() =>
-                      onAsk(
-                        down
-                          ? `${server.name} does not answer (${check!.detail}). Find out why: start with what can be observed from here, and verify the cause before proposing a fix.`
-                          : `Give me a short status of ${server.name}: what we know about it, what changed recently, and anything that needs attention.`,
-                        { label: `@${server.name}`, text: serverContext(server, check) },
-                      )
-                    }
+      {(() => {
+        const runningSim = hub.simulation?.running;
+        const incidentIds = new Set<string>();
+        const incidentNames = new Set<string>();
+        if (runningSim) {
+          incidentNames.add(runningSim.target.toLowerCase());
+          for (const srv of runningSim.servers ?? []) {
+            incidentIds.add(srv.id);
+            incidentNames.add(srv.name.toLowerCase());
+          }
+        }
+        return groupNames.map((name) => (
+          <section key={name || "ungrouped"} className="ai-group">
+            <h4>
+              {name || "No cluster"} <span className="ai-count">{groups.get(name)!.length}</span>
+            </h4>
+            <div className="ai-rows">
+              {groups.get(name)!.map((server) => {
+                const check = checkOf(server);
+                const down = check?.status === "unreachable" || (check?.status === "blocked" && !check.reasonKind);
+                const isIncidentServer =
+                  incidentIds.has(server.id) || incidentNames.has(server.name.toLowerCase());
+                const isSimulatedServer = Boolean(
+                  hub.demoMode && (server.id.startsWith("demo-") || server.id.startsWith("sim-") || !server.shared || check?.reasonKind === "demo"),
+                );
+                return (
+                  <div
+                    className={`ai-row${isIncidentServer ? " ai-row-incident" : ""}`}
+                    key={server.id}
+                    data-testid={`infra-server-${server.id}`}
                   >
-                    {down ? "Investigate" : "Ask about it"}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      ))}
+                    <div>
+                      <strong>{server.name}</strong>
+                      <small>
+                        <span className="ai-mono">
+                          {server.username}@{server.host}
+                          {server.port !== 22 ? `:${server.port}` : ""}
+                        </span>
+                        {server.nodeRole || server.role ? ` · ${server.nodeRole || server.role}` : ""}
+                        {/* A scenario's server in the demo lab is nobody's own: it is simulated. */}
+                        {server.shared ? "" : hub.demoMode ? " · simulated" : " · personal"}
+                      </small>
+                    </div>
+                    <span className="ai-tags">
+                      {isIncidentServer && (
+                        <span className="ai-badge ai-badge-danger" data-testid={`infra-incident-badge-${server.id}`}>
+                          Active incident
+                        </span>
+                      )}
+                      {(() => {
+                        const about = (hub.kbPages ?? []).filter((p) =>
+                          p.targets.some((t) => [server.name, server.cluster].filter(Boolean).map((x) => x!.toLowerCase()).includes(t.toLowerCase())),
+                        );
+                        return about.length ? (
+                          <span className="ai-badge" title={`Knowledge base pages about it: ${about.map((p) => p.title).join("; ")}`}>
+                            {about.length} page{about.length === 1 ? "" : "s"}
+                          </span>
+                        ) : null;
+                      })()}
+                      {statusBadge(check)}
+                    </span>
+                    <div className="ai-row-actions">
+                      {onOpenTerminal && isSimulatedServer && (
+                        <button
+                          type="button"
+                          className={isIncidentServer ? "ai-btn-accent" : ""}
+                          data-testid={`infra-open-terminal-${server.id}`}
+                          onClick={() => onOpenTerminal(server.id)}
+                        >
+                          Open terminal
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className={down ? "ai-btn-accent" : ""}
+                        onClick={() =>
+                          onAsk(
+                            down
+                              ? `${server.name} does not answer (${check!.detail}). Find out why: start with what can be observed from here, and verify the cause before proposing a fix.`
+                              : `Give me a short status of ${server.name}: what we know about it, what changed recently, and anything that needs attention.`,
+                            { label: `@${server.name}`, text: serverContext(server, check) },
+                          )
+                        }
+                      >
+                        {down ? "Investigate" : "Ask about it"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ));
+      })()}
 
       {others.length > 0 && (
         <section className="ai-group">

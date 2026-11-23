@@ -23,6 +23,8 @@ export class SimWorld {
   readonly endpoints = new Map<string, (path: string, from: SimHost) => { status: number; body: string }>();
   /** The shells that were opened, for what was run in them. */
   readonly shells: SimShell[] = [];
+  /** Multi-host causality laws run after commands and clock advances. */
+  readonly laws: Array<(world: SimWorld) => void> = [];
   private offset = 0;
   /** Called after a command was run on one of the lab's servers. */
   onRan?: () => void;
@@ -37,6 +39,18 @@ export class SimWorld {
   /** Moves the lab's clock: a scenario that needs "an hour later". */
   advance(ms: number): void {
     this.offset += ms;
+    this.settle();
+  }
+
+  /** Runs world-level cross-host laws. */
+  runLaws(): void {
+    for (const law of this.laws) law(this);
+  }
+
+  /** Settles every host and then runs world-level laws. */
+  settle(): void {
+    for (const host of this.hosts.values()) host.settle();
+    this.runLaws();
   }
 
   addHost(init: SimHostInit, ...aliases: string[]): SimHost {

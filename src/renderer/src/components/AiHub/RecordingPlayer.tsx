@@ -340,7 +340,7 @@ export function RecordingPlayer({
                   setPlaying(false);
                   seek(m.t);
                 }}
-                title={`${clock(m.t)} — ${m.data}`}
+                title={`${clock(m.t)}: ${m.data}`}
               >
                 {clock(m.t)} {m.data.slice(0, 28)}
                 {m.data.length > 28 ? "…" : ""}

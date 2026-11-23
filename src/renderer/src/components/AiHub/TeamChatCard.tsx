@@ -59,6 +59,14 @@ function Service({
     <details className="ai-fold ai-set-fold" data-testid={`chat-${service}`} open={Boolean(connection)}>
       <summary>
         {NAME[service]}
+        {connection?.simulated && (
+          <>
+            {" "}
+            <span className="ai-badge" data-testid={`chat-${service}-demo-badge`}>
+              Demo (simulated)
+            </span>
+          </>
+        )}
         {connection
           ? connection.lastError
             ? ` · could not be read: ${connection.lastError}`
@@ -66,6 +74,11 @@ function Service({
           : " · not connected"}
       </summary>
       <div className="ai-form">
+        {connection?.simulated && (
+          <p className="ai-hint" data-testid={`chat-${service}-demo-note`}>
+            Demo lab: this {NAME[service]} connection is simulated locally. No messages are fetched from or sent to an external server.
+          </p>
+        )}
         <fieldset disabled={!canChange} style={{ border: 0, padding: 0, margin: 0, display: "contents" }}>
           {service === "mattermost" && (
             <label>
@@ -165,20 +178,35 @@ function Service({
 }
 
 /** A thread found in the chat, as it is shown wherever one is. */
-export function ChatThread({ hit, act }: { hit: Pick<ChatThreadView, "service" | "channelId" | "channel" | "threadId" | "at" | "link"> & { lines: string[]; total?: number }; act?: Act }): JSX.Element {
+export function ChatThread({
+  hit,
+  act,
+  simulated,
+}: {
+  hit: Pick<ChatThreadView, "service" | "channelId" | "channel" | "threadId" | "at" | "link"> & { lines: string[]; total?: number };
+  act?: Act;
+  simulated?: boolean;
+}): JSX.Element {
   const [made, setMade] = useState("");
   return (
     <div className="ai-chat-thread" data-testid="chat-thread">
       <small>
         #{hit.channel} · {new Date(hit.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
         {hit.total && hit.total > hit.lines.length ? ` · ${hit.total} messages in the thread` : ""}
-        {hit.link && (
+        {simulated ? (
           <>
             {" · "}
-            <a href={hit.link} target="_blank" rel="noreferrer noopener">
-              Open in {NAME[hit.service]}
-            </a>
+            <span data-testid="chat-thread-simulated">Demo (simulated {NAME[hit.service]})</span>
           </>
+        ) : (
+          hit.link && (
+            <>
+              {" · "}
+              <a href={hit.link} target="_blank" rel="noreferrer noopener">
+                Open in {NAME[hit.service]}
+              </a>
+            </>
+          )
         )}
       </small>
       <blockquote>
@@ -305,6 +333,7 @@ export function TeamChatCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.
                   key={`${hit.channelId}:${hit.threadId}`}
                   hit={{ ...hit, lines: hit.messages.map((m) => `${m.author}: ${m.text}`) }}
                   act={act}
+                  simulated={Boolean(chat?.connections.find((c) => c.service === hit.service)?.simulated)}
                 />
               ))}
             </div>

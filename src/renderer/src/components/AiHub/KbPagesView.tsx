@@ -264,7 +264,7 @@ export function KbPages({
               >
                 {KINDS.map((k) => (
                   <option key={k.kind} value={k.kind}>
-                    {k.title} — {k.hint}
+                    {k.title}: {k.hint}
                   </option>
                 ))}
               </select>

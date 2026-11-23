@@ -939,7 +939,12 @@ export function WorkforceView({
             <div data-testid="ticket-chat">
               <small>Said in chat (what people wrote about this lately; not checked)</small>
               {openTicket.chatRefs!.map((r) => (
-                <ChatThread key={`${r.channelId}:${r.threadId}`} hit={{ ...r, lines: r.excerpt.split("\n") }} act={act} />
+                <ChatThread
+                  key={`${r.channelId}:${r.threadId}`}
+                  hit={{ ...r, lines: r.excerpt.split("\n") }}
+                  act={act}
+                  simulated={Boolean(hub.chatSources?.connections.find((c) => c.service === r.service)?.simulated)}
+                />
               ))}
             </div>
           )}

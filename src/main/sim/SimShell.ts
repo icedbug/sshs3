@@ -210,6 +210,7 @@ export class SimShell {
     this.lastCode = result.code;
     // What follows from the new state follows now, before the next command looks.
     this.host.settle();
+    this.world?.runLaws();
     this.history.push({ at: this.host.now(), line, code: result.code, root: /(^|[;&|]\s*)sudo\b/.test(line) });
     this.world?.onRan?.();
     return { output: `${result.out}${result.err}`, code: result.code };

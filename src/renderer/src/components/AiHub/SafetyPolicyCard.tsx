@@ -32,7 +32,7 @@ const RULES: { key: BooleanSafetyKey; title: string; detail: string; testId?: st
     key: "blockDestructiveWithoutConfirm",
     title: "Stop destructive commands until reviewed",
     detail:
-      "Commands that are hard to take back — rm -r, mkfs, dd onto a disk, DROP DATABASE, kubectl delete of a namespace, terraform destroy, piping a download into sh — never run without an explicit approval, in any mode.",
+      "Commands that are hard to take back (rm -r, mkfs, dd onto a disk, DROP DATABASE, kubectl delete of a namespace, terraform destroy, piping a download into sh) never run without an explicit approval, in any mode.",
   },
   {
     key: "requirePeerApprovalOnProd",
@@ -99,7 +99,7 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
         <div>
           <strong>Command safety</strong>
           <small>
-            Before a command runs, each part of it is classified as read-only, changing or destructive — also inside
+            Before a command runs, each part of it is classified as read-only, changing or destructive, including inside
             pipes, chains, subshells, bash -c and find -exec. What is not known to be read-only counts as changing.
           </small>
           <small data-testid="safety-policy-whose">

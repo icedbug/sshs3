@@ -664,6 +664,7 @@ const initialDemoSchedules: AgentSchedule[] = [
     provider: "openai-codex",
     maxCommands: 10,
     maxMinutes: 10,
+    eventTrigger: { kind: "facts_drift", cooldownMinutes: 30 },
     lastStatus: "completed",
   },
   {
@@ -928,6 +929,12 @@ export function appendDemoActivity(event: WorkspaceActivityEvent): void {
   else demoActivityStore.unshift(event);
 }
 
+export function deleteDemoActivityByPrefix(prefix: string): void {
+  for (let i = demoActivityStore.length - 1; i >= 0; i -= 1) {
+    if (demoActivityStore[i].id.startsWith(prefix)) demoActivityStore.splice(i, 1);
+  }
+}
+
 export function getDemoMemories(): MemoryEntry[] {
   return [...demoMemoriesStore];
 }
@@ -1074,22 +1081,26 @@ const initialDemoMcpServers: McpServerConfig[] = [
     enabled: true,
     status: "connected",
     demo: true,
+    trustReadOnlyHint: true,
     lastTestedAt: now - 15 * min,
     discoveredTools: [
       {
         name: "ontap_get_volume_metrics",
         description:
           "Fetch real-time IOPS, throughput, and WAFL/QoS latency breakdown from NetApp Harvest / ActiveIQ.",
+        readOnly: true,
       },
       {
         name: "ontap_list_snapmirror_lags",
         description:
           "List all SnapMirror XDP relationships across Stockholm DC1 and Uppsala DC2 with lag-time and SnapLock status.",
+        readOnly: true,
       },
       {
         name: "trident_inspect_pvc_mapping",
         description:
           "Map a Kubernetes PVC name to its underlying NetApp ONTAP SVM, FlexVol/FlexGroup, LUN, or qtree.",
+        readOnly: true,
       },
     ],
   },
@@ -1102,17 +1113,20 @@ const initialDemoMcpServers: McpServerConfig[] = [
     enabled: true,
     status: "connected",
     demo: true,
+    trustReadOnlyHint: true,
     lastTestedAt: now - 30 * min,
     discoveredTools: [
       {
         name: "storagegrid_ilm_queue_status",
         description:
           "Check NetApp StorageGRID ILM evaluation rate, queued objects, and Erasure Coding 6+3 repair progress.",
+        readOnly: true,
       },
       {
         name: "s3_verify_object_lock",
         description:
           "Verify WORM Object Lock retention mode and compliance settings on S3 buckets.",
+        readOnly: true,
       },
     ],
   },

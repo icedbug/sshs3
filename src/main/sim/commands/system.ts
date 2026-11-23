@@ -1753,9 +1753,9 @@ const ownerOf = (host: SimHost, l: Listener): string => host.service(l.process)?
 const maySee = (ctx: SimContext, l: Listener): boolean => ctx.root || ownerOf(ctx.host, l) === ctx.user;
 
 /** Which sockets the letters of `ss` and `netstat` ask for. */
-function socketChoice(args: string[], command: string): { tcp: boolean; udp: boolean; listening: boolean; all: boolean; numeric: boolean; procs: boolean; flags: Set<string> } {
+function socketChoice(args: string[], command: string, allowFilters = false): { tcp: boolean; udp: boolean; listening: boolean; all: boolean; numeric: boolean; procs: boolean; flags: Set<string>; rest: string[] } {
   const { flags, rest } = parseArgs(args, ["f", "A", "o"]);
-  if (rest.length) throw new NotSimulated(`${command} with a filter`);
+  if (rest.length && !allowFilters) throw new NotSimulated(`${command} with a filter`);
   const tcp = flags.has("t") || flags.has("tcp");
   const udp = flags.has("u") || flags.has("udp");
   return {
@@ -1766,26 +1766,69 @@ function socketChoice(args: string[], command: string): { tcp: boolean; udp: boo
     numeric: flags.has("n") || flags.has("numeric"),
     procs: flags.has("p") || flags.has("processes") || flags.has("programs"),
     flags,
+    rest,
   };
 }
 
 function ss(ctx: SimContext, args: string[]): SimResult {
   const { host } = ctx;
-  const want = socketChoice(args, "ss");
+  const want = socketChoice(args, "ss", true);
   if (want.flags.has("s") || want.flags.has("summary")) throw new NotSimulated("ss -s");
+  const filterText = want.rest.join(" ").trim();
+  let stateFilter: "listening" | "established" | "all" | undefined;
+  let sportFilter: number | undefined;
+  let dportFilter: number | undefined;
+  if (filterText) {
+    const stateMatch = /\bstate\s+(listening|established|connected|all)\b/i.exec(filterText);
+    if (stateMatch) {
+      const st = stateMatch[1].toLowerCase();
+      stateFilter = st === "listening" ? "listening" : st === "all" ? "all" : "established";
+    }
+    const sportMatch = /\bsport\s*(?:=|==|eq)?\s*:?(\d+)\b/i.exec(filterText);
+    if (sportMatch) sportFilter = Number(sportMatch[1]);
+    const dportMatch = /\bdport\s*(?:=|==|eq)?\s*:?(\d+)\b/i.exec(filterText);
+    if (dportMatch) dportFilter = Number(dportMatch[1]);
+    if (!stateMatch && sportFilter === undefined && dportFilter === undefined) {
+      throw new NotSimulated(`ss with filter '${filterText}'`);
+    }
+  }
   const both = want.tcp && want.udp;
-  // Without -l or -a ss shows the connections that are open, and none are kept here.
-  const found = want.listening || want.all ? host.listening().filter((l) => (l.proto === "tcp" ? want.tcp : want.udp)) : [];
+  const includeListen = stateFilter === "listening" || stateFilter === "all" || (!stateFilter && (want.listening || want.all));
+  const includeEstab = stateFilter === "established" || stateFilter === "all" || (!stateFilter && (!want.listening || want.all));
   const address = (l: Listener): string => (l.address.includes(":") ? `[${l.address}]` : l.address);
-  const rows = found.map((l) => [
-    ...(both ? [l.proto] : []),
-    l.proto === "tcp" ? "LISTEN" : "UNCONN",
-    "0",
-    String(backlog(l)),
-    `${address(l)}:${want.numeric ? l.port : (PORT_NAMES[l.port] ?? l.port)}`,
-    `${l.address.includes(":") ? "[::]" : "0.0.0.0"}:*`,
-    want.procs && maySee(ctx, l) && l.pid !== undefined ? `users:(("${programOf(host, l)}",pid=${l.pid},fd=${fdOf(l)}))` : "",
-  ]);
+  const rows: string[][] = [];
+  if (includeListen) {
+    const found = host
+      .listening()
+      .filter((l) => (l.proto === "tcp" ? want.tcp : want.udp))
+      .filter((l) => (sportFilter === undefined || l.port === sportFilter) && dportFilter === undefined);
+    for (const l of found) {
+      rows.push([
+        ...(both ? [l.proto] : []),
+        l.proto === "tcp" ? "LISTEN" : "UNCONN",
+        "0",
+        String(backlog(l)),
+        `${address(l)}:${want.numeric ? l.port : (PORT_NAMES[l.port] ?? l.port)}`,
+        `${l.address.includes(":") ? "[::]" : "0.0.0.0"}:*`,
+        want.procs && maySee(ctx, l) && l.pid !== undefined ? `users:(("${programOf(host, l)}",pid=${l.pid},fd=${fdOf(l)}))` : "",
+      ]);
+    }
+  }
+  if (includeEstab && want.tcp && host.peers?.length) {
+    for (const p of host.peers) {
+      if (sportFilter !== undefined && p.localPort !== sportFilter) continue;
+      if (dportFilter !== undefined && p.remotePort !== dportFilter) continue;
+      rows.push([
+        ...(both ? ["tcp"] : []),
+        "ESTAB",
+        "0",
+        "0",
+        `${host.address}:${p.localPort}`,
+        `${p.remoteIp}:${want.numeric ? p.remotePort : (PORT_NAMES[p.remotePort] ?? p.remotePort)}`,
+        want.procs && p.process ? `users:(("${p.process}",pid=1000,fd=9))` : "",
+      ]);
+    }
+  }
   const head = [...(both ? ["Netid"] : []), "State", "Recv-Q", "Send-Q", "Local Address:Port", "Peer Address:Port", "Process"];
   if (want.flags.has("H") || want.flags.has("no-header")) return ok(lines(table(rows, both ? [4, 5] : [3, 4], "  ")));
   return ok(lines(table([head, ...rows], both ? [4, 5] : [3, 4], "  ")));
@@ -2447,6 +2490,136 @@ const notHere = (what: string): SimCommand => () => {
   throw new NotSimulated(what);
 };
 
+const DEFAULT_SYSCTL: Record<string, string> = {
+  "net.ipv4.ip_forward": "0",
+  "net.core.somaxconn": "4096",
+  "net.ipv4.tcp_max_syn_backlog": "4096",
+  "vm.swappiness": "10",
+  "vm.overcommit_memory": "0",
+  "fs.file-max": "2097152",
+  "kernel.hostname": "",
+};
+
+function readSysctlMap(host: SimHost): Record<string, string> {
+  const out: Record<string, string> = { ...DEFAULT_SYSCTL, "kernel.hostname": host.name };
+  const conf = host.read("/etc/sysctl.conf")?.content ?? "";
+  for (const raw of conf.split("\n")) {
+    const line = raw.replace(/#.*/, "").trim();
+    const eq = line.indexOf("=");
+    if (eq > 0) out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  const custom = host.facts.get("sysctl");
+  if (custom && typeof custom === "object") {
+    for (const [k, v] of Object.entries(custom as Record<string, unknown>)) {
+      if (v !== undefined && v !== null) out[k] = String(v);
+    }
+  }
+  return out;
+}
+
+function sysctl(ctx: SimContext, args: string[]): SimResult {
+  const { flags, rest } = parseArgs(args);
+  const valuesOnly = flags.has("n") || flags.has("values");
+  const all = flags.has("a") || flags.has("all");
+  const write = flags.has("w") || flags.has("write");
+  const map = readSysctlMap(ctx.host);
+  if (all) {
+    const entries = Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
+    return ok(lines(entries.map(([k, v]) => (valuesOnly ? v : `${k} = ${v}`))));
+  }
+  if (write) {
+    if (!ctx.root) return fail("sysctl: permission denied on key\n", 255);
+    const custom = ((ctx.host.facts.get("sysctl") as Record<string, string> | undefined) ?? {});
+    const out: string[] = [];
+    for (const item of rest) {
+      const eq = item.indexOf("=");
+      if (eq <= 0) return fail(`sysctl: invalid argument '${item}'\n`, 255);
+      const k = item.slice(0, eq).trim();
+      const v = item.slice(eq + 1).trim();
+      custom[k] = v;
+      out.push(`${k} = ${v}`);
+    }
+    ctx.host.facts.set("sysctl", custom);
+    return ok(lines(out));
+  }
+  if (flags.has("p")) {
+    const rawPath = rest[0] ?? "/etc/sysctl.conf";
+    const filePath = rawPath.startsWith("/") ? rawPath : `${ctx.cwd.replace(/\/$/, "")}/${rawPath}`;
+    const file = ctx.host.read(filePath);
+    if (!file && rest[0]) return fail(`sysctl: cannot open "${rawPath}": No such file or directory\n`, 255);
+    const conf = file?.content ?? "";
+    const custom = ((ctx.host.facts.get("sysctl") as Record<string, string> | undefined) ?? {});
+    const out: string[] = [];
+    for (const raw of conf.split("\n")) {
+      const line = raw.replace(/#.*/, "").trim();
+      const eq = line.indexOf("=");
+      if (eq > 0) {
+        const k = line.slice(0, eq).trim();
+        const v = line.slice(eq + 1).trim();
+        custom[k] = v;
+        out.push(`${k} = ${v}`);
+      }
+    }
+    ctx.host.facts.set("sysctl", custom);
+    return ok(lines(out));
+  }
+  if (!rest.length) return fail("sysctl: no variable specified\n", 1);
+  const out: string[] = [];
+  const err: string[] = [];
+  for (const key of rest) {
+    if (key in map) out.push(valuesOnly ? map[key] : `${key} = ${map[key]}`);
+    else err.push(`sysctl: cannot stat /proc/sys/${key.replace(/\./g, "/")}: No such file or directory`);
+  }
+  return { out: lines(out), err: lines(err), code: err.length ? 255 : 0 };
+}
+
+function ufw(ctx: SimContext, args: string[]): SimResult {
+  const { host } = ctx;
+  const fw = host.facts.get("ufw") as { active: boolean; allow: string[] } | undefined;
+  if (!fw) return fail("bash: ufw: command not found\n", 127);
+  if (!ctx.root) return fail("ERROR: You need to be root to run this script\n", 1);
+  const rule = (text: string): string => (/^\d+$/.test(text) ? text : text.toLowerCase() === "ssh" ? "22/tcp" : text.toLowerCase() === "http" ? "80/tcp" : text.toLowerCase() === "https" ? "443/tcp" : text);
+  const said = args.indexOf("comment");
+  const cleanArgs = said > 0 ? args.slice(0, said) : args;
+  if (cleanArgs[0] === "status") {
+    if (!fw.active) return ok("Status: inactive\n");
+    return ok(lines(["Status: active", "", "To                         Action      From", "--                         ------      ----", ...fw.allow.map((r) => `${r.padEnd(27)}ALLOW       Anywhere`), ...fw.allow.map((r) => `${`${r} (v6)`.padEnd(27)}ALLOW       Anywhere (v6)`), ""]));
+  }
+  if (cleanArgs[0] === "show" && cleanArgs[1] === "raw") {
+    const policy = fw.active ? "DROP" : "ACCEPT";
+    return ok(
+      lines([
+        "IPV4 (raw):",
+        `Chain INPUT (policy ${policy})`,
+        "target     prot opt source               destination",
+        ...(fw.active ? fw.allow.map((r) => { const [port, proto = "tcp"] = r.split("/"); return `ACCEPT     ${proto.padEnd(4)} --  0.0.0.0/0            0.0.0.0/0            ${proto} dpt:${port}`; }) : []),
+        "",
+      ]),
+    );
+  }
+  if (cleanArgs[0] === "allow" && cleanArgs[1]) {
+    const r = rule(cleanArgs[1]);
+    if (fw.allow.includes(r)) return ok("Skipping adding existing rule\n");
+    fw.allow.push(r);
+    return ok("Rule added\n");
+  }
+  if ((cleanArgs[0] === "deny" && cleanArgs[1]) || (cleanArgs[0] === "delete" && cleanArgs[1] === "allow" && cleanArgs[2])) {
+    const r = rule(cleanArgs[0] === "deny" ? cleanArgs[1] : cleanArgs[2]);
+    fw.allow = fw.allow.filter((x) => x !== r);
+    return ok(cleanArgs[0] === "deny" ? "Rule updated\n" : "Rule deleted\n");
+  }
+  if (cleanArgs[0] === "disable") {
+    fw.active = false;
+    return ok("Firewall stopped and disabled on system startup\n");
+  }
+  if (cleanArgs[0] === "enable" || (cleanArgs[0] === "--force" && cleanArgs[1] === "enable")) {
+    fw.active = true;
+    return ok("Firewall is active and enabled on system startup\n");
+  }
+  if (cleanArgs[0] === "reload") return ok(fw.active ? "Firewall reloaded\n" : "Firewall not enabled (skipping reload)\n");
+  throw new NotSimulated(`ufw ${cleanArgs.join(" ")}`);
+}
+
 /**
  * The system and service commands, by the name they are typed with.
  *
@@ -2463,6 +2636,8 @@ export const systemCommands: Record<string, SimCommand> = {
   lsblk,
   mount,
   findmnt,
+  sysctl,
+  ufw,
   uptime: (ctx, args) => {
     const { flags } = parseArgs(args);
     if (flags.has("s") || flags.has("since")) return ok(`${ymd(ctx.host.bootAt)} ${hms(ctx.host.bootAt)}\n`);

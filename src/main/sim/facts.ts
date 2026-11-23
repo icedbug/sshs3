@@ -54,6 +54,7 @@ export function simFactsOutput(host: SimHost, watch: string[] = []): string {
       .filter((l) => l.proto === "udp")
       .map((l) => `UNCONN 0 0 ${l.address}:${l.port} 0.0.0.0:* users:(("${l.process}",pid=${l.pid ?? 0},fd=5))`),
     "@@sshs3:peers",
+    ...(host.peers ?? []).map((p) => `ESTAB 0 0 ${host.address}:${p.localPort} ${p.remoteIp}:${p.remotePort}${p.process ? ` users:(("${p.process}",pid=1000,fd=9))` : ""}`),
     "@@sshs3:disks",
     "Filesystem Type 1024-blocks Used Available Capacity Mounted on",
     ...host.disks.map((d) => {

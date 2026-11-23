@@ -131,7 +131,7 @@ export function formatAuditMarkdown(
   );
   for (const e of entries) {
     lines.push(
-      `| #${e.seq} | ${new Date(e.at).toISOString()} | ${mdCell(KIND_TEXT[e.kind] ?? e.kind)} | ${mdCell(e.actor)} | ${mdCell(e.target ?? "—")} | ${mdCell(e.what)} | ${mdCell(e.outcome ?? "—")}${e.exitCode !== undefined && e.exitCode !== 0 ? ` (exit ${e.exitCode})` : ""} | ${mdCell(e.approvedBy ?? "—")} | \`${e.hash.slice(0, 12)}\` |`,
+      `| #${e.seq} | ${new Date(e.at).toISOString()} | ${mdCell(KIND_TEXT[e.kind] ?? e.kind)} | ${mdCell(e.actor)} | ${mdCell(e.target ?? "-")} | ${mdCell(e.what)} | ${mdCell(e.outcome ?? "-")}${e.exitCode !== undefined && e.exitCode !== 0 ? ` (exit ${e.exitCode})` : ""} | ${mdCell(e.approvedBy ?? "-")} | \`${e.hash.slice(0, 12)}\` |`,
     );
   }
   return lines.join("\n");
@@ -385,8 +385,8 @@ export function AuditLogView({
           </div>
           {demoEmpty ? (
             <span data-testid="audit-demo-notice">
-              Demo lab: nothing is written to the audit log here. The Timeline
-              shows invented example data.
+              Demo lab: audit entries are recorded locally inside the isolated demo workspace and are never sent outside.
+              Run a command or start an incident to see hash-chained entries here.
             </span>
           ) : emptyLog ? (
             <span data-testid="audit-empty-notice">
@@ -436,8 +436,7 @@ export function AuditLogView({
           {demo && !demoEmpty && (
             <span data-testid="audit-demo-notice">
               {" "}
-              Demo lab: commands and changes are not written to the audit log
-              here. The Timeline shows invented example data.
+              Demo lab: audit entries are recorded locally inside the isolated demo workspace and are never sent outside.
             </span>
           )}
         </div>

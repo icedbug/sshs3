@@ -511,7 +511,7 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
                 {run.checks.map((check, i) => (
                   <li key={i} data-passed={check.passed ? "yes" : "no"}>
                     {check.name}
-                    {check.detail ? <small> — {check.detail}</small> : null}
+                    {check.detail ? <small>: {check.detail}</small> : null}
                   </li>
                 ))}
                 {run.unrecorded > 0 && (

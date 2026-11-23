@@ -12,6 +12,7 @@ export function ComposerFooter({ p, hub }: { p: PanelState; hub: NonNullable<Pan
   const {
     task,
     draftMode,
+    activeProfile,
     setAutonomy,
     setModePicked,
     setConnection,
@@ -59,15 +60,12 @@ export function ComposerFooter({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                   </div>
                   <button
                     className="ai-footer-chip ai-model-chip"
+                    data-testid="ai-composer-model-chip"
                     aria-label="Choose model"
-                    title={hub.config.model || "Choose a model"}
+                    title={activeProfile.destination || activeProfile.label}
                     onClick={() => setSettingsOpen(true)}
                   >
-                    <span>
-                      {hub.config.enabled && hub.config.model
-                        ? hub.config.model
-                        : "Choose model"}
-                    </span>
+                    <span>{activeProfile.label}</span>
                     <ChevronDown size={11} />
                   </button>
                   <button

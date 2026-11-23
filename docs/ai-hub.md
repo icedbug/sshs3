@@ -1913,25 +1913,36 @@ finding out whether an agent solves it well. Nothing in it reaches a real
 machine or a real service.
 
 **Servers that remember.** A `SimHost` has files, folders, disks, services,
-processes, packages, certificates and a journal. A command reads and changes
-that state: `df` adds up the files that are there, `sed -i` changes the file
-`cat` then shows, `systemctl restart nginx` succeeds only if nginx accepts its
-configuration. What follows from a state follows by itself after every
-command (`host.laws`, `host.settle()`): once the WAL archive works again,
-PostgreSQL archives its backlog and the disk empties. There are no timers:
-the same state gives the same answer.
+processes, packages, certificates, peers, and a journal. A command reads and
+changes that state: `df` adds up the files that are there, `sed -i` changes the
+file `cat` then shows, `systemctl restart nginx` succeeds only if nginx accepts
+its configuration. What follows from a state follows by itself after every
+command (`host.laws`, `host.settle()`, and cross-host `world.laws` /
+`world.settle()`): once the WAL archive works again, PostgreSQL archives its
+backlog and the disk empties; once an ONTAP export policy allows a worker node,
+a stuck Kubernetes pod mounts its PVC and becomes Running. There are no background
+timers: the same state gives the same answer, and `sim-advance-time` advances the
+simulated clock deterministically.
+
+**Always-on base fleet (`baseFleet.ts`).** Live demo sessions start with a
+stateful base fleet (Kubernetes control plane and GPU worker, NetApp ONTAP AFF
+A800 nodes, StorageGRID admin, Ceph monitor/manager, ActiveIQ Harvest, and SAN
+bastion) so terminals, facts, dependency links, and demo MCP tools have live
+state even before a specific incident is started.
 
 **A command line, within limits.** `SimShell` reads pipes, `&&`, `||`, `;`,
 redirections, quotes, globs, `sudo` and `sh -c`. The commands are tables:
 
 | Module | Commands |
 |---|---|
-| `commands/files.ts` | `ls cat head tail grep wc sort uniq cut tr awk sed find du stat file touch mkdir rm mv cp tee chmod chown diff test` and the usual small ones |
-| `commands/system.ts` | `systemctl service journalctl df free uptime ps pgrep kill ss netstat ip hostname uname date id which dpkg apt crontab dmesg openssl x509` |
-| `commands/net.ts` | `curl getent host nslookup dig ping nc` against the lab's own names and ports |
+| `commands/files.ts` | `ls cat head tail grep wc sort uniq cut tr awk sed find` (including `-printf`) `du stat file touch mkdir rm mv cp tee chmod chown diff test jq xargs column` and the usual small ones |
+| `commands/system.ts` | `systemctl service journalctl df free uptime ps pgrep kill ss` (with filters and `host.peers`) `netstat ip hostname uname date id which dpkg apt crontab dmesg openssl x509 sysctl ufw` (including `ufw show raw`) |
+| `commands/net.ts` | `ssh` (cross-host inside `SimWorld`), `curl getent host nslookup dig ping nc iptables nft` against the lab's own names and ports |
 | `programs/postgres.ts` | `psql -c` (what a server says about itself), `pg_lsclusters pg_isready pg_ctlcluster` |
 | `programs/nginx.ts` | `nginx -t`, `-T`, `-s reload` |
-| a scenario's own | `aws s3`, `ufw`, `certbot`, ONTAP's `volume` and `qos`, `ceph` |
+| `programs/k8s.ts` | stateful `kubectl`, `tridentctl`, `multipath` |
+| `programs/storage.ts` | reusable ONTAP `vserver`, `volume`/`vol`, `qos`, `cluster`, `storage aggregate show` |
+| a scenario's own | `aws s3`, `certbot`, `ceph`, and scenario-specific tools |
 
 A command the lab does not have answers `command not found`, and an option it
 does not have says it "is not part of this simulation". Both are written down
@@ -1939,23 +1950,26 @@ does not have says it "is not part of this simulation". Both are written down
 agents actually reach. This is the lab's main limit: an agent that tries
 something unusual gets less than a real machine would give it.
 
-**One state, every way in.** The terminal (`DemoVirtualPty`, which also
-understands the frame the agent engine wraps a command in, so
-`terminal_command` and approvals work as on a real server; recordings and the
-audit log are off in demo mode), the
-file manager (`SimStorageProvider`, signed in as the login user), a cluster
-run, and server facts (`sim/facts.ts` prints the real facts script's format,
-so the real parser and the real "what changed" are used) all work on the same
-`SimHost`.
+**One state, every way in.** The terminal (`DemoVirtualPty`, which understands
+the frame the agent engine wraps a command in, so `terminal_command`, approvals,
+and local isolated demo audit/recordings work as on a real server), the file
+manager (`SimStorageProvider`, signed in as the login user), a cluster run,
+server facts (`sim/facts.ts` prints the real facts script's format including
+`@@sshs3:peers`, so the real parser and dependency discovery are used), and
+stateful demo MCP servers (`SimMcpBridge.ts`, deriving Prometheus, NetBox,
+Alertmanager, Grafana, PagerDuty, and NetApp Harvest answers from live
+`SimWorld` state and marking them `simulated: true`) all work on the same
+`SimWorld`.
 
 **An incident is a `SimScenario`** (`scenarios/*.ts`): `build(world)` puts the
 servers in the lab with the fault in them; `alert`, `chat` and `activity` are
 where the clues are; `checks` say what a good outcome is; `solutions` are a
 careful and a careless way through it, as lines to run. Starting one
 (`sim-start`, demo mode only) adds its servers to the inventory, puts its
-chat in the team's chat index as from a bot, writes its activity, and posts
-its alert through the normal alert intake, so a ticket appears on the board.
-`sim-reset` takes all of it away again.
+chat in the team's chat index as a simulated bot (labelled `Demo (simulated)`
+with no external links), writes its activity, and posts its alert through the
+normal alert intake, so a ticket appears on the board. `sim-reset` removes its
+servers, ticket, and `sim-*` activity events again.
 
 | Scenario | The fault | The trap |
 |---|---|---|
@@ -1964,15 +1978,27 @@ its alert through the normal alert intake, so a ticket appears on the board.
 | `cert-renewal` | Port 80 was closed in a hardening round, so the renewal's challenge fails | Switching the firewall off, or a self-signed certificate |
 | `ontap-noisy-neighbour` | A scratch volume without a QoS limit starves the database volume | Taking the scratch volume offline |
 | `ceph-nearfull` | The balancer was left off after an upgrade; one OSD is nearly full | Raising the nearfull ratio, or marking the OSD out |
+| `k8s-pvc-mount-cascade` | A worker node cannot mount its ONTAP NFS PVC because its IP is missing from the ONTAP export policy | Force-deleting the pod or disabling NFS mount checks |
+| `upstream-502-rollback` | A bad release on the app host set `DB_POOL_MAX=0`, causing 502 errors on the web frontend | Restarting nginx alone or bypassing upstream health checks |
+| `facts-drift-stale-runbook` | A systemd drop-in moved the service port while an older KB runbook still names the old port | Following the stale runbook without checking the live unit drop-in |
 
 **Judged from the state, not by a model.** Every check is one of four kinds:
 the trouble is gone (`resolved`), its cause is fixed (`root-cause`), nothing
 was broken on the way (`no-damage`), and the report names the cause
-(`report`, a word match against a short list). The card "Scenarios" in the
-workforce view shows them turning while somebody works; the report is the
-last answer of the conversation about the scenario's server or ticket.
+(`report`, a word match against a short list). The persistent **Scenario Bar**
+(`panel/ScenarioBar.tsx`) stays visible across every tab in demo mode so you
+can launch an incident, open its terminal or ticket, expand the live checks,
+or run a deterministic scripted walkthrough (`sim-replay` in `careful` or
+`careless` mode, clearly labelled as a scripted walkthrough with no AI model).
+The "Scenarios" card in Workforce exposes the same controls and spoiler toggle.
 
-**From the command line:** `npm run sim` lists the incidents;
+**Interactive simulated chat (`SimChat`).** In Settings under Agent in chat,
+`chat-answering-try` accepts optional `interaction` actions (`click` approve or
+deny, and `react` emoji) so approval buttons and reactions can be exercised
+against the in-process `SimChat` transport without external Slack or Mattermost
+accounts.
+
+**From the command line:** `npm run sim` lists all 8 incidents with their tags;
 `npm run sim -- <id> --careful` (or `--careless`) runs a scripted solution;
 `--run <file>` runs the lines of a file; `--shell` lets a person work on it.
 The score is printed (`--json` for JSON) and the exit code is 0 when every
@@ -1996,7 +2022,7 @@ every question and its answer, the agent's report, the scenario's checks, the
 commands the lab does not have, and what the run used.
 
 **Compare the two protocols.** Run `npm run sim:compare -- --fixture --repeats 2`
-to exercise both paths through all five incidents with scripted local answers.
+to exercise both paths through the incidents with scripted local answers.
 For a real comparison, replace `--fixture` with `--base-url <address> --model <name>`.
 Both protocols use that model. Each attempt starts a fresh process and workspace.
 The order alternates. Each attempt allows 40 commands and 12 minutes by default.
@@ -2004,11 +2030,12 @@ The JSON report includes checks passed, total time, time to first visible text,
 HTTP requests including retries, and tokens. A missing measurement or unknown price
 is reported as `null`. Dollar amounts use the app's price table.
 
-In the app the same thing is a click: start a scenario, open the ticket its
-alert made, and press Start. A ticket's run in the demo lab opens a terminal
-on the lab's own simulated servers only, never a connection to a real one.
-With no model set up, a ticket's run says that nobody worked on the ticket
-and changes nothing.
+In the app the same thing is a click: start a scenario from the Scenario Bar,
+Welcome card, or Workforce Scenarios card, then open a terminal on the target
+server, open its alert ticket, or watch a scripted careful/careless walkthrough.
+A ticket's run in the demo lab opens a terminal on the lab's own simulated
+servers only, never a connection to a real one. With no model set up, a
+ticket's run says that nobody worked on the ticket and changes nothing.
 
 What this does and does not show: the scripted solutions prove that the lab
 and its checks work (`tests/main/simScenarios.test.ts` runs both ways through
@@ -2455,14 +2482,14 @@ Changes, Memory & skills, Schedules. Each view is its own file. Styling is in `a
 sections ("AI chat: visual layer" and "the other views") carry the current look.
 
 **The chat panel's own code** was one file of 3,659 lines. It is now a shell,
-the panel state and terminal draft hooks, and thirteen components in `panel/`.
+the panel state and terminal draft hooks, and fourteen components in `panel/`.
 
 | File | What is in it |
 | --- | --- |
-| `AiHubPanel.tsx` (130 lines) | Calls the hook and lays the pieces out |
+| `AiHubPanel.tsx` | Calls the hook and lays the pieces out |
 | `panel/usePanelState.tsx` | Everything the panel holds and does before it draws: which conversation is open, what is typed, the menus, attachments, and the handlers for sending, stopping, forking and the rest. Returns it as one object, `p` |
 | `panel/useTerminalHandoff.ts` | Stages, edits and sends a command from a chat code block. A draft belongs to its conversation, message, block and terminal session. |
-| `panel/PanelHeader.tsx`, `PanelNav.tsx` | The top bar; the history menu, the tabs of the views, an error or a notice |
+| `panel/PanelHeader.tsx`, `PanelNav.tsx`, `ScenarioBar.tsx` | The top bar; the history menu, the tabs of the views, an error or a notice; and the persistent demo lab incident bar |
 | `panel/WorkSidebar.tsx` | The full view's sidebar: conversations, agents, recent team activity |
 | `panel/Welcome.tsx` | What a new chat shows before anything is said |
 | `panel/TaskContextBar.tsx`, `Timeline.tsx`, `ConversationTail.tsx` | A conversation: the bar over it, its messages and changes, and what follows them (tool log, plan, what the agent is doing, why it stopped) |

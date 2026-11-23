@@ -188,7 +188,7 @@ export function usePanelState({
         ? recent
             .map(
               (a) =>
-                `[${new Date(a.at).toISOString()}] ${a.actor} on ${a.targetLabel} (${a.kind}): ${a.summary}${a.detail ? ` — ${a.detail}` : ""}`,
+                `[${new Date(a.at).toISOString()}] ${a.actor} on ${a.targetLabel} (${a.kind}): ${a.summary}${a.detail ? `: ${a.detail}` : ""}`,
             )
             .join("\n")
         : "No recent team activity recorded yet.",

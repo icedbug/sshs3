@@ -137,7 +137,10 @@ async function agent(scenarioId: string): Promise<number> {
 
 async function main(): Promise<number> {
   if (!id) {
-    for (const s of SCENARIOS) console.log(`${s.id.padEnd(24)}${s.title}\n${" ".repeat(24)}starts on ${s.target}`);
+    for (const s of SCENARIOS) {
+      const tags = s.tags?.length ? `  [${s.tags.join(", ")}]` : "";
+      console.log(`${s.id.padEnd(28)}${s.title}\n${" ".repeat(28)}starts on ${s.target}${tags}`);
+    }
     console.log("\nnpm run sim -- <id> [--careful | --careless | --run <file> | --shell | --agent] [--report <text>] [--json]");
     return 0;
   }

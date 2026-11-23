@@ -795,7 +795,7 @@ export function KnowledgeBaseView({
       <section className="ai-dropzone" data-testid="kb-dropzone" aria-label="Add material">
         <div className="ai-dropzone-main">
           <strong>Drop files or folders here</strong>
-          <small>PDF, Word, web pages, Markdown, logs, config files, CSV — up to 10 MB each.</small>
+          <small>PDF, Word, web pages, Markdown, logs, config files, CSV, up to 10 MB each.</small>
           <div className="ai-card-actions">
             <button type="button" className="ai-btn-accent" onClick={() => picker.current?.click()}>
               Choose files
@@ -928,7 +928,7 @@ export function KnowledgeBaseView({
                 </span>
                 <small className="ai-muted">
                   {h.collection || "General"} · {hits.byMeaning || embeddings ? "semantic" : "keyword"} · score{" "}
-                  {Number.isFinite(h.score) ? h.score.toFixed(2) : "—"}
+                  {Number.isFinite(h.score) ? h.score.toFixed(2) : "-"}
                 </small>
               </button>
             );

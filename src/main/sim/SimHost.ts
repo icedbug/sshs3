@@ -76,6 +76,13 @@ export interface SimLogLine {
   priority?: number;
 }
 
+export interface SimPeer {
+  localPort: number;
+  remoteIp: string;
+  remotePort: number;
+  process?: string;
+}
+
 export interface SimHostInit {
   name: string;
   address: string;
@@ -88,6 +95,7 @@ export interface SimHostInit {
   user?: string;
   memoryMb?: number;
   cpus?: number;
+  peers?: SimPeer[];
 }
 
 const DIR_SIZE_KB = 4;
@@ -124,6 +132,8 @@ export class SimHost {
   packages: Record<string, string> = {};
   readonly certs = new Map<string, SimCert>();
   readonly journal: SimLogLine[] = [];
+  /** Established outbound TCP peers for ss and ServerFacts dependency discovery. */
+  peers?: SimPeer[];
   /** Anything a scenario keeps on the host that is not a file: an appliance's volumes, a database's settings. */
   readonly facts = new Map<string, unknown>();
   /**
@@ -158,6 +168,7 @@ export class SimHost {
     this.name = init.name;
     this.address = init.address;
     this.kind = init.kind ?? "linux";
+    if (init.peers) this.peers = init.peers.map((p) => ({ ...p }));
     this.os = init.os ?? { id: "ubuntu", version: "24.04", pretty: "Ubuntu 24.04.1 LTS" };
     this.kernel = init.kernel ?? "6.8.0-45-generic";
     this.bootAt = this.now() - (init.uptimeSeconds ?? 41 * 86_400) * 1000;

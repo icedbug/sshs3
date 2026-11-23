@@ -56,6 +56,18 @@ const ufw: SimCommand = (ctx, args) => {
     if (!fw.active) return ok("Status: inactive\n");
     return ok(lines(["Status: active", "", "To                         Action      From", "--                         ------      ----", ...fw.allow.map((r) => `${r.padEnd(27)}ALLOW       Anywhere`), ...fw.allow.map((r) => `${`${r} (v6)`.padEnd(27)}ALLOW       Anywhere (v6)`), ""]));
   }
+  if (args[0] === "show" && args[1] === "raw") {
+    const policy = fw.active ? "DROP" : "ACCEPT";
+    return ok(
+      lines([
+        "IPV4 (raw):",
+        `Chain INPUT (policy ${policy})`,
+        "target     prot opt source               destination",
+        ...(fw.active ? fw.allow.map((r) => { const [port, proto = "tcp"] = r.split("/"); return `ACCEPT     ${proto.padEnd(4)} --  0.0.0.0/0            0.0.0.0/0            ${proto} dpt:${port}`; }) : []),
+        "",
+      ]),
+    );
+  }
   if (args[0] === "allow" && args[1]) {
     const r = rule(args[1]);
     if (fw.allow.includes(r)) return ok("Skipping adding existing rule\n");

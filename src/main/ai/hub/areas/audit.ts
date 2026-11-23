@@ -37,7 +37,7 @@ export class AuditPart {
     this.auditShipperUnsub?.();
     this.auditShipperUnsub = undefined;
     this.auditShipper = undefined;
-    if (!options) return;
+    if (!options || isDemoMode()) return;
     // Where the log goes is held to the same rule as any other address sshs3 calls out to: on a shared
     // server not the server itself or its private network, unless the administrator allows it.
     const shipper = new AuditShipper({ ...options, guard: { ...this.outboundGuard(), allowPlainHttp: true } });
@@ -63,7 +63,6 @@ export class AuditPart {
    * one, so a path that is added later is not a path that is left out.
    */
   auditFinishedChanges(this: HubService): void {
-    if (isDemoMode()) return;
     const FINAL = new Set(["completed", "failed", "denied", "uncertain"]);
     for (const task of this.store.data.tasks) {
       if (task.distillSourceId) continue;

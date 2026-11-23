@@ -383,7 +383,7 @@ export function Settings({
             }}
           >
             <option value="openai-codex">
-              ChatGPT / Codex (OAuth — {hub.config.codexDefaultModel || "gpt-6.1-sol"})
+              ChatGPT / Codex (OAuth, {hub.config.codexDefaultModel || "gpt-6.1-sol"})
             </option>
             <option value="anthropic">Anthropic</option>
             <option value="openai-compatible">OpenAI-compatible / local / enterprise</option>
@@ -986,7 +986,7 @@ export function Settings({
             onChange={(e) => setLabsEnabled(e.target.checked)}
           />
           <span>
-            Show the extra views (Workforce, Agent tests, Memory, Schedules) and the switches for work that starts by itself
+            Show the extra views (Memory &amp; skills, Agents &amp; MCP, Schedules) and the switches for work that starts by itself
             <small>
               Off keeps the workspace to the chat, approvals and runbooks.
             </small>
@@ -1152,9 +1152,9 @@ export function Settings({
                 value={reasoningEffort}
                 onChange={(e) => setReasoningEffort(e.target.value as AiReasoningEffort)}
               >
-                <option value="low">Low — fastest</option>
+                <option value="low">Low: fastest</option>
                 <option value="medium">Medium (default)</option>
-                <option value="high">High — for hard root-cause work</option>
+                <option value="high">High: for hard root-cause work</option>
               </select>
             </label>
             {provider !== "anthropic" && (
