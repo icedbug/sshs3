@@ -214,7 +214,7 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
     if (op === "save_runner")
       return {
         title: "Add or change a program that runs as an external agent",
-        detail: lines(show(payload, ["idOrName", "name", "command", "args", "cwd"]), "The program is started on this computer, as you."),
+        detail: lines(show(payload, ["idOrName", "name", "command", "args", "cwd", "env"]), "The program is started on this computer, as you. It is given the path, home folder, language, terminal, temporary folder and proxy settings of this app's environment, and the variables listed under env."),
       };
     if (op === "test_runner") return { title: "Start an external agent's program once, to see that it answers", detail: show(payload, ["idOrName"]) || op };
     if (op === "set_mcp_tool_policy")
@@ -225,7 +225,11 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
     if (op === "create_mcp_key")
       return {
         title: "Make a key that lets another agent reach this app",
-        detail: lines(show(payload, ["name", "scopes", "serverIdOrName", "expiresInDays", "tools"]), "The key is shown to you once, on this card. It is not given to the agent in this conversation."),
+        detail: lines(
+          show(payload, ["name", "scopes", "serverIdOrName", "expiresInDays", "neverExpires", "tools"]),
+          payload.neverExpires === true ? "This key never stops working." : payload.expiresInDays === undefined ? "The key works for 30 days." : "",
+          "The key is shown to you once, on this card. It is not given to the agent in this conversation.",
+        ),
       };
     if (op === "revoke_mcp_key") return { title: "Take back a key another agent reaches this app with", detail: show(payload, ["idOrName"]) || op };
     if (op === "set_local_mcp_server")

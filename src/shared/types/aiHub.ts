@@ -246,6 +246,11 @@ export interface EvalRun {
   unrecorded: number;
   /** Tool calls the replay asked for real instead of answering from the recording (the knowledge base). */
   live?: Record<string, number>;
+  /**
+   * "today": the test holds no server list of its own (it was made before one was kept, or the
+   * workspace had servers from a Team Vault), so the replay saw the servers as they are now.
+   */
+  serverList?: "today";
   tokens: number;
 }
 /** A test for the agents, made from a real conversation and replayed without running anything. */
@@ -258,6 +263,13 @@ export interface EvalCase {
   fromTaskId?: string;
   /** What each tool answered when the conversation took place. */
   recorded: { name: string; input: string; output: string }[];
+  /**
+   * The workspace's servers when the test was made: what a replay is told exists, so that a server
+   * added or renamed since does not change what the agent is asked about. Absent on a test made
+   * before this was kept, and when the workspace had servers from a Team Vault (those are never
+   * copied into what the team shares).
+   */
+  servers?: Array<Pick<WorkspaceServerSummary, "id" | "name" | "host" | "port" | "username" | "cluster" | "tags" | "description" | "nodeRole" | "role">>;
   expect: EvalExpectation;
   /** Newest first. */
   runs: EvalRun[];
@@ -1240,6 +1252,11 @@ export interface ExternalRunner {
   args: string[];
   /** The folder the agent works in: the checkout of the code. */
   cwd?: string;
+  /**
+   * Names of environment variables the program is given on top of the few every program gets
+   * (see `childEnv` in AcpRuntime.ts): the variable its API key is read from, say.
+   */
+  env?: string[];
   updatedAt: number;
 }
 export interface ExternalRunnerPreset {
@@ -2393,7 +2410,6 @@ export interface HubSnapshot {
     contextWindowTokens: number;
     terminalContextChars: number;
     maxOutputTokens: number;
-    maxToolTurns: number;
     reasoningEffort: string;
     temperature: number;
   };
@@ -2653,7 +2669,7 @@ export type HubRequest =
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }
-  | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }
+  | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string; env?: string[] } }
   | { action: "runner-delete"; id: string }
   /** Starts the external agent's program, greets it and stops it again: says in `reply.runnerProbe` whether it is there and answers. */
   | { action: "runner-test"; id: string }

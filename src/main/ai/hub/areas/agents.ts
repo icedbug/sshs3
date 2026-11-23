@@ -10,7 +10,7 @@ import type {
   StartAgentTask,
   WorkforceRun,
 } from "../../../../shared/types/aiHub";
-import { probeRunner } from "../AcpRuntime";
+import { probeRunner, runnerEnvNames } from "../AcpRuntime";
 import { deleteDemoAgent, getBuiltinAgents, getDemoWorkforceRuns, isDemoMode, saveDemoAgent } from "../demoWorkspace";
 import { boundedContext, boundedPrompt, clip, PERSON_PROMPT_MAX, safeError } from "../privacy";
 import { runWorkforce } from "../WorkforceRunner";
@@ -42,6 +42,12 @@ import type { Handled, RequestsOf } from "./routes";
  * A part of HubService. These are the hub's own methods, kept in a file of their own: `this` is the hub,
  * and they are copied onto its class where it is declared (HubService.ts).
  */
+/**
+ * How many investigators of one asking run work at the same time. Each is a model run with a
+ * terminal of its own on the target: a question list of forty opened forty of both at once.
+ */
+export const MAX_PARALLEL_INVESTIGATORS = 4;
+
 export class AgentsPart {
   // Built-ins depend on the mode (demoWorkspace getBuiltin*): the demo workspace's fixtures in demo mode,
   // otherwise the neutral defaults of builtins.ts. They are merged in here, never stored.
@@ -103,7 +109,11 @@ export class AgentsPart {
     return allAgents.filter((a) => tokensLeft(a, this.usageTotal()) > 0);
   }
 
-  /** The conversation changes hands via a validated HandoffPacket (max 3 hops, cycle-checked). */
+  /**
+   * The conversation changes hands with a handoff packet that is checked first: never back to an
+   * agent that already had it. There is no limit on how many times it is handed on
+   * (MAX_HANDOFF_HOPS in AgentDiscipline.ts).
+   */
   applyHandoff(this: HubService,
     task: AgentTask,
     toAgent: MissionAgent,
@@ -364,7 +374,8 @@ export class AgentsPart {
 
   /**
    * An agent hands questions to investigators that only look, in
-   * parallel (as many as there are questions) and gets their reports
+   * parallel (MAX_PARALLEL_INVESTIGATORS at a time; further questions wait
+   * for one to finish) and gets their reports
    * back together. Each investigator is a model run of its own with a fresh
    * context, so the asking agent's context is spent on the answers, not on the
    * reading. A question whose investigator fails comes back with the error.
@@ -432,7 +443,7 @@ export class AgentsPart {
     };
     try {
       await Promise.all(
-        Array.from({ length: asked.length }, () => worker()),
+        Array.from({ length: Math.min(asked.length, MAX_PARALLEL_INVESTIGATORS) }, () => worker()),
       );
     } finally {
       this.workforceLeads.delete(runId);
@@ -700,6 +711,10 @@ export class AgentsPart {
           cwd: r.cwd?.trim() || undefined,
           updatedAt: Date.now(),
         };
+        // The variables it is given beyond the basics. A save that does not name any (the form in
+        // the app has no field for them) keeps the ones it had.
+        const env = r.env !== undefined ? runnerEnvNames(r.env) : (this.store.data.externalRunners ?? []).find((x) => x.id === id)?.env;
+        if (env?.length) saved.env = env;
         this.store.data.externalRunners = [
           ...(this.store.data.externalRunners ?? []).filter((x) => x.id !== id),
           saved,

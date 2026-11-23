@@ -306,14 +306,38 @@ export function parseReview(answer: string): AgentPlan["review"] {
 const lastUserText = (task: Pick<AgentTask, "messages">): string =>
   task.messages.filter((m) => m.role === "user").at(-1)?.text ?? "";
 
-/** Whether the conversation is waiting for, or has been asked for, a plan that is not approved. */
+/**
+ * A user message the hub wrote itself, not the person: its word that a plan was approved or sent
+ * back, and the line a resumed conversation starts with (areas/conversations.ts, "resume").
+ */
+const HUB_WRITTEN = /^(?:\[sshs3\] |Resume on this terminal\.|Resume the conversation\.$|You have \d+ more commands and \d+ more minutes\. Continue where you stopped\.)/;
+
+/**
+ * Why an approved plan does not cover a new change any more, if it does not: every step of it
+ * has run ("done"), or the person has written since they approved it ("new-request"). An approval
+ * is for the plan that was shown, not for whatever the conversation turns to afterwards.
+ */
+export function approvedPlanOver(task: Pick<AgentTask, "plan" | "messages">): "done" | "new-request" | undefined {
+  const plan = task.plan;
+  if (plan?.status !== "approved") return undefined;
+  if (plan.steps.length > 0 && plan.steps.every((step) => step.ranAt)) return "done";
+  const since = plan.decidedAt;
+  if (since !== undefined && task.messages.some((m) => m.role === "user" && m.at >= since && !HUB_WRITTEN.test(m.text)))
+    return "new-request";
+  return undefined;
+}
+
+/**
+ * Whether the conversation is waiting for, or has been asked for, a plan that is not approved, or
+ * was asked for one and the plan that was approved is over.
+ */
 export function planPending(task: Pick<AgentTask, "mode" | "plan" | "messages">): boolean {
   if (task.plan?.status === "proposed") return true;
   const last = lastUserText(task);
   // The run that revises a plan the user sent back is still planning.
   if (task.plan?.status === "rejected" && last.startsWith(REJECTED_PREFIX))
     return true;
-  return wantsPlanFirst(last, task.mode) && task.plan?.status !== "approved";
+  return wantsPlanFirst(last, task.mode) && (task.plan?.status !== "approved" || approvedPlanOver(task) !== undefined);
 }
 
 /**
@@ -350,6 +374,16 @@ export function planGate(
     appOpClass(tool, args) === "guard" ||
     appOpClass(tool, args) === "guard-if";
   if (!changes) return undefined;
+  const over = approvedPlanOver(task);
+  if (over === "done")
+    return "Every step of the approved plan has run. A new change needs a new plan: propose it with sshs3_plan_propose and wait for the user's approval. Commands still run; make no change.";
+  if (over === "new-request") {
+    // What was approved is still approved: a step of the plan that has not run yet is not held.
+    const command = typeof args.command === "string" ? args.command.trim() : "";
+    if (tool === "sshs3_change" && command && task.plan!.steps.some((step) => !step.ranAt && step.commandHash === exactHash(command)))
+      return undefined;
+    return "The user has written since they approved the plan. A change that plan does not list needs a new plan: propose it with sshs3_plan_propose and wait for their approval. Commands still run; make no change.";
+  }
   if (task.plan?.status === "proposed") {
     return "A plan is waiting for the user's approval. No change card and no file write runs until they approve it. Tell the user the plan and stop. Commands still run; make no change.";
   }

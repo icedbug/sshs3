@@ -15,12 +15,15 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+/** The variables the stand-in agent is steered with: a program is given only what its runner names beyond the basics. */
+const FAKE_ENV = ["FAKE_ACP", "FAKE_ACP_COMMAND"];
 const runner = (extra: Partial<ExternalRunner> = {}): ExternalRunner => ({
   id: "fake",
   name: "Fake agent",
   command: process.execPath,
   args: [FAKE],
   cwd: os.tmpdir(),
+  env: FAKE_ENV,
   updatedAt: 1,
   ...extra,
 });
@@ -63,10 +66,55 @@ describe("an external agent's request that names only its call", () => {
     expect(settled).toEqual([["c2", { failed: true, output: "rm: permission denied" }]]);
   });
 
-  it("does not hand the agent sshs3's SSH agent or its own settings", async () => {
-    const { childEnv } = await import("../../src/main/ai/hub/AcpRuntime");
-    const env = childEnv({ PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent", SSHS3_DATA_DIR: "/x", ANTHROPIC_API_KEY: "k" });
-    expect(env).toEqual({ PATH: "/bin", ANTHROPIC_API_KEY: "k" });
+  it("hands the agent the basics of the environment and what its runner names, and nothing else", async () => {
+    const { childEnv, runnerEnvNames } = await import("../../src/main/ai/hub/AcpRuntime");
+    const here = {
+      PATH: "/bin", HOME: "/home/maria", LANG: "sv_SE.UTF-8", LC_ALL: "C", TERM: "xterm-256color", TMPDIR: "/tmp",
+      HTTPS_PROXY: "http://proxy:3128", no_proxy: "localhost", NODE_EXTRA_CA_CERTS: "/etc/ca.pem",
+      SSH_AUTH_SOCK: "/tmp/agent", SSHS3_DATA_DIR: "/x",
+      ANTHROPIC_API_KEY: "k", AWS_SECRET_ACCESS_KEY: "aws", GITHUB_TOKEN: "gh", DATABASE_URL: "postgres://u:p@db/x",
+    };
+    // Cloud keys and tokens that happen to be set where the app was started stay with the app.
+    expect(childEnv(here)).toEqual({
+      PATH: "/bin", HOME: "/home/maria", LANG: "sv_SE.UTF-8", LC_ALL: "C", TERM: "xterm-256color", TMPDIR: "/tmp",
+      HTTPS_PROXY: "http://proxy:3128", no_proxy: "localhost", NODE_EXTRA_CA_CERTS: "/etc/ca.pem",
+    });
+    // What the runner's settings name is passed too. The SSH agent and sshs3's own are not, whoever names them.
+    const named = childEnv(here, ["ANTHROPIC_API_KEY", "SSH_AUTH_SOCK", "SSHS3_DATA_DIR", "NOT_SET"]);
+    expect(named.ANTHROPIC_API_KEY).toBe("k");
+    expect(named).not.toHaveProperty("SSH_AUTH_SOCK");
+    expect(named).not.toHaveProperty("SSHS3_DATA_DIR");
+    expect(named).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
+    expect(runnerEnvNames(["ANTHROPIC_API_KEY", " OPENAI_API_KEY ", "SSH_AUTH_SOCK", "SSHS3_TOKEN", "bad name", "A=B", 7, "ANTHROPIC_API_KEY"])).toEqual(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+  });
+
+  it("ends the whole tree under a runner on Windows, where the program runs under cmd.exe", async () => {
+    const { killRunner } = await import("../../src/main/ai/hub/AcpRuntime");
+    const started: Array<{ file: string; args: string[] }> = [];
+    const run = ((file: string, args: string[]) => {
+      started.push({ file, args });
+      return { on: () => undefined };
+    }) as never;
+    const signals: Array<string | undefined> = [];
+    const child = { pid: 4242, kill: (signal?: NodeJS.Signals) => (signals.push(signal), true) };
+    killRunner(child, "SIGKILL", "win32", run);
+    expect(started).toEqual([{ file: "taskkill", args: ["/pid", "4242", "/T", "/F"] }]);
+    expect(signals).toEqual([]);
+    // Elsewhere the program is the child itself.
+    killRunner(child, "SIGKILL", "linux", run);
+    expect(started).toHaveLength(1);
+    expect(signals).toEqual(["SIGKILL"]);
+    // And when taskkill cannot be started, what can be ended is.
+    killRunner(child, undefined, "win32", (() => { throw new Error("ENOENT"); }) as never);
+    expect(signals).toEqual(["SIGKILL", undefined]);
+  });
+
+  it("saves what the agent says it used", async () => {
+    const { events } = await run("usage");
+    expect(events.at(-1)).toMatchObject({ type: "run.completed", usage: { input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 50 } });
+    // An agent that says nothing about it reports no usage: nothing is made up.
+    const silent = await run("plain");
+    expect(silent.events.at(-1)).not.toHaveProperty("usage");
   });
 });
 
@@ -168,7 +216,7 @@ describe("a ticket for an external agent", () => {
     await expect(hub.request({ action: "ticket-start", id: ticketId })).rejects.toThrow(/not set up on this computer/);
     expect(hub.store.data.workTickets![0].status).toBe("todo");
 
-    snap = await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
+    snap = await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir, env: FAKE_ENV } });
     expect(snap.externalRunners!.map((r) => r.id)).toEqual(["fake"]);
     await hub.request({ action: "ticket-start", id: ticketId });
     // Ask first: a command the agent asks to run is a plain command. It is allowed, and nobody is asked.
@@ -189,7 +237,7 @@ describe("a ticket for an external agent", () => {
     const notify = vi.spyOn(hub, "notify");
     process.env.FAKE_ACP = "max_tokens";
     await hub.request({ action: "runner-save", runner: runner({ cwd: dir }) });
-    await hub.request({ action: "agent-save", agent: { id: "reviewer", name: "Reviewer", role: "Reviewer", systemPrompt: "", defaultMode: "advice", mission: "Review notes", runnerId: "fake" } });
+    await hub.request({ action: "agent-save", agent: { id: "reviewer", name: "Reviewer", role: "Reviewer", systemPrompt: "", defaultMode: "assisted", mission: "Review notes", runnerId: "fake" } });
     const snap = await hub.request({ action: "ticket-save", ticket: { title: "Review notes", assigneeAgentId: "reviewer" } });
     const id = snap.workTickets![0].id;
     await hub.request({ action: "ticket-start", id });
@@ -205,7 +253,7 @@ describe("a ticket for an external agent", () => {
     const { hub, dir } = await makeHub();
     process.env.FAKE_ACP = "ask";
     process.env.FAKE_ACP_COMMAND = "rm -rf /var/lib/app";
-    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
+    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir, env: FAKE_ENV } });
     await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: mode, runnerId: "fake" } as never });
     const snap = await hub.request({ action: "ticket-save", ticket: { title: "Clean up", assigneeAgentId: "builder" } });
     await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });
@@ -219,23 +267,47 @@ describe("a ticket for an external agent", () => {
     expect(run.changes[0]).not.toHaveProperty("riskLevel");
   });
 
-  it("refuses a command the agent asks for in Advice", async () => {
+  it("does not start the agent's program in Advice, and says why", async () => {
     const { hub, dir } = await makeHub();
     process.env.FAKE_ACP = "ask";
-    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
+    // The program leaves a file behind as soon as it starts: the proof that it did not.
+    const started = path.join(dir, "started");
+    const script = path.join(dir, "leaves-a-mark.cjs");
+    await fs.writeFile(script, `require("node:fs").writeFileSync(${JSON.stringify(started)}, "x"); require(${JSON.stringify(FAKE)});`, "utf8");
+    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [script], cwd: dir, env: FAKE_ENV } });
     await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: "advice", runnerId: "fake" } as never });
     const snap = await hub.request({ action: "ticket-save", ticket: { title: "Look", assigneeAgentId: "builder" } });
+    await expect(hub.request({ action: "ticket-start", id: snap.workTickets![0].id })).rejects.toThrow(
+      "Builder runs on an external agent: a program on this computer that runs commands and edits files by itself. In Advice mode nothing may be run or changed, so it was not started. Choose another mode, or an agent that runs on the configured model.",
+    );
+    await expect(fs.access(started)).rejects.toThrow();
+    // In a mode that may act the same program is started.
+    await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: "assisted", runnerId: "fake" } as never });
     await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });
     await waitFor(() => hub.store.data.workTickets![0].status === "review");
-    expect(hub.store.data.workTickets![0].result).toContain("Permission: no.");
+    await expect(fs.access(started)).resolves.toBeUndefined();
+  });
+
+  it("counts what the agent says it used, and keeps the variables a runner was given when it is saved again without them", async () => {
+    const { hub, dir } = await makeHub();
+    process.env.FAKE_ACP = "usage";
+    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir, env: [...FAKE_ENV, "SSH_AUTH_SOCK", "not a name"] } });
+    // The form in the app saves a runner without naming variables: the ones it had stay.
+    const snap0 = await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent (renamed)", command: process.execPath, args: [FAKE], cwd: dir } });
+    expect(snap0.externalRunners![0]).toMatchObject({ name: "Fake agent (renamed)", env: FAKE_ENV });
+    await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: "assisted", runnerId: "fake" } as never });
+    const snap = await hub.request({ action: "ticket-save", ticket: { title: "Count it", assigneeAgentId: "builder" } });
+    await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });
+    await waitFor(() => hub.store.data.workTickets![0].status === "review");
     const run = hub.store.data.tasks.find((t) => t.ticketId === snap.workTickets![0].id)!;
-    expect(run.changes[0]).toMatchObject({ status: "denied", decidedHow: "policy" });
+    expect(run.usage).toMatchObject({ inputTokens: 1200, outputTokens: 300, cacheReadTokens: 50 });
+    expect(hub.store.data.agentUsage?.builder?.tokens).toBe(1550);
   });
 
   it.each(["assisted", "autonomous"] as const)("puts an edit the agent gave no command for to a person, as a file write, in %s", async (mode) => {
     const { hub, dir } = await makeHub();
     process.env.FAKE_ACP = "ask-edit";
-    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
+    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir, env: FAKE_ENV } });
     await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: mode, runnerId: "fake" } as never });
     const snap = await hub.request({ action: "ticket-save", ticket: { title: "Add a login form", assigneeAgentId: "builder" } });
     await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });

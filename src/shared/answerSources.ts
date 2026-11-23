@@ -1,7 +1,12 @@
 /** Immutable references to the material present in one model request. */
 export interface AnswerSource {
   ref: string;
-  kind: "kb-page" | "kb-document" | "memory" | "terminal" | "server-reading";
+  /**
+   * `terminal`: what a command printed. `server-reading`: something read from a server without a
+   * terminal (its recorded facts, a file, a diff of two files). `investigation`: the report of an
+   * investigator the agent sent out.
+   */
+  kind: "kb-page" | "kb-document" | "memory" | "terminal" | "server-reading" | "investigation";
   id: string;
   label: string;
   revision?: number;

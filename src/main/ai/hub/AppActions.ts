@@ -1513,10 +1513,6 @@ export async function handleAppAction(
           if (maxOutputTokens !== undefined) {
             aiConfigPatch.maxOutputTokens = maxOutputTokens;
           }
-          const maxToolTurns = optInt(p, "maxToolTurns", { min: 1, max: 60 });
-          if (maxToolTurns !== undefined) {
-            aiConfigPatch.maxToolTurns = maxToolTurns;
-          }
           const reasoningEffort = optEnum(p, "reasoningEffort", [
             "low",
             "medium",

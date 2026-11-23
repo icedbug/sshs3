@@ -277,7 +277,7 @@ const KINDS: Record<SettingsTool, { numbers: string[]; booleans: string[]; lists
     booleans: ["requirePeerApprovalOnProd"],
     lists: [],
   },
-  sshs3_agent_and_mcp_manage: { numbers: ["expiresInDays", "port"], booleans: ["enabled"], lists: ["args", "scopes", "tools"] },
+  sshs3_agent_and_mcp_manage: { numbers: ["expiresInDays", "port"], booleans: ["enabled", "neverExpires"], lists: ["args", "scopes", "tools", "env"] },
   sshs3_manage_team_chat: {
     numbers: ["days", "personNewPerHour", "personMessagesPerHour", "channelPerHour", "concurrentRuns", "monthlyTokenBudget", "approvalWaitMinutes"],
     booleans: ["enabled", "forget", "selected", "dmsEnabled"],
@@ -476,7 +476,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       const id = existing?.id ?? query ?? name;
       const snap = await hub.request({
         action: "runner-save",
-        runner: { id, name, command, args: list(p, "args") ?? existing?.args ?? [], ...(str(p, "cwd") ?? existing?.cwd ? { cwd: str(p, "cwd") ?? existing?.cwd } : {}) },
+        runner: { id, name, command, args: list(p, "args") ?? existing?.args ?? [], ...(str(p, "cwd") ?? existing?.cwd ? { cwd: str(p, "cwd") ?? existing?.cwd } : {}), ...(list(p, "env") ? { env: list(p, "env") } : {}) },
       });
       return { ok: true, runners: snap.externalRunners ?? [], ...(snap.reply?.notes ? { notes: snap.reply.notes } : {}) };
     }
@@ -514,6 +514,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
         scopes,
         ...(server ? { serverId: server.id } : {}),
         ...(num(p, "expiresInDays") !== undefined ? { expiresInDays: num(p, "expiresInDays") } : {}),
+        ...(p.neverExpires === true ? { neverExpires: true } : {}),
         ...(tools ? { tools } : {}),
       });
       const made = snap.reply?.mcpKey;

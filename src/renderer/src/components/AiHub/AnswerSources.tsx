@@ -9,6 +9,7 @@ const kindLabel: Record<AnswerSource["kind"], string> = {
   memory: "Memory",
   terminal: "Terminal excerpt",
   "server-reading": "Server reading",
+  investigation: "Investigator's report",
 };
 
 function Timestamp({ value }: { value: number }): JSX.Element {

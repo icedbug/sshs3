@@ -370,37 +370,45 @@ export class AiConfigStore {
     profile: Omit<ProviderProfile, "hasApiKey" | "keyStorage"> & { apiKey?: string | null },
   ): Promise<AiConfigView> {
     const { apiKey: nextKey, ...profileFields } = profile;
-    const current = await this.read();
-    const existing = Array.isArray(current.profiles) ? [...current.profiles] : [];
-    const idx = existing.findIndex((p) => p.id === profileFields.id.trim());
-    if (idx >= 0) {
-      existing[idx] = profileFields;
-    } else {
-      existing.push(profileFields);
-    }
-    const updatePayload: AiConfigUpdate = { profiles: existing };
-    if (typeof nextKey === "string" || nextKey === null) {
-      updatePayload.profileApiKeys = { [profileFields.id.trim()]: nextKey };
-    }
-    return this.update(updatePayload);
+    // Read and written in one turn of the write queue: the whole list of profiles is saved, so two
+    // saves that each read the list before the other wrote would lose one of the two profiles.
+    await this.queueMutation(async () => {
+      const current = await this.read();
+      const existing = Array.isArray(current.profiles) ? [...current.profiles] : [];
+      const idx = existing.findIndex((p) => p.id === profileFields.id.trim());
+      if (idx >= 0) {
+        existing[idx] = profileFields;
+      } else {
+        existing.push(profileFields);
+      }
+      const updatePayload: AiConfigUpdate = { profiles: existing };
+      if (typeof nextKey === "string" || nextKey === null) {
+        updatePayload.profileApiKeys = { [profileFields.id.trim()]: nextKey };
+      }
+      await this.applyUpdate(updatePayload);
+    });
+    return this.getView();
   }
 
   /** Deletes a named provider profile, its encrypted key, and any role bindings referencing it. */
   public async deleteProfile(profileId: string): Promise<AiConfigView> {
     const id = profileId.trim();
-    const current = await this.read();
-    const nextProfiles = (current.profiles ?? []).filter((p) => p.id !== id);
-    const nextRoles: AiActiveProfileByRole = { ...(current.activeProfileByRole ?? {}) };
-    for (const role of CANONICAL_ROLES) {
-      if (nextRoles[role] === id) {
-        delete nextRoles[role];
+    await this.queueMutation(async () => {
+      const current = await this.read();
+      const nextProfiles = (current.profiles ?? []).filter((p) => p.id !== id);
+      const nextRoles: AiActiveProfileByRole = { ...(current.activeProfileByRole ?? {}) };
+      for (const role of CANONICAL_ROLES) {
+        if (nextRoles[role] === id) {
+          delete nextRoles[role];
+        }
       }
-    }
-    return this.update({
-      profiles: nextProfiles,
-      activeProfileByRole: nextRoles,
-      profileApiKeys: { [id]: null },
+      await this.applyUpdate({
+        profiles: nextProfiles,
+        activeProfileByRole: nextRoles,
+        profileApiKeys: { [id]: null },
+      });
     });
+    return this.getView();
   }
 
   /** Assigns or clears the active profile ID for a given role (supports canonical names and aliases). */
@@ -409,18 +417,30 @@ export class AiConfigStore {
     profileId: string | null,
   ): Promise<AiConfigView> {
     const canonical = normalizeAiProfileRole(role);
-    const current = await this.read();
-    const nextRoles: AiActiveProfileByRole = { ...(current.activeProfileByRole ?? {}) };
-    if (profileId === null || profileId.trim() === "") {
-      delete nextRoles[canonical];
-    } else {
-      nextRoles[canonical] = profileId.trim();
-    }
-    return this.update({ activeProfileByRole: nextRoles });
+    await this.queueMutation(async () => {
+      const current = await this.read();
+      const nextRoles: AiActiveProfileByRole = { ...(current.activeProfileByRole ?? {}) };
+      if (profileId === null || profileId.trim() === "") {
+        delete nextRoles[canonical];
+      } else {
+        nextRoles[canonical] = profileId.trim();
+      }
+      await this.applyUpdate({ activeProfileByRole: nextRoles });
+    });
+    return this.getView();
   }
 
   public async update(update: AiConfigUpdate): Promise<AiConfigView> {
-    await this.queueMutation(async () => {
+    await this.queueMutation(() => this.applyUpdate(update));
+    return this.getView();
+  }
+
+  /**
+   * Reads what is stored, applies the update and writes it. Only ever called from inside the write
+   * queue (`queueMutation`): what it reads is then what the save before it wrote.
+   */
+  private async applyUpdate(update: AiConfigUpdate): Promise<void> {
+    {
       const current = await this.read();
       const next: StoredAiConfig = {
         ...current,
@@ -657,8 +677,7 @@ export class AiConfigStore {
       }
 
       await writeFileAtomic(this.filePath, JSON.stringify(next, null, 2), { mode: 0o600 });
-    });
-    return this.getView();
+    }
   }
 
   private async readWithCodexAutoDetect(): Promise<StoredAiConfig> {

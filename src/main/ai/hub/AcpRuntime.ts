@@ -22,6 +22,30 @@ import { boundedContext, boundedPrompt, safeError } from "./privacy";
  * asks permission for is.
  */
 
+/**
+ * What an agent says it used, as the hub counts it. The protocol leaves this to the agent: some
+ * report it with the answer to the prompt (`usage`, also under `_meta`), in either spelling.
+ */
+export function acpUsage(reported: unknown): Record<string, number> | undefined {
+  if (!reported || typeof reported !== "object") return undefined;
+  const u = reported as Record<string, unknown>;
+  const read = (...names: string[]): number | undefined => {
+    for (const name of names) if (typeof u[name] === "number" && Number.isFinite(u[name]) && (u[name] as number) >= 0) return Math.round(u[name] as number);
+    return undefined;
+  };
+  const input = read("inputTokens", "input_tokens");
+  const output = read("outputTokens", "output_tokens");
+  if (input === undefined && output === undefined) return undefined;
+  const cacheRead = read("cachedReadTokens", "cacheReadTokens", "cache_read_input_tokens");
+  const cacheWrite = read("cachedWriteTokens", "cacheCreationTokens", "cache_creation_input_tokens");
+  return {
+    input_tokens: input ?? 0,
+    output_tokens: output ?? 0,
+    ...(cacheRead !== undefined ? { cache_read_input_tokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cache_creation_input_tokens: cacheWrite } : {}),
+  };
+}
+
 function acpOutcome(reason: string | undefined, text: string): FinalRunEvent {
   const output = text || undefined;
   switch (reason) {
@@ -195,7 +219,7 @@ export interface RunnerProbe {
  * stopped again: nothing is asked of it, no session is opened, and nothing in its folder is touched.
  */
 export function probeRunner(
-  runner: Pick<ExternalRunner, "name" | "command" | "args" | "cwd">,
+  runner: Pick<ExternalRunner, "name" | "command" | "args" | "cwd" | "env">,
   options: {
     timeoutMs?: number;
     clientVersion?: string;
@@ -236,7 +260,7 @@ export function probeRunner(
       done = true;
       clearTimeout(timer);
       try {
-        child?.kill();
+        if (child) killRunner(child);
       } catch {
         // Already gone.
       }
@@ -246,7 +270,7 @@ export function probeRunner(
       const plan = runnerSpawn(runner.command, runner.args ?? [], process.platform, env);
       child = spawn(plan.file, plan.args, {
         cwd: cwd || os.tmpdir(),
-        env: childEnv(env),
+        env: childEnv(env, runner.env),
         stdio: ["pipe", "pipe", "pipe"],
         windowsVerbatimArguments: plan.verbatim,
         windowsHide: true,
@@ -603,6 +627,12 @@ export class AcpRuntime implements AgentRuntime {
   private sessionId?: string;
   private stopped = false;
   private exited = false;
+  /**
+   * True while the agent loads an earlier session. The protocol has it send the whole earlier
+   * conversation again as updates before it answers the load: that is history the conversation
+   * already holds, not this run's answer, and none of it is shown or counted again.
+   */
+  private replaying = false;
   private stderr = "";
   /** Each tool call the agent announced: its title, input (parsed and as text) and kind, by its id. */
   private tools = new Map<string, { title: string; input: string; raw?: unknown; kind?: string }>();
@@ -723,9 +753,9 @@ export class AcpRuntime implements AgentRuntime {
       const plan = runnerSpawn(sandboxed.command, sandboxed.args);
       this.child = spawn(plan.file, plan.args, {
         cwd,
-        // The agent gets what a program needs to run, not this app's own credentials: no SSH agent
-        // socket, no cloud keys, no tokens it was never given.
-        env: childEnv(process.env),
+        // The agent gets what a program needs to run and what its runner's settings name: no SSH
+        // agent socket, no cloud keys, no tokens it was never given (see childEnv).
+        env: childEnv(process.env, this.runner.env),
         stdio: ["pipe", "pipe", "pipe"],
         // npx and friends are .cmd files on Windows: cmd.exe runs them, with the line quoted for it.
         windowsVerbatimArguments: plan.verbatim,
@@ -821,6 +851,7 @@ export class AcpRuntime implements AgentRuntime {
           Boolean(this.options.sessionId || this.options.sessionStore)));
 
     if (shouldAttemptLoad && candidateSessionId) {
+      this.replaying = true;
       try {
         const loaded = (await Promise.race([
           this.request("session/load", {
@@ -836,6 +867,8 @@ export class AcpRuntime implements AgentRuntime {
       } catch (error) {
         if (this.exited || this.stopped) throw error;
         // Session could not be loaded (expired/unknown/unsupported); fall back to session/new.
+      } finally {
+        this.replaying = false;
       }
     }
 
@@ -895,9 +928,11 @@ export class AcpRuntime implements AgentRuntime {
         prompt: [{ type: "text", text: prompt }],
       }),
       gone,
-    ])) as { stopReason?: string };
+    ])) as { stopReason?: string; usage?: unknown; _meta?: { usage?: unknown } };
 
-    onEvent(acpOutcome(result?.stopReason, text));
+    // What the agent says it used is saved with the conversation and counted like any run's.
+    const usage = acpUsage(result?.usage) ?? acpUsage(result?._meta?.usage);
+    onEvent({ ...acpOutcome(result?.stopReason, text), ...(usage ? { usage } : {}) });
   }
 
   private async receive(
@@ -923,6 +958,7 @@ export class AcpRuntime implements AgentRuntime {
     }
     const params = (message.params ?? {}) as Record<string, unknown>;
     if (method === "session/update") {
+      if (this.replaying) return;
       const update = (params.update ?? {}) as Record<string, unknown>;
       const kind = update.sessionUpdate;
       if (kind === "agent_message_chunk") {
@@ -1039,7 +1075,7 @@ export class AcpRuntime implements AgentRuntime {
     if (!child || this.exited) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        child.kill("SIGKILL");
+        killRunner(child, "SIGKILL");
         resolve();
       }, 2500);
       child.once("exit", () => {
@@ -1047,22 +1083,73 @@ export class AcpRuntime implements AgentRuntime {
         resolve();
       });
       child.stdin.end();
-      setTimeout(() => !this.exited && child.kill(), 800);
+      setTimeout(() => !this.exited && killRunner(child), 800);
     });
   }
 }
 
 /**
- * Names of variables an external agent is not handed: this app's way into the
- * team's servers (the SSH agent that holds the keys sshs3 logs in with) and
- * sshs3's own settings. Its model key and the tools it needs for the code it
- * works on stay: it runs as the person, in their checkout.
+ * Ends an agent's program. On Windows a `.cmd` runner (npx) runs under cmd.exe, and ending cmd.exe
+ * leaves the program it started running: there the whole tree under it is ended with taskkill.
  */
+export function killRunner(
+  child: { pid?: number; kill(signal?: NodeJS.Signals): boolean },
+  signal?: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+  run: typeof spawn = spawn,
+): void {
+  if (platform === "win32" && child.pid) {
+    try {
+      run("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => child.kill(signal));
+      return;
+    } catch {
+      // taskkill could not be started: end what can be ended.
+    }
+  }
+  child.kill(signal);
+}
+
+/** Never handed over, even when a runner names them: this app's way into the team's servers, and its own settings. */
 const WITHHELD = /^(SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_)/i;
 
-/** The environment an external agent runs with: everything but sshs3's own way into the servers. */
-export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/**
+ * What every external agent's program is given of this app's environment: what a program needs
+ * to start and find its own files, its language and terminal, and the way out to the network.
+ * Nothing else: cloud keys and tokens that happen to be set where the app was started stay here.
+ */
+const PASSED = new RegExp(
+  "^(" +
+    [
+      "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "LC_[A-Z_]+", "TERM", "COLORTERM", "TZ",
+      "TMPDIR", "TMP", "TEMP", "XDG_[A-Z_]+",
+      // The way out: a proxy, and the certificates it is trusted by.
+      "HTTPS?_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+      // Windows: without these no program starts or finds its own folders.
+      "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+      "PROGRAMFILES", "PROGRAMFILES\\(X86\\)", "PROGRAMDATA", "PROGRAMW6432", "COMMONPROGRAMFILES", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+    ].join("|") +
+    ")$",
+  "i",
+);
+
+/**
+ * The environment an external agent runs with: the variables in PASSED, and those the runner's own
+ * settings name (`extra`). The SSH agent and sshs3's own variables are never among them.
+ */
+export function childEnv(env: NodeJS.ProcessEnv, extra: readonly string[] = []): NodeJS.ProcessEnv {
+  const named = new Set(extra.map((name) => name.toUpperCase()));
   const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env)) if (!WITHHELD.test(k)) out[k] = v;
+  for (const [k, v] of Object.entries(env))
+    if (!WITHHELD.test(k) && (PASSED.test(k) || named.has(k.toUpperCase()))) out[k] = v;
   return out;
 }
+
+/** A name a runner may list in `env`: an ordinary variable name, and not one that is withheld. */
+export function runnerEnvNames(names: unknown): string[] {
+  const list = Array.isArray(names) ? names : [];
+  return [...new Set(list.flatMap((name) => (typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(name.trim()) && !WITHHELD.test(name.trim()) ? [name.trim()] : [])))].slice(0, 20);
+}
+
+/** The words that say, wherever a runner is set up, what its program is given of the environment. */
+export const RUNNER_ENV_NOTE =
+  "The program is given the basics of this app's environment only: the path, the home folder, language, terminal, temporary folder and proxy settings. A variable it needs beyond these (its API key, say) is passed when it is listed in `env`. The SSH agent and sshs3's own variables are never passed.";

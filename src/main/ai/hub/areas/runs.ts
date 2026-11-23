@@ -18,11 +18,36 @@ import { HermesRuntime, type RunEvent } from "../AgentRuntime";
 import { finalRunStatus } from "../RunOutcome";
 import { LocalMcpServer } from "../LocalMcpServer";
 import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, PERSON_PROMPT_MAX, safeError } from "../privacy";
-import { addUsage, live } from "../WorkBoard";
+import { addUsage, live, tokensLeft } from "../WorkBoard";
 import { taskTranscript, worthDistilling } from "../MemoryDistiller";
 import { requiredText } from "../hubHelpers";
 import { log, STREAMED_EVENTS, STREAM_REFRESH_MS, active, budgetStopLine, isBackgroundRun } from "../hubShared";
 import type { HubService } from "../HubService";
+
+/** The longest answer a conversation keeps. */
+const ANSWER_MAX = 128_000;
+/**
+ * While an answer streams, only this much of its end is masked again with each piece. Masking the
+ * whole answer for every piece cost 26 seconds of the main process for an answer of 120,000
+ * characters. The window is wide enough for a secret that arrives split over pieces to be whole
+ * inside it; the whole answer is masked once when it is complete (`sealStreamed`).
+ */
+const STREAM_MASK_WINDOW = 2_048;
+/**
+ * What the answer that is streaming has delivered so far, as it came. Kept beside the conversation
+ * and never stored, so that the whole of it can be masked in one go when the answer is complete:
+ * the text that is kept is then exactly what masking the whole answer gives.
+ */
+const streamedRaw = new WeakMap<AgentTask, { messageId: string; raw: string }>();
+
+/** The answer that was streaming is complete: its kept text becomes the whole of it, masked once. */
+function sealStreamed(task: AgentTask): void {
+  const held = streamedRaw.get(task);
+  if (!held) return;
+  streamedRaw.delete(task);
+  const message = task.messages.find((m) => m.id === held.messageId);
+  if (message) message.text = boundedContext(held.raw, ANSWER_MAX);
+}
 
 function cachedTokens(task: AgentTask): number {
   return (task.usage?.cacheReadTokens ?? 0) + (task.usage?.cacheCreationTokens ?? 0);
@@ -323,6 +348,13 @@ export class RunsPart {
     // An external agent runs its commands on this machine, through no fence and no approval in the
     // thread: a conversation asked for from chat runs on the configured model only.
     if (external && this.chatLead(task)) throw new Error(CHAT_NOT_EXTERNAL);
+    // An external agent is a program with a shell and file access of its own. Telling it to only
+    // advise and refusing what it asks for does not stop what it does without asking: in Advice it
+    // is not started at all.
+    if (external && task.mode === "advice")
+      throw new Error(
+        `${external.name} runs on an external agent: a program on this computer that runs commands and edits files by itself. In Advice mode nothing may be run or changed, so it was not started. Choose another mode, or an agent that runs on the configured model.`,
+      );
     if (external) return this.launchExternal(task, external, assertLaunching);
     // A schedule runs on the endpoint that is configured now. It keeps a model
     // of its own only while it was saved for this same endpoint: after a change
@@ -493,6 +525,7 @@ export class RunsPart {
         : {}),
     });
     if (!active(task)) {
+      sealStreamed(task);
       // A run that was already stopped still says what it spent when it ends: that counts too.
       if (/^run\./.test(event.type)) task.runUsage = undefined;
       if (/^run\./.test(event.type) && event.usage && !task.usageCounted) {
@@ -525,7 +558,19 @@ export class RunsPart {
         task.messages.push(message);
       }
       if (event.sourceCalls) appendSourceCalls(message.sourceCalls ??= [], event.sourceCalls);
-      message.text = boundedContext(message.text + event.delta, 128_000);
+      let held = streamedRaw.get(task);
+      if (held?.messageId !== message.id) {
+        // The answer goes on in another message (the person wrote in between): the earlier part is complete.
+        sealStreamed(task);
+        held = { messageId: message.id, raw: message.text };
+        streamedRaw.set(task, held);
+      }
+      held.raw += event.delta;
+      // Only the last ANSWER_MAX characters are ever kept: an endless answer does not grow this without bound.
+      if (held.raw.length > 4 * ANSWER_MAX) held.raw = held.raw.slice(-2 * ANSWER_MAX);
+      const cut = Math.max(0, message.text.length - STREAM_MASK_WINDOW);
+      const text = message.text.slice(0, cut) + maskContext(message.text.slice(cut) + event.delta);
+      message.text = text.length > ANSWER_MAX ? `[earlier output omitted]\n${text.slice(-ANSWER_MAX)}` : text;
       this.host.delta?.({
         taskId: task.id,
         type: "message.delta",
@@ -534,6 +579,22 @@ export class RunsPart {
         delta: event.delta,
         length: message.text.length,
       });
+    }
+    // An answer that broke off in the middle is asked for again: what was shown of it is taken back,
+    // so the conversation does not hold it twice. The windows get the corrected text with the next
+    // refresh, which follows at once (this event is not a streamed piece).
+    if (event.type === "message.retract" && event.text) {
+      const message = task.messages.at(-1);
+      if (message?.role === "assistant") {
+        const held = streamedRaw.get(task);
+        if (held?.messageId === message.id) held.raw = held.raw.slice(0, Math.max(0, held.raw.length - event.text.length));
+        message.text = message.text.slice(0, Math.max(0, message.text.length - maskContext(event.text).length));
+        // An answer with nothing left in it is taken away, unless it holds what the run has read.
+        if (!message.text && !message.sourceCalls?.length) {
+          task.messages.pop();
+          streamedRaw.delete(task);
+        }
+      }
     }
     if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
     if (event.type === "usage.updated" && event.usage) {
@@ -549,6 +610,7 @@ export class RunsPart {
           ...(event.usage.context_tokens ? { contextTokens: event.usage.context_tokens } : {}),
         },
       });
+      this.stopWhenBudgetSpent(task);
     }
     if (event.type === "hypotheses.updated" && event.hypotheses) {
       task.hypotheses = event.hypotheses;
@@ -650,20 +712,28 @@ export class RunsPart {
           costUsd: mapped.costUsd,
         };
       }
+      // The run has ended: what is kept of its answer is masked as a whole, once. A run that names
+      // its answer has it put in place of what was streamed; one that does not keeps what was streamed.
       if (event.output) {
         const last = task.messages.at(-1);
+        const held = streamedRaw.get(task);
+        if (held && held.messageId !== last?.id) sealStreamed(task);
+        streamedRaw.delete(task);
         if (last?.role === "assistant")
-          last.text = boundedContext(event.output, 128_000);
+          last.text = boundedContext(event.output, ANSWER_MAX);
         else
           task.messages.push({
             id: crypto.randomUUID(),
             role: "assistant",
-            text: boundedContext(event.output, 128_000),
+            text: boundedContext(event.output, ANSWER_MAX),
             at: Date.now(),
           });
-      }
+      } else sealStreamed(task);
+      // What the run read is kept with its answer. A run that ended without one (it failed, or was
+      // stopped, before it wrote anything) keeps it with the last message there is: an observation
+      // recorded for a hypothesis points to it, and would otherwise point to nothing.
       const answer = task.messages.at(-1);
-      if (event.sourceCalls && answer?.role === "assistant") appendSourceCalls(answer.sourceCalls ??= [], event.sourceCalls);
+      if (event.sourceCalls && answer) appendSourceCalls(answer.sourceCalls ??= [], event.sourceCalls);
       if (event.error) task.error = boundedContext(event.error);
       this.noteBudgetStop(task);
       if (task.status === "completed" || task.status === "failed") this.reflectTaskCompletion(task);
@@ -735,6 +805,25 @@ export class RunsPart {
     this.lastWorkSync = 0;
   }
 
+  /**
+   * An agent's monthly token budget holds while it runs, not only when a run is started: each time
+   * the run says what it has spent so far, that is added to the month, and the run is stopped when
+   * the budget is used up. One long run could otherwise spend any amount over it.
+   */
+  stopWhenBudgetSpent(this: HubService, task: AgentTask): void {
+    if (!task.agentId || isBackgroundRun(task) || !active(task)) return;
+    const agent = this.getAgentsList().find((a) => a.id === task.agentId);
+    if (!agent?.monthlyTokenBudget || agent.monthlyTokenBudget <= 0) return;
+    const run = task.runUsage;
+    // Counted as the month counts a finished run: what was read, written and cached.
+    const soFar = (run?.inputTokens ?? 0) + (run?.outputTokens ?? 0) + (run?.cacheReadTokens ?? 0) + (run?.cacheCreationTokens ?? 0);
+    if (tokensLeft(agent, this.usageTotal()) - soFar > 0) return;
+    void this.stop(
+      task,
+      `${agent.name} has used its token budget for this month (${agent.monthlyTokenBudget.toLocaleString("en-US")} tokens), so this run was stopped. Raise the budget or wait for the new month.`,
+    );
+  }
+
   /** How many of a conversation's tokens are already on an agent's month. A conversation counted before this was kept per run was counted whole. */
   usagePutDown(this: HubService, task: AgentTask, used: number): number {
     return task.usageCountedTokens ?? (task.usageCounted ? used : 0);
@@ -743,6 +832,8 @@ export class RunsPart {
   async stop(this: HubService, task: AgentTask, reason: string): Promise<void> {
     if (!active(task)) return;
     this.launches.delete(task.id);
+    // What was streamed up to here is what stays: masked as a whole now.
+    sealStreamed(task);
     task.status = "interrupted";
     // A spent budget is said in the conversation, with the way on: not as an error.
     if (task.budgetStop) this.noteBudgetStop(task);

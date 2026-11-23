@@ -45,7 +45,7 @@ describe("which calls move the fence", () => {
     expect(guardAsk(settings, { operation: "configure_ai", aiProvider: "openai-compatible" }, run("assisted"), known)).toBeDefined();
     expect(guardAsk(settings, { operation: "configure_ai", aiEnabled: false }, run("assisted"), known)).toBeDefined();
     // Ordinary settings are ordinary.
-    for (const payload of [{ operation: "update_settings", theme: "dark", terminalFontSize: 14 }, { operation: "configure_ai", aiModel: "claude-opus-5-5", maxToolTurns: 30, temperature: 0.1 }, { operation: "save_snippet", name: "x", command: "df -h" }, { operation: "get_state" }, {}])
+    for (const payload of [{ operation: "update_settings", theme: "dark", terminalFontSize: 14 }, { operation: "configure_ai", aiModel: "claude-opus-5-5", maxOutputTokens: 4096, temperature: 0.1 }, { operation: "save_snippet", name: "x", command: "df -h" }, { operation: "get_state" }, {}])
       expect(guardAsk(settings, payload, run("assisted"), known)).toBeUndefined();
 
     const agents = "sshs3_agent_and_mcp_manage";
@@ -246,8 +246,8 @@ describe("a run that tries to change its own rules", () => {
     expect((await hub.snapshot()).config).toMatchObject({ baseUrl: "https://llm.internal.example/v1", hasApiKey: true });
 
     // Ordinary work is not asked about.
-    await call("sshs3_manage_app_and_settings", { operation: "configure_ai", maxToolTurns: 25 });
-    expect((await hub.snapshot()).config.maxToolTurns).toBe(25);
+    await call("sshs3_manage_app_and_settings", { operation: "configure_ai", maxOutputTokens: 4096 });
+    expect((await hub.snapshot()).config.maxOutputTokens).toBe(4096);
     expect(task.changes.filter((c) => c.status === "pending")).toEqual([]);
 
     // Handing a conversation to a freer agent does not make the conversation freer.

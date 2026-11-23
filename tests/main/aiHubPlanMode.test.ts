@@ -7,6 +7,7 @@ import {
   MAX_PLAN_REVISIONS,
   approvalAsksEach,
   approvalMessage,
+  approvedPlanOver,
   promisesToAskEach,
   newPlan,
   parsePlan,
@@ -163,6 +164,89 @@ describe("the plan gate", () => {
     expect(planGate(dropped, "sshs3_change", { command: "systemctl restart nginx" })).toBeUndefined();
     const ordinary = task({ messages: [{ id: "m", role: "user", text: "restart nginx", at: 1 }] });
     expect(planGate(ordinary, "sshs3_change", { command: "systemctl restart nginx" })).toBeUndefined();
+  });
+});
+
+describe("the plan gate after a plan was approved", () => {
+  const approvedAt = 2000;
+  const approved = (steps?: (p: AgentPlan) => void): AgentPlan => {
+    const p = plan({ status: "approved", decidedAt: approvedAt });
+    steps?.(p);
+    return p;
+  };
+  const told = (p: AgentPlan) => ({ id: "ok", role: "user" as const, text: approvalMessage(p), at: approvedAt + 1 });
+  const first = { id: "m", role: "user" as const, text: "Raise the nginx timeout", at: 1 };
+  const NEW_CHANGE = { command: "dropdb old_shop" };
+
+  it("holds a new change in Plan mode once the person has asked for something else", () => {
+    const p = approved((plan) => plan.steps.forEach((step) => (step.ranAt = 2500)));
+    const next = task({
+      mode: "plan",
+      plan: p,
+      messages: [first, told(p), { id: "a", role: "assistant", text: "Done as planned.", at: 2600 }, { id: "n", role: "user", text: "Now also drop the old database", at: 3000 }],
+    });
+    expect(planPending(next)).toBe(true);
+    expect(planGate(next, "sshs3_change", NEW_CHANGE)).toMatch(/needs a new plan: propose it with sshs3_plan_propose/);
+    expect(planGate(next, "file_write", { path: "/etc/x" })).toMatch(/Commands still run; make no change\./);
+    expect(planGate(next, "mcp__srv-1__set_thermostat", { to: 30 })).toBeDefined();
+    expect(planGate(next, "terminal_command", { command: "psql -l" })).toBeUndefined();
+  });
+
+  it("holds it when the plan was asked for with /plan again, in any mode", () => {
+    const p = approved();
+    const again = task({ mode: "assisted", plan: p, messages: [first, told(p), { id: "n", role: "user", text: "/plan drop the old database", at: 3000 }] });
+    expect(planGate(again, "sshs3_change", NEW_CHANGE)).toMatch(/The user has written since they approved the plan\./);
+    // Without /plan an ordinary mode asks about each change as it always does: no plan is needed.
+    const ordinary = task({ mode: "assisted", plan: p, messages: [first, told(p), { id: "n", role: "user", text: "drop the old database", at: 3000 }] });
+    expect(planGate(ordinary, "sshs3_change", NEW_CHANGE)).toBeUndefined();
+  });
+
+  it("holds a new change in Plan mode once every step of the plan has run, also within the same run", () => {
+    const p = approved((plan) => plan.steps.forEach((step) => (step.ranAt = 2500)));
+    const done = task({ mode: "plan", plan: p, messages: [first, told(p)] });
+    expect(approvedPlanOver(done)).toBe("done");
+    expect(planGate(done, "sshs3_change", NEW_CHANGE)).toMatch(/^Every step of the approved plan has run\. A new change needs a new plan/);
+    expect(planGate(done, "terminal_command", { command: "nginx -t" })).toBeUndefined();
+  });
+
+  it("stays open while the approved plan is carried out, and after the conversation is resumed", () => {
+    const p = approved((plan) => (plan.steps[0].ranAt = 2500));
+    const working = task({ mode: "plan", plan: p, messages: [first, told(p)] });
+    expect(approvedPlanOver(working)).toBeUndefined();
+    expect(planGate(working, "sshs3_change", { command: STEPS[1].command })).toBeUndefined();
+    // A deviation in the middle of the plan is asked about on its own, as before.
+    expect(planGate(working, "sshs3_change", NEW_CHANGE)).toBeUndefined();
+    // "Continue" after a stop is the hub's line, not a new request of the person's.
+    for (const text of [
+      "Resume on this terminal. Recheck the current state; do not replay any uncertain command.",
+      "Resume the conversation.",
+      "You have 20 more commands and 10 more minutes. Continue where you stopped. Resume on this terminal. Recheck the current state; do not replay any uncertain command.",
+    ]) {
+      const resumed = task({ mode: "plan", plan: p, messages: [first, told(p), { id: "r", role: "user", text, at: 4000 }] });
+      expect(approvedPlanOver(resumed)).toBeUndefined();
+      expect(planGate(resumed, "sshs3_change", { command: STEPS[1].command })).toBeUndefined();
+    }
+  });
+
+  it("still runs the steps that were approved when the person writes in the middle of the plan, and holds anything else", () => {
+    const p = approved((plan) => (plan.steps[0].ranAt = 2500));
+    const steered = task({ mode: "plan", plan: p, messages: [first, told(p), { id: "s", role: "user", text: "looks good, and restart php-fpm too", at: 2700 }] });
+    expect(approvedPlanOver(steered)).toBe("new-request");
+    // The second step has not run yet: it is what was approved.
+    expect(planGate(steered, "sshs3_change", { command: STEPS[1].command })).toBeUndefined();
+    // The first has run: a second time is a new change. So is what the person added.
+    expect(planGate(steered, "sshs3_change", { command: STEPS[0].command })).toBeDefined();
+    expect(planGate(steered, "sshs3_change", { command: "sudo systemctl restart php-fpm" })).toMatch(/A change that plan does not list needs a new plan/);
+  });
+
+  it("opens again for the next plan once that one is approved", () => {
+    const old = approved((plan) => plan.steps.forEach((step) => (step.ranAt = 2500)));
+    const asked = { id: "n", role: "user" as const, text: "Now also drop the old database", at: 3000 };
+    const proposed = task({ mode: "plan", plan: plan({ status: "proposed", revision: 2 }), messages: [first, told(old), asked] });
+    expect(planGate(proposed, "sshs3_change", NEW_CHANGE)).toMatch(/waiting for the user's approval/);
+    const next = plan({ status: "approved", decidedAt: 5000, revision: 2 });
+    const approvedAgain = task({ mode: "plan", plan: next, messages: [first, told(old), asked, { id: "ok2", role: "user", text: approvalMessage(next), at: 5001 }] });
+    expect(planGate(approvedAgain, "sshs3_change", { command: STEPS[0].command })).toBeUndefined();
   });
 });
 

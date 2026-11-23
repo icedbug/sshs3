@@ -11,7 +11,7 @@ import type {
 import { recordEvidence, type HypothesisParseContext } from "./IncidentEvidence";
 import { evidenceKey, supersededEvidence } from "../../../shared/incidentEvidence";
 import { extractErrorSignature } from "./SelfLearningService";
-import { boundedContext } from "./privacy";
+import { boundedContext, boundedPrompt } from "./privacy";
 
 /**
  * What keeps an agent run on the rails, independent of the model provider:
@@ -141,6 +141,11 @@ export const HYPOTHESIS_TOOL = {
     type: "object",
     properties: {
       nextObservation: { type: "string", description: "When the cause is not established, the specific reading or check needed to distinguish the remaining explanations." },
+      withdraw: {
+        type: "array",
+        items: { type: "string" },
+        description: "Ids of hypotheses to take off the list: a duplicate, or one that turned out not to be a possible cause of this problem at all. A hypothesis you checked and excluded is `ruled-out`, not withdrawn. A confirmed one cannot be withdrawn. The list holds 24 at most.",
+      },
       hypotheses: {
         type: "array",
         items: {
@@ -183,7 +188,7 @@ export const HYPOTHESIS_TOOL = {
 export function parseHypotheses(
   args: Record<string, unknown>,
   context?: HypothesisParseContext,
-): { hypotheses: AgentHypothesis[]; nextObservation?: string } | { error: string } {
+): { hypotheses: AgentHypothesis[]; nextObservation?: string; withdrawn?: string[] } | { error: string } {
   if (!Array.isArray(args.hypotheses)) return { error: "`hypotheses` must be a list." };
   const at = context?.at ?? Date.now();
   const out: AgentHypothesis[] = [];
@@ -215,8 +220,19 @@ export function parseHypotheses(
     });
   }
 
-  for (const h of context?.previous ?? []) if (!out.some(entry => entry.id === h.id)) out.push(h);
-  if (out.length > 24) return { error: "An investigation can keep at most 24 hypotheses." };
+  // Hypotheses taken off the list. Everything else that is not sent again stays as it was.
+  const withdrawn = new Set(
+    (Array.isArray(args.withdraw) ? args.withdraw : []).flatMap((id) => (typeof id === "string" && id.trim() ? [id.trim().slice(0, 24)] : [])),
+  );
+  for (const id of withdrawn) {
+    if (out.some((h) => h.id === id)) return { error: `Hypothesis ${id} is both sent and withdrawn. Do one or the other.` };
+    const earlier = context?.previous?.find((h) => h.id === id);
+    if (!earlier) return { error: `There is no hypothesis ${id} to withdraw.` };
+    if (earlier.status === "confirmed")
+      return { error: `Hypothesis ${id} is confirmed and cannot be withdrawn. If it was wrong, record what shows that and change its status.` };
+  }
+  for (const h of context?.previous ?? []) if (!withdrawn.has(h.id) && !out.some(entry => entry.id === h.id)) out.push(h);
+  if (out.length > 24) return { error: "An investigation can keep at most 24 hypotheses. Take one off the list with `withdraw` (a duplicate, or one that is not a possible cause after all) to make room." };
   const byId = new Map(out.map((h) => [h.id, h]));
   for (const h of out) {
     if (h.parentId && (!byId.has(h.parentId) || h.parentId === h.id)) {
@@ -248,7 +264,7 @@ export function parseHypotheses(
   }
 
   const nextObservation = typeof args.nextObservation === "string" ? boundedContext(args.nextObservation.trim(), 400) : "";
-  return { hypotheses: out, ...(nextObservation ? { nextObservation } : {}) };
+  return { hypotheses: out, ...(nextObservation ? { nextObservation } : {}), ...(withdrawn.size ? { withdrawn: [...withdrawn] } : {}) };
 }
 
 export interface RunDiscipline {
@@ -417,6 +433,8 @@ export function handoverMessage(
   todos: AgentTodo[],
   recentCalls: ToolDigestEntry[],
   resultText = (call: ToolDigestEntry) => boundedContext(call.output, 500),
+  /** What the person wrote while the run worked. A note is the model's summary and may leave it out, so it is kept as written. */
+  said: string[] = [],
 ): string {
   const list =
     todos.length === 0
@@ -439,12 +457,21 @@ export function handoverMessage(
               `- ${c.name}(${boundedContext(c.input, 300)}) → ${resultText(c)}`,
           ),
         ];
+  const fromUser =
+    said.length === 0
+      ? []
+      : [
+          "",
+          "What the user wrote to you while you worked, word for word. It still applies:",
+          ...said.map((text, i) => `[${i + 1}] ${boundedPrompt(text, 4_000)}`),
+        ];
   return [
     "[sshs3] The earlier part of this run was compacted to save context. What follows is all that is kept of it.",
     "",
     "Your handover note:",
     note.trim() ||
       "(You wrote no note. Rely on the task list and the tool calls below, and re-check what you need.)",
+    ...fromUser,
     ...list,
     ...calls,
     "",
@@ -853,9 +880,10 @@ export function operatingInstructions(options: {
     "When finding out needs a lot of reading (configuration and logs on several servers, runbooks, the team's history), hand it to investigators with `sshs3_investigate`: precise questions, looked into in parallel, each in a context of its own. They see none of this conversation, so each question must stand on its own. Their reports are evidence to weigh, like any other.",
     "State a cause only when the evidence shows it. Name what you assume and what you could not check.",
     "Every command result carries a short `ref` (c1, c2 …). In your report, put the ref in square brackets right after the statement it supports, like: the pool is scrubbing [c3]. The person can click it to see the command and its output. A statement about the system without a ref is read as your assumption.",
+    "What you read without a command of your own carries a source reference instead, in square brackets after the text ([S1], [S2] …): a file (`file_read`, `sshs3_storage_ops`), a knowledge base page, a memory, each server's output of a command across a cluster, an investigator's report. Cite it the same way, and give it as `sourceRef` when you record an observation with `sshs3_hypotheses`: a cause counts as confirmed for the team only when an observation for it names its source. A listing of files carries no reference.",
     "",
     "## Making a change",
-    "Make every change to a system with `sshs3_change`, never with `terminal_command` or `sshs3_cluster_exec`: it takes the check that shows the change worked and the rollback that takes it back, a person can read and approve all three, and it rolls back by itself when the check fails. Edit a file with `file_write`. Pick the check before you pick the command. If a change was rolled back, do not repeat it; find out why its check failed.",
+    "Make every change to a system with `sshs3_change`, never with `terminal_command` or `sshs3_cluster_exec`: it takes the check that shows the change worked and the rollback that takes it back, a person can read and approve all three, and it rolls back by itself when the check fails. Edit a file with `file_write`. `file_write` writes as the account sshs3 logs in with. A file that account may not write (most files under /etc) is edited with `sshs3_change` and sudo instead (for example `sudo sed -i …` or `sudo tee`), with a check and a rollback. When `file_write` answers \"permission denied\", do that instead of stopping. Pick the check before you pick the command. If a change was rolled back, do not repeat it; find out why its check failed.",
     "For any job of three or more steps, or any change, write a task list with `todo_write` first and keep it current. One step at a time: the smallest change that addresses the cause, on the target it concerns, then its check.",
     "After a change, verify against the original symptom with `terminal_verify` (a command and the output you expect), not merely that the command exited 0. A change without a passed check is unverified, and you say so.",
     "If a step fails, read the error, and check whether the team's memory has this failure, before trying something else. Do not repeat a failing command unchanged. After two failed attempts at the same step, stop and report what you tried and what you saw.",

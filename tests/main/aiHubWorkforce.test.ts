@@ -526,4 +526,29 @@ describe("an agent's own investigators (sshs3_investigate)", () => {
     expect(reports[1].question).toBe("question two");
     expect(investigators).toBe(4);
   });
+
+  it("works four questions at a time: the others wait, and every question still gets its report", async () => {
+    const hub = await makeHub();
+    await hub.request(configure);
+    let running = 0;
+    let peak = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        peak = Math.max(peak, ++running);
+        await new Promise((r) => setTimeout(r, 40));
+        running--;
+        return sseResponse("found it");
+      }),
+    );
+    const parent = { id: "p", title: "job", status: "running" } as never;
+    const reports = await hub.investigate(parent, Array.from({ length: 9 }, (_, i) => ({ question: `question ${i + 1}` })));
+    expect(reports.map((r) => r.status)).toEqual(Array.from({ length: 9 }, () => "answered"));
+    expect(reports.map((r) => r.question)).toEqual(Array.from({ length: 9 }, (_, i) => `question ${i + 1}`));
+    expect(peak).toBe(4);
+    const { toolsForTask } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const tool = toolsForTask({ mode: "assisted", target: { sessionId: "s", generation: 1, label: "l" }, messages: [], changes: [], sources: [] } as never)
+      .find((t) => t.name === "sshs3_investigate");
+    expect(tool?.description).toContain("At most four work at the same time");
+  });
 });

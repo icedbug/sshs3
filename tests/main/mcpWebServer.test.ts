@@ -198,7 +198,8 @@ describe("narrower keys, and every call in the owner's audit log", () => {
     await vi.waitFor(async () => {
       const log = await tenant.hub.request({ action: "audit-read" });
       const mcp = (log.reply?.audit?.entries ?? []).filter((e) => e.kind === "mcp");
-      expect(mcp.map((e) => `${e.outcome} ${e.what.split(" ")[0]}`)).toEqual(["completed kb_search", "denied list_servers"]);
+      // The listing of the tools is written down as well. Each line is written as its call ends: the order is not fixed.
+      expect(mcp.map((e) => `${e.outcome} ${e.what.split(" ")[0]}`).sort()).toEqual(["completed kb_search", "completed tools/list", "denied list_servers"]);
       expect(mcp[0].actor).toContain("Only search");
     });
   });

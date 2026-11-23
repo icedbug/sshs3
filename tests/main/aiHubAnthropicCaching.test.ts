@@ -183,10 +183,11 @@ describe("Anthropic agent loop: thinking blocks and stop reasons", () => {
     await new DirectAgentRuntime(broker as never, undefined, fetchImpl as unknown as typeof fetch).start(task, model, (e) =>
       events.push(e),
     );
-    expect(events.find((e) => e.type === "run.failed")!.error).toMatch(/output limit/);
+    expect(events.find((e) => e.type === "run.failed")!.error).toMatch(/output limit \(8,192 tokens\) 4 times in a row/);
     // Only the context read at the start of the run; the cut-off call was not executed.
     const requests = broker.mock.calls as unknown as Array<[{ action: string }]>;
     expect(requests.every(([req]) => req.action === "context")).toBe(true);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // Asked to make the call again three times, cut each time: then the run stops.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 });

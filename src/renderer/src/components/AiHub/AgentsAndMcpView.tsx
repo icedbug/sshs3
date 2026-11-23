@@ -942,7 +942,10 @@ export function AgentsAndMcpView({
       <p className="ai-hint">
         Coding agents such as Claude Code or Codex, started on this computer and spoken to over the Agent Client
         Protocol. An agent above can run on one of them. The command and folder are kept on this computer only: a
-        teammate sets up the same agent on theirs.
+        teammate sets up the same agent on theirs. The program is given the basics of this app&apos;s environment only
+        (the path, your home folder, language, terminal, temporary folder and proxy settings), so its own sign-in in
+        your home folder works as usual. A variable it needs beyond these, such as an API key, is passed when it is
+        listed for the agent: ask the assistant to add it.
       </p>
       {runnerDraft && (
         <form

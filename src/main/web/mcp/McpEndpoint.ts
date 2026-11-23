@@ -215,6 +215,7 @@ const toolsFor = (token: McpTokenRecord): Record<string, unknown>[] =>
     title: t.title,
     description: t.description,
     inputSchema: t.inputSchema,
+    ...(t.outputSchema ? { outputSchema: t.outputSchema } : {}),
     annotations: {
       title: t.title,
       readOnlyHint: t.readOnly,
@@ -256,6 +257,12 @@ async function handleRpc(
     result: era === 'modern' ? { resultType: 'complete', ...result } : result,
   });
   const cacheHints = era === 'modern' ? { ttlMs: LIST_TTL_MS, cacheScope: 'private' } : {};
+  /** A line in the key owner's audit log: which key asked for what, and how it ended. */
+  const noted = (hub: Awaited<ReturnType<McpEndpointDeps['hubFor']>>, what: string, outcome: 'completed' | 'denied' | 'failed', detail?: string): void => {
+    void hub
+      ?.audit?.({ kind: 'mcp', actor: `${token.name} (a key of ${hub.actor})`, target: token.serverId, what: what.slice(0, 600), outcome, ...(detail ? { detail: detail.slice(0, 600) } : {}) })
+      .catch(() => undefined);
+  };
 
   // A notification (no id) is acknowledged with no body of its own.
   if ((rpc.id === undefined || rpc.id === null) && method.startsWith('notifications/')) return undefined;
@@ -279,8 +286,11 @@ async function handleRpc(
 
   if (method === 'ping') return complete({});
 
-  if (method === 'tools/list')
+  if (method === 'tools/list') {
+    // Answered without the hub; the hub is only asked for so that the call is written down.
+    noted(await deps.hubFor(token.userId).catch(() => undefined), 'tools/list', 'completed');
     return complete({ tools: toolsFor(token), ...cacheHints });
+  }
 
   if (method === 'resources/list' || method === 'resources/templates/list' || method === 'resources/read') {
     const hub = await deps.hubFor(token.userId);
@@ -288,13 +298,21 @@ async function handleRpc(
     const allowed = mayReadKb(token);
     try {
       if (method === 'resources/list') {
-        if (!allowed) return complete({ resources: [], ...cacheHints });
+        if (!allowed) {
+          noted(hub, method, 'completed', 'nothing listed: reading the knowledge base is not among the tools this key may use');
+          return complete({ resources: [], ...cacheHints });
+        }
         const { resources } = await listMcpResources({ request: hub.request, scopes: token.scopes });
+        noted(hub, method, 'completed');
         return complete({ resources, ...cacheHints });
       }
       if (method === 'resources/templates/list') {
-        if (!allowed) return complete({ resourceTemplates: [], ...cacheHints });
+        if (!allowed) {
+          noted(hub, method, 'completed', 'nothing listed: reading the knowledge base is not among the tools this key may use');
+          return complete({ resourceTemplates: [], ...cacheHints });
+        }
         const { resourceTemplates } = await listMcpResources({ request: hub.request, scopes: token.scopes });
+        noted(hub, method, 'completed');
         return complete({ resourceTemplates, ...cacheHints });
       }
       const uri = typeof rpc.params?.uri === 'string' ? rpc.params.uri : '';
@@ -324,6 +342,9 @@ async function handleRpc(
         .catch(() => undefined);
       return complete(res);
     } catch (error) {
+      // A read (or a listing) that did not work is written down too: what was asked for, and why not.
+      const asked = method === 'resources/read' && typeof rpc.params?.uri === 'string' ? `${method} ${rpc.params.uri.slice(0, 400)}` : method;
+      noted(hub, asked, error instanceof McpResourceError && error.kind === 'forbidden' ? 'denied' : 'failed', error instanceof Error ? error.message : String(error));
       if (error instanceof McpResourceError) {
         const code =
           error.kind === 'not_found'
@@ -343,14 +364,21 @@ async function handleRpc(
     try {
       if (method === 'prompts/list') {
         const { prompts } = await listMcpPrompts({ request: hub.request, scopes: token.scopes });
+        noted(hub, method, 'completed');
         return complete({ prompts: mayReadKb(token) ? prompts : prompts.filter((p) => isStarterPrompt(p.name)), ...cacheHints });
       }
       const name = typeof rpc.params?.name === 'string' ? rpc.params.name : '';
       if (!name) return rpcError(id, ERR.invalidParams, 'prompts/get needs the name of a prompt.');
-      if (!mayReadKb(token) && !isStarterPrompt(name.trim())) return rpcError(id, ERR.invalidRequest, kbRefusal(token));
+      if (!mayReadKb(token) && !isStarterPrompt(name.trim())) {
+        noted(hub, `prompts/get ${name}`, 'denied', 'not one of the tools this key may use');
+        return rpcError(id, ERR.invalidRequest, kbRefusal(token));
+      }
       const res = await getMcpPrompt(name, rpc.params?.arguments, { request: hub.request, scopes: token.scopes });
+      noted(hub, `prompts/get ${name}`, 'completed');
       return complete(res as unknown as Record<string, unknown>);
     } catch (error) {
+      const asked = method === 'prompts/get' && typeof rpc.params?.name === 'string' ? `${method} ${rpc.params.name}` : method;
+      noted(hub, asked, error instanceof McpResourceError && error.kind === 'forbidden' ? 'denied' : 'failed', error instanceof Error ? error.message : String(error));
       if (error instanceof McpResourceError) {
         const code = error.kind === 'forbidden' ? ERR.invalidRequest : ERR.invalidParams;
         return rpcError(id, code, error.message);

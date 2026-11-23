@@ -9,7 +9,7 @@ import {
   parseTodos,
   wantsThoroughMode,
 } from "../../src/main/ai/hub/AgentDiscipline";
-import { DirectAgentRuntime, retryPolicy } from "../../src/main/ai/hub/DirectAgentRuntime";
+import { DirectAgentRuntime, retryPolicy, toolsForTask } from "../../src/main/ai/hub/DirectAgentRuntime";
 import type { RunEvent } from "../../src/main/ai/hub/AgentRuntime";
 import type { AgentTask, AgentTodo, MemoryEntry } from "../../src/shared/types/aiHub";
 
@@ -168,6 +168,15 @@ describe("operatingInstructions", () => {
     expect(acting).toContain("terminal_verify");
     expect(acting).toContain("You can run commands and write files on the target");
     expect(acting).not.toContain("Thorough mode");
+    // A file the login account may not write is edited with a change card and sudo, not given up on.
+    expect(acting).toContain("`file_write` writes as the account sshs3 logs in with.");
+    expect(acting).toMatch(/may not write \(most files under \/etc\) is edited with `sshs3_change` and sudo/);
+    expect(acting).toContain('When `file_write` answers "permission denied", do that instead of stopping.');
+    const writeTool = toolsForTask({ id: "t", mode: "assisted", target: { sessionId: "s", generation: 1, label: "prod" }, changes: [], messages: [], sources: [] } as never)
+      .find((tool) => tool.name === "file_write");
+    expect(writeTool?.description).toContain("It writes as the account sshs3 logs in with.");
+    expect(writeTool?.description).toMatch(/edited with sshs3_change and sudo instead .* with a check and a rollback\./);
+    expect(writeTool?.description).toContain('When this tool answers "permission denied", do that instead of stopping.');
     const advising = operatingInstructions({ mode: "advice", target: null, thorough: true, agentSection: [] });
     expect(advising).toContain("you cannot run commands or write files");
     expect(advising).toContain("Thorough mode");
@@ -413,16 +422,18 @@ describe("the same discipline with an OpenAI-compatible model", () => {
     expect(String(sentBack.content)).toContain("Check replication lag");
     // The early stop is kept in the conversation before the message that answers it.
     expect(bodies[3].messages.at(-2)).toMatchObject({ role: "assistant", content: "I will look at it." });
-    expect(events.find((e) => e.type === "run.completed")!.output).toBe("Replication lag is 0s.");
+    // What it said when it stopped early stays part of the answer, before what it ended on.
+    expect(events.find((e) => e.type === "run.completed")!.output).toBe("I will look at it.\n\nReplication lag is 0s.");
   });
 });
 
 describe("a run that outgrows its context", () => {
   const BIG = "x".repeat(30_000);
-  // A small window, so the transcript budget is the 40,000-character floor.
+  // A small window that still holds the tool list: the limit is about 41,000 characters, and the tool
+  // list and instructions alone are over it, so a note is due as soon as a tool has returned enough.
   const broker = (req: Record<string, unknown>): unknown =>
     req.action === "context"
-      ? { appSettings: { aiConfig: { contextWindowTokens: 16_000 } } }
+      ? { appSettings: { aiConfig: { contextWindowTokens: 32_000 } } }
       : req.action === "command"
         ? { exitCode: 0, output: `${String(req.command)}: 41% used ${BIG}` }
         : {};
@@ -442,7 +453,9 @@ describe("a run that outgrows its context", () => {
       looking,
     );
     expect(bodies).toHaveLength(6);
-    // Two large results in: the fourth request asks for the note instead of going on.
+    // One large result in, the third request asks for the note. The script calls a tool there instead,
+    // so the fourth asks again, and gets it.
+    expect(lastUser(bodies[2])).toContain("write a handover note for yourself");
     expect(lastUser(bodies[3])).toContain("write a handover note for yourself");
     // The fifth starts over from the conversation plus the handover.
     const after = bodies[4].messages as Array<{ role: string; content: unknown }>;

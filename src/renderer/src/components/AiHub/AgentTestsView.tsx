@@ -520,6 +520,7 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
                     somewhere the original conversation did not.
                   </li>
                 )}
+                {run.serverList === "today" && <li data-passed="note">This test holds no server list of its own, so the agent was told about the servers as they are today.</li>}
                 {Object.entries(run.live ?? {}).map(([name, count]) => (
                   <li data-passed="note" key={name}>
                     {count} call{count === 1 ? "" : "s"} to {name} were answered by the knowledge base as it is now, not

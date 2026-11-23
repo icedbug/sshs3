@@ -263,7 +263,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     // Verify childEnv stripped SSH_AUTH_SOCK & SSHS3_* from actual spawned child
     const spawnedEnv = JSON.parse(await fs.readFile(envFile, "utf8")) as Record<string, string | null>;
     expect(spawnedEnv).toEqual({ SSH_AUTH_SOCK: null, SSH_AGENT_PID: null, SSHS3_SECRET: null });
-    expect(childEnv({ PATH: "/usr/bin", SSH_AUTH_SOCK: "/x", SSHS3_TOKEN: "t", KEEP: "1" })).toEqual({
+    expect(childEnv({ PATH: "/usr/bin", SSH_AUTH_SOCK: "/x", SSHS3_TOKEN: "t", KEEP: "1" })).toEqual({ PATH: "/usr/bin" });
+    expect(childEnv({ PATH: "/usr/bin", SSH_AUTH_SOCK: "/x", SSHS3_TOKEN: "t", KEEP: "1" }, ["KEEP"])).toEqual({
       PATH: "/usr/bin",
       KEEP: "1",
     });
@@ -622,4 +623,75 @@ describe("HermesManager OS sandbox & domain-allowlist wrapper", () => {
       USERPROFILE: homeDir,
     });
   });
+});
+
+describe("AcpRuntime: a reply in a conversation the agent loads again", () => {
+  it("does not show or count the earlier conversation the agent replays while it loads the session", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-replay-"));
+    disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const script = path.join(dir, "agent.cjs");
+    const store = path.join(dir, "history.json");
+    // An agent that keeps its sessions and, as the protocol says it must, replays the whole
+    // conversation as session/update notifications before it answers session/load.
+    await fs.writeFile(
+      script,
+      `
+const fs = require("node:fs");
+const readline = require("node:readline");
+const store = ${JSON.stringify(store)};
+const history = fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, "utf8")) : [];
+const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+const update = (sessionId, u) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: u } });
+const chunk = (sessionId, kind, text) => update(sessionId, { sessionUpdate: kind, content: { type: "text", text } });
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "initialize") return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+  if (m.method === "session/new") return send({ jsonrpc: "2.0", id: m.id, result: { sessionId: "sess-1" } });
+  if (m.method === "session/load") {
+    for (const h of history) {
+      chunk(m.params.sessionId, h.role === "user" ? "user_message_chunk" : "agent_message_chunk", h.text);
+      if (h.role === "agent") {
+        update(m.params.sessionId, { sessionUpdate: "tool_call", toolCallId: "old-1", title: "Earlier command", kind: "execute", status: "pending", rawInput: { command: "uptime" } });
+        update(m.params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "old-1", status: "completed", content: [{ type: "content", content: { type: "text", text: "earlier output" } }] });
+      }
+    }
+    return send({ jsonrpc: "2.0", id: m.id, result: null });
+  }
+  if (m.method === "session/prompt") {
+    const n = history.filter((h) => h.role === "agent").length + 1;
+    const answer = "ANSWER-" + n + ".";
+    history.push({ role: "user", text: "(prompt " + n + ")" }, { role: "agent", text: answer });
+    fs.writeFileSync(store, JSON.stringify(history));
+    chunk(m.params.sessionId, "agent_message_chunk", answer);
+    return send({ jsonrpc: "2.0", id: m.id, result: { stopReason: "end_turn" } });
+  }
+});
+`,
+      "utf8",
+    );
+    const runner: ExternalRunner = { id: "replaying", name: "Replaying agent", command: process.execPath, args: [script], cwd: dir, updatedAt: 1 };
+    const conversation = (texts: Array<["user" | "assistant", string]>): AgentTask =>
+      makeTask("conv", "", { messages: texts.map(([role, text], i) => ({ id: `m${i}`, role, text, at: i + 1 })) });
+
+    const first = new AcpRuntime(runner, { preface: "p", ask: async () => true });
+    disposals.push(() => first.stop());
+    const firstEvents: RunEvent[] = [];
+    await first.start(conversation([["user", "first question"]]), undefined, (e) => firstEvents.push(e));
+    await first.stop();
+    expect(firstEvents.at(-1)).toMatchObject({ type: "run.completed", output: "ANSWER-1." });
+
+    const second = new AcpRuntime(runner, { preface: "p", ask: async () => true });
+    disposals.push(() => second.stop());
+    const events: RunEvent[] = [];
+    await second.start(
+      conversation([["user", "first question"], ["assistant", "ANSWER-1."], ["user", "second question"]]),
+      undefined,
+      (e) => events.push(e),
+    );
+    // Only this run's answer is streamed and returned: the first answer is in the conversation already.
+    expect(events.filter((e) => e.type === "message.delta").map((e) => e.delta)).toEqual(["ANSWER-2."]);
+    expect(events.at(-1)).toMatchObject({ type: "run.completed", output: "ANSWER-2." });
+    // Nor is an earlier tool call reported as a step of this run.
+    expect(events.filter((e) => e.type === "tool.result")).toEqual([]);
+  }, 30_000);
 });

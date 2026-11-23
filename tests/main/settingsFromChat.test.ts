@@ -388,6 +388,27 @@ describe("what the person approves is what is done", () => {
   });
 });
 
+describe("how long a key the assistant makes lasts", () => {
+  it("is 30 days when nothing is said, and for ever only when the request says so; the card says which", async () => {
+    const { hub } = await makeHub();
+    const { call, pending, approve } = await startRun(hub);
+    const day = 24 * 3600_000;
+    const plain = call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "Thirty days", scopes: ["read"] });
+    const plainCard = await pending();
+    expect(plainCard.command).toContain("The key works for 30 days.");
+    await approve(plainCard.id);
+    const made = (await plain) as { key: { expiresAt?: number } };
+    expect(made.key.expiresAt! - Date.now()).toBeGreaterThan(29 * day);
+    expect(made.key.expiresAt! - Date.now()).toBeLessThanOrEqual(30 * day);
+
+    const endless = call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "For ever", scopes: ["read"], neverExpires: true });
+    const endlessCard = await pending();
+    expect(endlessCard.command).toContain("This key never stops working.");
+    await approve(endlessCard.id);
+    expect(((await endless) as { key: { expiresAt?: number } }).key.expiresAt).toBeUndefined();
+  });
+});
+
 describe("a secret a setting makes", () => {
   it("is shown to the person once on the card, and is not in what the model is told", async () => {
     const { hub } = await makeHub();

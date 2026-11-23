@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { EvalRun, AgentTask, WorkTicket } from "../../../../shared/types/aiHub";
+import type { EvalRun, AgentTask, WorkTicket, WorkspaceServerSummary } from "../../../../shared/types/aiHub";
 import { buildDailyReport } from "../DailyReport";
 import {
   Replay,
@@ -35,7 +35,9 @@ export class EvalsPart {
    * moment is left out of what the replay is given: activity after the case was made, how the
    * servers stand now, what changed on them lately and what the open terminals show. Otherwise a
    * case made before a fix fails after it, whatever the agent does: it is told the fault is over.
-   * Memory and the pages stay: they are what a test is run to try.
+   * Memory and the pages stay: they are what a test is run to try. The servers are the ones the
+   * workspace had when the case was made, where the case holds that list; a case without one is
+   * replayed with today's servers, and its result says so (`serverList`).
    */
   asOfEvalCase(this: HubService, task: AgentTask, extra: ExtraWorkspaceContext): ExtraWorkspaceContext {
     if (!task.evalCaseId) return extra;
@@ -43,6 +45,7 @@ export class EvalsPart {
     const asOf = found?.createdAt ?? 0;
     return {
       ...extra,
+      ...(found?.servers ? { workspaceServers: found.servers as WorkspaceServerSummary[] } : {}),
       asOf,
       activityLog: (extra.activityLog ?? this.store.data.activityLog ?? []).filter((a) => a.at <= asOf),
       recentServerChanges: [],
@@ -148,6 +151,8 @@ export class EvalsPart {
           }
           run = evalRun({ task, checks, unrecorded: replay.unrecorded, live: replay.live, rubricScores: verdict?.scores, failureModes: verdict?.failureModes });
           if (judgeError) run = { ...run, passed: false, inconclusive: judgeError };
+          // Said with the result: this replay saw today's servers, not the ones of the day the case was made.
+          if (!found.servers) run = { ...run, serverList: "today" };
         } catch (error) {
           run = {
             at: Date.now(),
@@ -195,10 +200,18 @@ export class EvalsPart {
           const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId) ?? (isDemoMode() ? getDemoTasks().find((t) => t.id === request.fromTaskId) : undefined);
           if (!from) throw new Error("That conversation is not on this computer any more.");
           if (active(from)) throw new Error("Wait until the conversation has ended.");
-          this.store.data.evalCases = [
-            ...cases,
-            caseFromTask(from, { title: request.title, expect: request.expect }, await this.resolveActorName()),
-          ];
+          const made = caseFromTask(from, { title: request.title, expect: request.expect }, await this.resolveActorName());
+          // The servers as they are now go with the test: a replay is told about these, not about
+          // whatever the workspace holds on the day it is run. A list with a server from a Team Vault
+          // is not kept: a test is shared with the team, and what comes from the vault is not.
+          const servers = (await this.collectExtraContext().catch(() => undefined))?.workspaceServers;
+          if (servers && !servers.some((server) => server.fromVault))
+            made.servers = servers.slice(0, 500).map(({ id, name, host, port, username, cluster, tags, description, nodeRole, role }) => ({
+              id, name, host, port, username,
+              ...(cluster ? { cluster } : {}), ...(tags ? { tags } : {}), ...(description ? { description } : {}),
+              ...(nodeRole ? { nodeRole } : {}), ...(role ? { role } : {}),
+            }));
+          this.store.data.evalCases = [...cases, made];
         }
         this.lastWorkSync = 0;
         break;

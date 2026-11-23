@@ -111,7 +111,7 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", as
       ["limited", ["kb_search", "file_write"], "workspace tools: kb_search"],
       ["unsupported", ["file_write"], "no workspace bridge"],
     ] as const) {
-      await hub.request({ action: "agent-save", agent: { id, name: id, role: "Reader", mission: "List available tools", systemPrompt: "", defaultMode: "advice", runnerId: "list", allowedTools: [...allowedTools] } });
+      await hub.request({ action: "agent-save", agent: { id, name: id, role: "Reader", mission: "List available tools", systemPrompt: "", defaultMode: "assisted", runnerId: "list", allowedTools: [...allowedTools] } });
       const snap = await hub.request({ action: "ticket-save", ticket: { title: id, assigneeAgentId: id } });
       const ticketId = snap.workTickets!.find(ticket => ticket.title === id)!.id;
       await hub.request({ action: "ticket-start", id: ticketId });

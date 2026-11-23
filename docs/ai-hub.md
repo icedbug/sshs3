@@ -50,10 +50,23 @@ explicitly enabled presentation on top of the same terminal authority.
   providers, settings).
 - **`DirectAgentRuntime`** — the agent loop for OpenAI Codex (`/responses`),
   OpenAI-compatible (`/chat/completions`) and Anthropic (`/v1/messages`)
-  providers. `maxOutputTokens`, `temperature` and `reasoningEffort` from the AI
-  configuration are forwarded to every provider, and attached images are sent to
-  all three. Fallback models come from `DEFAULT_AI_MODELS` in
+  providers. `maxOutputTokens` from the AI configuration goes to every
+  provider. `reasoningEffort` does too, in each provider's own form:
+  `reasoning.effort` (Responses), `reasoning_effort` (chat completions) and
+  `output_config.effort` (Anthropic, the same for the whole run so that the
+  prompt cache holds; left out for the rest of a run at a model that refuses
+  it). `temperature` is sent to chat completions only: the other two refuse
+  it. Attached images are sent to all three. A run is given the latest 30
+  messages of its conversation (`conversationWindow`); when earlier ones are
+  left out, a line that comes first says how many. There is no limit on how
+  many turns a run takes, and no setting for one. Fallback models come from `DEFAULT_AI_MODELS` in
   `src/shared/types/ai.ts`.
+  The Responses loop stores nothing at the provider (`store: false`) and
+  sends the whole conversation with every turn. It asks for the model's
+  reasoning in its encrypted form (`include: ["reasoning.encrypted_content"]`),
+  the only form that can be sent back with the next turn when nothing is
+  stored. An endpoint that refuses `include` is asked again without it, and
+  its reasoning items are then left out of what is sent back.
   The Anthropic loop uses prompt caching: the instructions are a system block
   of their own with a cache breakpoint, the per-run workspace snapshot follows
   it, and a top-level `cache_control` moves the conversation breakpoint each
@@ -61,6 +74,17 @@ explicitly enabled presentation on top of the same terminal authority.
   parameters) and reports the run's tokens summed over all turns, input read
   from `message_start` including cache writes and reads. A run may only call
   the tools it was offered.
+  In all three loops a tool result older than six turns and longer than 400
+  characters is replaced by a one-line stub with a preview
+  (`microcompactToolResults`). That is done in batches: only when the old
+  results that are still whole add up to a fifth of the compaction limit
+  (8,000 characters at least) are they all shortened at once. Between
+  batches the conversation is only added to, so each request begins with what
+  the one before it sent and the provider's prompt cache can serve it;
+  shortened one per turn, no request did. The Anthropic loop also takes the
+  model's thinking blocks out of the earlier turns when it shortens: current
+  Claude models bind a thinking block to the conversation that produced it
+  and refuse one sent back after an earlier message was edited.
 - **`AgentDiscipline`** — what keeps a run on the rails, for all three
   providers and without a model call of its own:
   - *Operating instructions* (`operatingInstructions`): a way of working
@@ -78,31 +102,60 @@ explicitly enabled presentation on top of the same terminal authority.
     passed since. Something was changed when a change card (`sshs3_change`)
     ran or a file was written. A plain command never counts: nothing looks at
     what a command did. Each is bounded, so a stuck run can end.
+    What the model wrote in a turn that was sent back stays part of the
+    answer: the final answer is the text of every turn that ended without a
+    tool call, in order (a text said twice is kept once). A report followed
+    by "All items are complete." is the report with that line under it. What
+    the model writes in a turn that calls a tool is shown as it comes and is
+    not part of the final answer.
   - *Thorough mode*: `ultrawork` / `ulw` in the request adds a section to the
-    instructions, asks for a task list and doubles the turn budget.
+    instructions and asks for a task list.
   - *What the team knows about a failure* (`failureHints`): a failed command's
     result carries the team memories and skills that match it (exact error
     signature first, else at least three distinctive shared words).
   - *Investigators* (`sshs3_investigate`, `HubService.investigate`): the
     agent hands precise questions to runs that only look, in
-    parallel (all at once), each with a fresh context,
+    parallel (four at a time; with more questions the rest wait their turn),
+    each with a fresh context,
     `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`, and, when
     one can be opened, a terminal of its own on the asking run's target. An
     investigator is told to only look and is given no change card and no file
     write. Nothing checks what its commands do. The asking agent gets their
     reports back together, a failed one with its error. They cannot delegate. Stopping the asking run
     stops them, and what they spend is put down to the asking agent.
-  - *Compaction*: when everything sent (the transcript and the tool
-    definitions) passes about half the context window (`compactAtChars`),
-    and the run itself has grown by enough for a note to replace, the agent
-    is asked, between tool rounds, for a handover note to itself (the note is
-    not shown in the chat); the next request then starts from the original
-    conversation plus that note, its task list and a digest of its last twelve
-    tool calls, and replays nothing else. No earlier message is edited, which
-    is the shape that stays valid with models that bind their thinking to the
-    conversation, and it is the same for all three providers. If the agent
-    calls a tool instead of writing the note, it is asked again after that
-    round.
+  - *Compaction*: when everything a request carries (the tool definitions,
+    the instructions, the conversation the run started from and what the run
+    has added) passes about half the context window (`compactAtChars`), the
+    agent is asked, between tool rounds, for a handover note to itself (the
+    note is not shown in the chat); the next request then starts from the
+    original conversation plus that note, its task list and a digest of its
+    last twelve tool calls, and replays nothing else. No earlier message is
+    edited, which is the shape that stays valid with models that bind their
+    thinking to the conversation, and it is the same for all three providers.
+    If the agent calls a tool instead of writing the note, it is asked again
+    after that round.
+    A note can only replace what the run added since the last one, so that is
+    what decides (`handoverDue`): a note is asked for only when at least one
+    tool has returned something since the last note and the run has added at
+    least 8,000 characters since then, and at least twice the length of the
+    last handover. An image counts as a picture (6,000 characters), not as
+    the bytes of its data. A run whose starting point is already over the
+    limit therefore keeps working and writes a note now and then, instead of
+    writing note after note.
+    When the context window that is set cannot hold the run, the run ends with
+    a message that says so and what to do. That happens before the first
+    request when the tool list, the instructions and the conversation leave
+    no room in the window (at four characters per token; an acting run's tool
+    list and instructions are about 72,000 characters, so a window under
+    about 20,000 tokens holds none), and after the third handover in a row
+    that came after a single round of tool calls.
+  - *A message sent while the agent works* (`steer`) is given to the model
+    before its next turn. One that comes in while the last turn is being
+    written is answered before the run ends: the run takes one more turn. A
+    compaction keeps the last ten such messages word for word in the handover
+    (a note is the model's summary and may leave a constraint out). In the
+    conversation the person's message stands after what had been shown when it
+    came, and the final answer is what was said after it.
   - *Earlier conversations* (`sshs3_session_search`): the agent can search
     this user's own earlier conversations (every word must appear; newest
     first, with the matching lines) and read one in full, with its task list
@@ -122,6 +175,32 @@ explicitly enabled presentation on top of the same terminal authority.
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.
+    A rate limit (429) that says when to ask again (`retry-after` in seconds
+    or as a date, `retry-after-ms`) is waited out for as long as it asks, and
+    the conversation shows "Waiting for the provider's rate limit. Asking
+    again in …" while it lasts. These waits are not among the three tries.
+    Together they may take five minutes for one answer
+    (`retryPolicy.rateLimitMaxWaitMs`; a wait counts as a second at least).
+    Past that, or at once when the provider asks for longer than that, the
+    run fails and says how long the provider asked for.
+  - *A connection that breaks in the middle of an answer* (the socket drops,
+    the stream goes silent for 35 seconds, or it ends without the event that
+    ends an answer): the same turn is asked again, twice at most
+    (`retryPolicy.streamRetries`), with backoff. Nothing of the broken answer
+    is sent back to the model, and what the person was shown of it is taken
+    back first (`message.retract`: the hub removes it from the conversation),
+    so the answer stands there once. After that the run goes to a spare model
+    if one is set, else it fails as before. An error the provider reports in
+    the stream is not asked again.
+  - *An answer cut at the output limit* ("Longest answer" in AI settings) does
+    not fail the run. What came is kept, the model is asked to go on exactly
+    where it stopped, and the final answer is the whole text. A tool call
+    that was cut in the middle is not made; the model is asked to make it
+    again. After three cut turns in a row the run stops and says to raise the
+    limit. A turn that used up its output before it wrote anything is asked
+    once more, with the lowest reasoning effort; if that is cut the same way,
+    the run fails and says to raise the limit or lower the effort. The same
+    in all three turn loops.
 - **`PlanMode`** — plan first, then act. The agent proposes a plan with
   `sshs3_plan_propose` when the user asks for one (`/plan` in the request) or
   on its own for a risky change. A plan has a goal and steps, each with
@@ -143,6 +222,15 @@ explicitly enabled presentation on top of the same terminal authority.
     management operations that change something are held. `terminal_command`
     and `sshs3_cluster_exec` are not held: nothing looks at what a command
     does, and the agent is told to change nothing with one.
+    An approval is for the plan that was shown, not for the rest of the
+    conversation (`approvedPlanOver`). In Plan mode, and in a request with
+    `/plan`, a new change is held again and needs a new plan once every step
+    of the approved plan has run, or once the person has written since they
+    approved it. In the second case a step of the approved plan that has not
+    run yet is still not held. The hub's own messages (its word that a plan
+    was approved or sent back, the line a resumed conversation starts with)
+    are not the person writing. In the other modes nothing changes: each
+    change outside a plan is asked about on its own.
   - *The decision* (`plan-decide`, the plan card in the conversation):
     approving sets the agent's task list to the plan's steps and sends it to
     carry them out; sending it back with a note has the agent revise;
@@ -506,6 +594,16 @@ reference records the entry and its update time. Terminal references show the
 masked material included in that call. A citation in the reply is marked
 separately from material that was merely supplied as context.
 
+Everything an agent reads a system with is a source (`SOURCE_TOOLS` in
+`SourceCapture.ts`): its own commands, each server's output of a command across
+a cluster (`sshs3_cluster_exec`), a file (`file_read`, and a remote file or a
+diff from `sshs3_storage_ops`; these are listed as a server reading) and each
+investigator's report. The model sees the reference in square brackets after
+the text (`[S1]`), and an agent that acts is told what it is for. A listing
+of files has no reference: it is rows, not a text. When a run ends without
+an answer, what it read is kept with the last message of the conversation, so
+an observation that names it still finds it.
+
 Sources are captured when the request is sent. Editing the KB later does not
 change which revision the earlier answer used. The compact conversation list
 carries availability only. Details are loaded for the individual message when
@@ -554,6 +652,14 @@ the identity system, and sshs3 continues to enforce its own command approvals.
   (`asOfEvalCase`): activity after the case was made, the servers' latest
   readings and recent changes, and what the open terminals show. Memory and
   the pages are given as they are now; they are what a test tries.
+  The servers it is told about are the ones the workspace had when the case
+  was made: the list (name, host, port, user, cluster, tags, description and
+  role of each; nothing of how this computer reaches them) is kept with the
+  case and is not sent to the windows. A case holds no list when it was made
+  before the list was kept, or when the workspace then had a server from a
+  Team Vault, which is never copied into what the team shares. Such a case
+  is replayed with today's servers, and its result says so
+  (`serverList: "today"`, shown as a note under the run).
 - Editing a case's expectations changes the parts that were sent and keeps
   the others.
 - The newest five runs are kept per case, so the view can say which cases got
@@ -962,7 +1068,11 @@ reads them. There are none in the desktop app and none in the demo lab.
 - **Hypotheses.** `sshs3_hypotheses` is the agent's working list of what might
   explain a problem, kept by the run like its task list. A hypothesis cannot
   be marked confirmed without evidence for it, or ruled out without evidence
-  against it (`parseHypotheses`). When the agent wants to stop with hypotheses
+  against it (`parseHypotheses`). The list holds 24 at most; the agent takes
+  one off with `withdraw` (a duplicate, or one that is not a possible cause
+  after all; never a confirmed one). On a ticket a cause counts as confirmed
+  only when an observation for it names its source (`diagnosisAfterRun`).
+  When the agent wants to stop with hypotheses
   still open, or with none confirmed, it is sent back once and told not to
   present a cause as found (`continuationMessage`). The list is shown above
   the composer (`HypothesisTree`) and goes into the record that memory and
@@ -1169,6 +1279,18 @@ never asked about, because nobody here is watching whoever asked
 (`AgentTask.fromOutside`). It runs in the terminal that is
 already open for that server and nowhere else.
 
+What the server hands out of the knowledge base is somebody's text, read by
+somebody else's model: the body of a page (`kb_read_page`, and the page and
+document resources) and each passage a search returns come inside an
+`untrusted_data` block that names where the text is from, and a closing tag
+written into a page does not close the block. The tools that list or search
+(`list_servers`, `tickets_list`, `kb_search`) declare what their answer looks
+like (`outputSchema`), and a client that checks it finds the answer conforms.
+Every call is a line in the key owner's audit log, with the key's name and
+how it ended: tool calls, the list calls (`tools/list`, `resources/list`,
+`resources/templates/list`, `prompts/list`), `prompts/get`, and
+`resources/read`, also when one of them fails or is refused.
+
 ### What an agent may be held to
 
 An agent carries a list of the tools its runs may use. The list only narrows:
@@ -1259,6 +1381,14 @@ several hundred times a second. Three things keep that down
   message is once it is added (`length`), so a window adds it only where its
   copy ends exactly before it: a piece it already has is not added twice, and
   a gap makes it fetch (`applyDeltaToMessages`, `lib/aiHubDelta.ts`).
+  The hub masks the answer it keeps as it grows, but only its last 2,048
+  characters with each piece (`STREAM_MASK_WINDOW` in `areas/runs.ts`):
+  masking the whole answer for every piece took 26 seconds of the main
+  process for an answer of 120,000 characters. When the answer is complete
+  (the run ends, is stopped, or the person's message cuts the answer in two)
+  the whole of it is masked once, from what was streamed as it came, which is
+  kept in memory beside the conversation and never stored. The text that is
+  kept is then exactly what masking the whole answer gives.
 - **A long conversation travels by its tail** (`taskForSnapshot`). While it
   is small (six messages, 2 000 characters, no pictures) it is sent whole.
   Past that, the snapshot carries its last two messages, each cut to its last
@@ -2667,7 +2797,10 @@ because there is no server to run one on.
   (`ticketRunsNow`). Its text can still be edited and commented.
 - **Team.** An agent has `reportsTo` (a circle is refused) and an optional
   `monthlyTokenBudget`. A paused agent, or one that has spent its budget, is
-  not started. Usage is counted per agent and calendar month from the runs'
+  not started. The budget also holds while the agent runs: each time a run
+  reports what it has spent so far, that is added to the month, and the run
+  is stopped with a line that says so once the budget is used up
+  (`stopWhenBudgetSpent`). Usage is counted per agent and calendar month from the runs'
   reported tokens: every run of a conversation (a reply, an approved plan,
   "Continue") adds what it spent, not only the first.
 - **A terminal for a ticket nobody sits at.** A ticket started without a
@@ -2808,8 +2941,21 @@ because there is no server to run one on.
   by the same rules as its own runs, once per action: a command it asks to
   run is allowed without asking in every mode but Advice, and an edit or a
   delete it gave no command for waits for a person. It offers the agent no file access and no terminal: the agent uses
-  its own, in the runner's folder. Token use is not reported over ACP, so
-  such runs do not count against a budget. On a shared server a runner is a
+  its own, in the runner's folder. A reply in the same conversation loads
+  the agent's earlier session when the agent can (`session/load`). The
+  protocol has the agent send the whole earlier conversation again while it
+  loads; none of that is shown or counted a second time. An agent that says
+  what a prompt used (`usage` with the answer to the prompt) has it saved
+  with the conversation and counted against its budget like any run's; one
+  that says nothing counts nothing. In Advice mode an external agent is not
+  started at all, and the reason is given: it is a program with a shell and
+  file access of its own, and refusing what it asks for does not stop what
+  it does without asking. The program is given the basics of this app's
+  environment only (`childEnv`: the path, home folder, user, language,
+  terminal, temporary folder, the proxy settings and their certificates, and
+  on Windows what a program needs to start) and the variables its runner
+  lists under `env` (set with `save_runner`; a save from the form in the app
+  keeps them). The SSH agent and sshs3's own variables are never passed. On a shared server a runner is a
   program on the server's host: only an administrator saves one, checked
   again at every start. On Windows a `.cmd` runner (npx) runs through cmd.exe
   with every word quoted for it; anything else is started directly. **Test**
@@ -3161,7 +3307,8 @@ and each has a test.
 when it fails or is stopped. A handover note (compaction) is written from the
 transcript without dropping the person's latest steering. External agents
 (ACP) have no command limit either and never inherit the
-app's SSH agent socket or its own `SSHS3_*` variables. Investigators started
+app's SSH agent socket or its own `SSHS3_*` variables (since then: nothing but
+the basics and what their runner names, see External agents). Investigators started
 from a conversation are linked to it and their spending counts toward it. A
 handoff to another agent takes effect after the current turn, and never raises
 the run's mode. A person can answer an approval with a note: a refusal tells
@@ -3173,8 +3320,8 @@ a schedule, and the hub's own background calls alike), and any number can run
 at once: a run ends when the model answers or somebody stops it. The wait for
 a person's answer has no limit unless one is set, a task can be handed on any
 number of times (never back to an agent that had it), the heartbeat starts
-every ticket that is ready (one at a time on a target), and investigators are
-as many as the questions. What still applies: every approval, the safety
+every ticket that is ready (one at a time on a target), and an agent may ask
+as many investigators as it has questions (four work at the same time). What still applies: every approval, the safety
 policy, an agent's pause, and a monthly token budget where one is set for an
 agent (none by default). While a run works, the chat shows how many commands
 it has run.
@@ -3219,6 +3366,11 @@ The desktop app shows and uses the same sign-in: its own, or the person's
 `codex login` (`~/.codex/auth.json`); one that has run out and cannot be
 renewed is passed over for the next. A workspace on a shared server and the
 demo look in their own folder only.
+A run reads the sign-in when it starts. When the provider refuses it in the
+middle of the run (401), the file is read again and, if it still holds the
+refused sign-in, the sign-in is renewed; the turn is then asked again
+(`CodexAuthProvider.renewAfterRefusal`). A turn is retried this way once: a
+second refusal fails the run and says to sign in again.
 Changing the provider clears the endpoint. App settings beyond how things look
 (smartcard mode, PKCS#11 library, which agent local shells use, X11, update
 checks …) need a person's approval when an agent changes them.

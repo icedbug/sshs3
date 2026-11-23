@@ -105,12 +105,22 @@ export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOpti
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
       const send = (data: unknown): void => void res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
       if (options.responses) {
+        // As the API does when nothing is stored: a reasoning item carries its encrypted content only
+        // when the request asked for it, and one sent back without it is refused.
+        const encrypted = Array.isArray(body.include) && (body.include as unknown[]).includes("reasoning.encrypted_content");
+        const bare = (input as Array<{ type?: string; id?: string; encrypted_content?: unknown }>)
+          .find((entry) => entry.type === "reasoning" && typeof entry.encrypted_content !== "string");
+        if (body.store === false && bare) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: `Item '${bare.id}' of type 'reasoning' was provided without its required encrypted content. Items are not persisted when \`store\` is set to false.`, type: "invalid_request_error", param: "input", code: null } }));
+          return;
+        }
         const item = "tool" in step
           ? { type: "function_call", name: step.tool, arguments: JSON.stringify(step.args), call_id: `c${done}`, id: `fc${done}`, status: "completed" }
           : { type: "message", role: "assistant", id: `m${done}`, status: "completed", content: [{ type: "output_text", text: step.text, annotations: [] }] };
         if ("text" in step) send({ type: "response.output_text.delta", delta: step.text });
         send({ type: "response.completed", response: { status: "completed", output: [
-          { type: "reasoning", id: `r${done}`, encrypted_content: `opaque-${done}`, summary: [] }, item,
+          { type: "reasoning", id: `r${done}`, ...(encrypted ? { encrypted_content: `opaque-${done}` } : {}), summary: [] }, item,
         ], usage: { input_tokens: 1200, output_tokens: 40 } } });
         res.end();
         return;

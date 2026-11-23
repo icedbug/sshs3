@@ -62,7 +62,10 @@ export interface AiConfig {
   terminalContextChars?: number;
   /** Max output tokens per model turn. Default: 8192. */
   maxOutputTokens?: number;
-  /** Max tool-call loop turns per run. Default: 20. */
+  /**
+   * Not used: a run has no limit on how many times it goes round. Kept so that settings saved
+   * before the limit was taken away still load, and so that a window that still sends it is not refused.
+   */
   maxToolTurns?: number;
   /** Reasoning effort for reasoning-capable models. Default: 'medium'. */
   reasoningEffort?: AiReasoningEffort;

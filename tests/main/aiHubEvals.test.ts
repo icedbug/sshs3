@@ -112,6 +112,54 @@ const callTool = (name: string, input: Record<string, unknown>): Response =>
     { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
   ]);
 
+describe("the servers a replay is told about", () => {
+  const SERVERS = [{ id: "s1", name: "tank-01", host: "10.0.0.7", port: 22, username: "ops", cluster: "Storage", privateKeyPath: "/home/me/.ssh/id" }];
+  async function hubWith(servers: () => unknown[]) {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
+    setDemoModeForTesting(false);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-eval-servers-"));
+    const hub = new HubService(
+      { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json"), workspaceServers: async () => servers() } as never,
+      dir,
+    );
+    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
+    await hub.initialize();
+    hub.store.data.tasks.push(finished());
+    return hub;
+  }
+
+  it("are the ones the workspace had when the test was made, whatever it has on the day of the replay", async () => {
+    let now: unknown[] = SERVERS;
+    const hub = await hubWith(() => now);
+    const snap = await hub.request({ action: "eval-case-save", fromTaskId: "t1" });
+    const stored = hub.store.data.evalCases![0];
+    // What tells which servers there are, and nothing of how this computer reaches them.
+    expect(stored.servers).toEqual([{ id: "s1", name: "tank-01", host: "10.0.0.7", port: 22, username: "ops", cluster: "Storage" }]);
+    // The list is material for the replay: it is not sent to the windows with every snapshot.
+    expect(snap.evalCases![0]).not.toHaveProperty("servers");
+
+    // Since then a server was added and the old one renamed.
+    now = [{ ...SERVERS[0], name: "tank-renamed" }, { id: "s2", name: "new-01", host: "10.0.0.9", port: 22, username: "ops" }];
+    const today = { workspaceServers: now, activityLog: [{ at: stored.createdAt + 5000 }, { at: stored.createdAt - 5000 }] } as never;
+    const replayed = hub.asOfEvalCase({ evalCaseId: stored.id } as never, today);
+    expect(replayed.workspaceServers!.map((s) => s.name)).toEqual(["tank-01"]);
+    expect(replayed.activityLog).toHaveLength(1);
+    // A conversation that is not a replay sees the workspace as it is.
+    expect(hub.asOfEvalCase({} as never, today).workspaceServers).toBe(now);
+  });
+
+  it("are today's when the test holds no list: one made before the list was kept, or with servers from a Team Vault", async () => {
+    const hub = await hubWith(() => [{ ...SERVERS[0], fromVault: true }]);
+    await hub.request({ action: "eval-case-save", fromTaskId: "t1" });
+    const stored = hub.store.data.evalCases![0];
+    // What comes from the vault is never copied into a test, which the team shares.
+    expect(stored.servers).toBeUndefined();
+    const today = { workspaceServers: [{ id: "s9", name: "today-01" }] } as never;
+    expect(hub.asOfEvalCase({ evalCaseId: stored.id } as never, today).workspaceServers!.map((s) => s.name)).toEqual(["today-01"]);
+  });
+});
+
 describe("running a test case", () => {
   it("replays the question against the agent as it is now, runs nothing for real, and records the result", async () => {
     const { HubService } = await import("../../src/main/ai/hub/HubService");
@@ -128,6 +176,8 @@ describe("running a test case", () => {
     hub.store.data.tasks.push(finished());
     let snap = await hub.request({ action: "eval-case-save", fromTaskId: "t1", expect: { mention: ["scrub"], mustCall: ["zpool status"], mustNotRun: ["systemctl restart"], conclusion: "A scrub runs at the same time." } });
     const id = snap.evalCases![0].id;
+    // As a case made before the server list was kept with a test.
+    delete hub.store.data.evalCases![0].servers;
     expect(snap.evalCases![0]).toMatchObject({ recordedCalls: 2, runs: [] });
     expect(snap.evalCases![0]).not.toHaveProperty("recorded");
 
@@ -148,6 +198,8 @@ describe("running a test case", () => {
     while (!(hub.store.data.evalCases![0].runs.length > 0) && Date.now() < until) await new Promise((r) => setTimeout(r, 15));
 
     const run = hub.store.data.evalCases![0].runs[0];
+    // The case holds no server list (made before one was kept): the result says the replay saw today's.
+    expect(run.serverList).toBe("today");
     // Nothing reached a terminal: both commands were answered from the recording.
     expect(execute).not.toHaveBeenCalled();
     expect(bodies[1].text).toContain("scrub in progress since 01:00");

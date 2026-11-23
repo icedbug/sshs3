@@ -69,7 +69,8 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
     // The client offers no file access: asking for it must be refused, not hang.
     const fsAnswer = await ask("fs/read_text_file", { sessionId: "s1", path: "/etc/passwd" });
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Permission: ${verdict}. File read through the client: ${fsAnswer.code === -32601 ? "refused" : "ALLOWED"}.` } });
-    send({ jsonrpc: "2.0", id: m.id, result: { stopReason: "end_turn" } });
+    // "usage": the agent says what the prompt cost, as some do.
+    send({ jsonrpc: "2.0", id: m.id, result: { stopReason: "end_turn", ...(mode === "usage" ? { usage: { inputTokens: 1200, outputTokens: 300, cachedReadTokens: 50 } } : {}) } });
   }
 });
 let promptId;

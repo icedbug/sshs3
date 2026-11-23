@@ -700,7 +700,6 @@ export class HubService {
     const contextWindowTokens = configView.contextWindowTokens ?? 128000;
     const terminalContextChars = configView.terminalContextChars ?? 8000;
     const maxOutputTokens = configView.maxOutputTokens ?? 8192;
-    const maxToolTurns = configView.maxToolTurns ?? 20;
     const reasoningEffort = configView.reasoningEffort ?? "medium";
     const temperature = configView.temperature ?? 0.2;
     const kbDocs = this.getKbDocumentsList();
@@ -800,7 +799,8 @@ export class HubService {
         chunks: [],
         chunkCount: Math.max(1, d.chunks?.length ?? d.chunkCount ?? 1),
       })),
-      evalCases: (this.store.data.evalCases ?? []).map(({ recorded, ...rest }) => ({ ...rest, recordedCalls: recorded.length })),
+      // What a replay is given (the recording, the server list of the day) stays here: the windows show the test, not its material.
+      evalCases: (this.store.data.evalCases ?? []).map(({ recorded, servers: _servers, ...rest }) => ({ ...rest, recordedCalls: recorded.length })),
       evalRunning: this.evalRunningId,
       dailyReport: this.store.data.dailyReport,
       kbWork: {
@@ -876,7 +876,6 @@ export class HubService {
         contextWindowTokens,
         terminalContextChars,
         maxOutputTokens,
-        maxToolTurns,
         reasoningEffort,
         temperature,
       },

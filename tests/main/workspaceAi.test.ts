@@ -1,3 +1,4 @@
+import { toolsForTask } from "../../src/main/ai/hub/DirectAgentRuntime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -1349,7 +1350,6 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         aiModel: "gpt-5.4",
         contextWindowTokens: 200000,
         terminalContextChars: 24000,
-        maxToolTurns: 25,
         reasoningEffort: "high",
       },
     });
@@ -1357,7 +1357,9 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(snapAfterAiCfg.config.model).toBe("gpt-5.4");
     expect(snapAfterAiCfg.config.contextWindowTokens).toBe(200000);
     expect(snapAfterAiCfg.config.terminalContextChars).toBe(24000);
-    expect(snapAfterAiCfg.config.maxToolTurns).toBe(25);
+    expect(snapAfterAiCfg.config.reasoningEffort).toBe("high");
+    // A limit on turns is not a setting the assistant is offered: a run has none.
+    expect(JSON.stringify(toolsForTask({ mode: "assisted", target: { sessionId: "s", generation: 1, label: "l" }, messages: [], changes: [], sources: [] } as never))).not.toContain("maxToolTurns");
 
     // 7. Configure Dotfile Pool & synced dotfiles via AI (`save_dotfile` & `list_dotfiles`)
     await hub.broker.invoke(cap.key, {

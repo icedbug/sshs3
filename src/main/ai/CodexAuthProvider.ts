@@ -398,6 +398,20 @@ export class CodexAuthProvider {
   }
 
   /**
+   * The provider refused the sign-in a run was using (401), in the middle of the run: it ran out,
+   * or another program renewed it and the old one was withdrawn. Returns a sign-in to go on with,
+   * or null when there is none. The file is read again first: when it now holds another token
+   * (`codex login` and the Codex CLI write the same file), that one is used and nothing is renewed.
+   * Otherwise the sign-in is renewed with its refresh token.
+   */
+  async renewAfterRefusal(refusedAccessToken: string, fetchImpl: typeof fetch = fetch): Promise<CodexCredentials | null> {
+    const current = await this.resolveCredentials(fetchImpl);
+    if (current && current.accessToken !== refusedAccessToken) return current;
+    const renewed = await this.refreshNow(fetchImpl);
+    return renewed.ok ? renewed.credentials : null;
+  }
+
+  /**
    * Explicitly refreshes the current Codex session's tokens and returns structured diagnostics
    * on failure (HTTP status, OAuth error code, retryability).
    */

@@ -5,7 +5,7 @@ import { hubSessionGeneration } from "../../lib/aiHubSession";
 import { AnswerSourceDetails } from "./AnswerSources";
 
 const kinds: Record<HypothesisSource["kind"], string> = {
-  "kb-page": "KB page", "kb-document": "KB document", memory: "Memory", terminal: "Terminal excerpt", "server-reading": "Server reading",
+  "kb-page": "KB page", "kb-document": "KB document", memory: "Memory", terminal: "Terminal excerpt", "server-reading": "Server reading", investigation: "Investigator's report",
 };
 
 export function HypothesisSourceDetails({ pointer }: { pointer: HypothesisSource }): JSX.Element {

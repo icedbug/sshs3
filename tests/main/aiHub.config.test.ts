@@ -77,6 +77,24 @@ describe("AI model credentials", () => {
     expect(demo.codexAuthDir()).toBe(userData);
     expect(await demo.getView()).toMatchObject({ codexConnected: false });
   });
+  it("keeps every profile when several are saved at the same moment", async () => {
+    const store = new AiConfigStore(file);
+    // Not awaited one by one: each save used to read the list before the others had written it, and the last one won.
+    await Promise.all(
+      ["a", "b", "c", "d", "e"].map((id) => store.upsertProfile({ id, name: `Profile ${id}`, provider: "openai-compatible", model: `model-${id}`, baseUrl: "http://127.0.0.1:11434/v1" } as never)),
+    );
+    expect((await store.getView()).profiles?.map((p) => p.id).sort()).toEqual(["a", "b", "c", "d", "e"]);
+    // Naming a profile for two roles and deleting another at the same moment: all three hold.
+    await Promise.all([
+      store.setActiveProfileForRole("primary", "a"),
+      store.setActiveProfileForRole("fastTriage", "b"),
+      store.deleteProfile("e"),
+      store.upsertProfile({ id: "f", name: "Profile f", provider: "openai-compatible", model: "model-f", baseUrl: "http://127.0.0.1:11434/v1" } as never),
+    ]);
+    const view = await store.getView();
+    expect(view.profiles?.map((p) => p.id).sort()).toEqual(["a", "b", "c", "d", "f"]);
+    expect(view.activeProfileByRole).toMatchObject({ primary: "a", fastTriage: "b" });
+  });
   it("stores ciphertext but never returns the key to the renderer", async () => {
     const store = new AiConfigStore(file);
     const view = await store.update({

@@ -42,6 +42,7 @@ import { isProdTag } from "./safetyPolicy";
 import { validateEgressPolicy } from "./dataDestination";
 import { isDemoMode } from "./demoWorkspace";
 import { McpClientManager } from "./McpClientManager";
+import { RUNNER_ENV_NOTE } from "./AcpRuntime";
 import { guardUrl, type GuardedTarget, type GuardOptions } from "./Notifier";
 import {
   boundedContext,
@@ -76,7 +77,7 @@ import {
 } from "./AgentDiscipline";
 
 import { modelRequestBody } from "./modelWirePrivacy";
-import { ResponsesTurn } from "./ResponsesTurn";
+import { ResponsesTurn, StreamEndedEarlyError } from "./ResponsesTurn";
 import { PLAN_TOOL, planGate, wantsPlanFirst } from "./PlanMode";
 
 const NATIVE_FETCH = globalThis.fetch;
@@ -92,6 +93,13 @@ export const retryPolicy = {
   maxDelayMs: 20_000,
   sseIdleTimeoutMs: 35_000,
   responseHeadersTimeoutMs: 60_000,
+  /** How many times one turn is asked again after its answer broke off in the middle of the stream. */
+  streamRetries: 2,
+  /**
+   * How long one turn waits, in all, for a provider's rate limit that says when to ask again.
+   * Each wait is as long as the provider asks; a wait counts as a second at least.
+   */
+  rateLimitMaxWaitMs: 300_000,
 };
 // 520 to 524 are what the network in front of a provider answers when the provider did not (OpenAI sits
 // behind one): passing trouble, tried again like a 502. The first real run ended on a 520 after 14 commands.
@@ -116,6 +124,43 @@ export function isTimeoutOrNetworkError(error: unknown): boolean {
     return true;
   }
   return /timed?\s*out|econnreset|econnrefused|network|socket hang up|fetch failed/i.test(error.message);
+}
+
+/**
+ * How long a provider asks to wait before the next request, in milliseconds, when it says so:
+ * `retry-after-ms` (OpenAI), or `retry-after` as seconds or as a date. Undefined when it does not.
+ */
+export function askedRetryDelayMs(headers: Headers, now = Date.now()): number | undefined {
+  const ms = Number(headers.get("retry-after-ms"));
+  if (headers.get("retry-after-ms") !== null && Number.isFinite(ms) && ms >= 0) return Math.round(ms);
+  const after = headers.get("retry-after");
+  if (after === null || !after.trim()) return undefined;
+  const seconds = Number(after);
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.round(seconds * 1000) : undefined;
+  const at = Date.parse(after);
+  return Number.isFinite(at) ? Math.max(0, at - now) : undefined;
+}
+
+/** A length of time in words: "45 seconds", "2 minutes 5 seconds". */
+export function plainDuration(ms: number): string {
+  const total = Math.max(1, Math.ceil(ms / 1000));
+  const count = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (total < 60) return count(total, "second");
+  const seconds = total % 60;
+  return `${count(Math.floor(total / 60), "minute")}${seconds ? ` ${count(seconds, "second")}` : ""}`;
+}
+
+/**
+ * True when an answer that had begun to arrive broke off: the connection dropped, went silent, or
+ * ended without the event that ends an answer. Not an error the provider reported in the stream.
+ */
+export function isStreamBreak(error: unknown): boolean {
+  if (error instanceof StreamEndedEarlyError || isTimeoutOrNetworkError(error)) return true;
+  if (!(error instanceof Error)) return false;
+  const cause = (error as { cause?: unknown }).cause;
+  const text = `${error.message} ${cause instanceof Error ? cause.message : ""}`;
+  const code = String((cause as { code?: unknown } | undefined)?.code ?? "");
+  return code === "UND_ERR_SOCKET" || /\bterminated\b|\baborted\b|other side closed|premature close/i.test(text);
 }
 
 /**
@@ -747,6 +792,17 @@ export class StreamingSecretMasker {
 export const TOOL_OUTPUT_MAX_CHARS = 32_000;
 export const MICROCOMPACT_KEEP_RECENT_TURNS = 6;
 export const MICROCOMPACT_MIN_CHARS = 400;
+/**
+ * Old tool results are shortened in batches, not one with every turn. A provider's prompt cache
+ * matches the conversation from its start: every edit of an earlier message makes it read anew
+ * (and bill in full) everything after that message. Shortened one per turn, no request found its
+ * prefix cached. A batch is due when the old results that are still whole add up to this share of
+ * the compaction limit; until then the conversation is only added to.
+ */
+export const MICROCOMPACT_BATCH_SHARE = 0.2;
+export const MICROCOMPACT_MIN_BATCH_CHARS = 8_000;
+export const microcompactBatchChars = (compactAtChars: number): number =>
+  Math.max(MICROCOMPACT_MIN_BATCH_CHARS, Math.round(compactAtChars * MICROCOMPACT_BATCH_SHARE));
 
 export interface ArtifactSpillRef {
   id: string;
@@ -816,6 +872,52 @@ export async function formatToolOutputForModel(
   return `${headTailTruncate(clean, budget, 0.35)}${footer}`.slice(0, maxChars);
 }
 
+/**
+ * What one image counts as when a transcript is sized. A provider charges an image by its picture
+ * size, a thousand tokens or two, not by the bytes of its data: counted as text, one screenshot
+ * looked like a full context window.
+ */
+export const IMAGE_CHARS = 6_000;
+
+/** The size of what is sent, in characters, with every image counted as IMAGE_CHARS. */
+export function transcriptChars(value: unknown): number {
+  let images = 0;
+  const text = JSON.stringify(value, function (this: unknown, key: string, item: unknown) {
+    if (typeof item !== "string") return item;
+    // OpenAI carries an image as a data URL, Anthropic as base64 under `source.data`.
+    const inline = item.startsWith("data:image/") ||
+      (key === "data" && (this as { type?: unknown } | undefined)?.type === "base64");
+    if (!inline) return item;
+    images++;
+    return "";
+  });
+  return (text?.length ?? 0) + images * IMAGE_CHARS;
+}
+
+/** The least a run must have added since its last handover note before another one is asked for. */
+export const MIN_HANDOVER_GROWTH = 8_000;
+/** How many handovers in a row may each come after a single round of tool calls before the run ends. */
+export const MAX_TIGHT_HANDOVERS = 3;
+
+/** How many of the messages a person sent while a run worked are kept, as written, through a compaction. */
+const KEPT_STEERING_MESSAGES = 10;
+/** How many turns in a row may end at the output limit before the run stops asking the model to go on. */
+export const MAX_CUT_TURNS = 3;
+const CUT_GO_ON =
+  "[sshs3] Your reply was cut off at the output limit. What you wrote so far is kept and the user sees it. Go on exactly where it stopped. Do not repeat or summarize what you already wrote.";
+const CUT_IN_CALL =
+  "[sshs3] Your reply was cut off at the output limit in the middle of a tool call. The call was not made. Make it again. If its arguments were long, send less in one call.";
+const CUT_BEFORE_TEXT =
+  "[sshs3] Your reply reached the output limit before you wrote anything. Reply again and think less before you write: start with the answer or with the next tool call.";
+
+/** The run cannot go on in the context window that is set. Said to the person as it is; not retried on another model. */
+export class ContextWindowTooSmallError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContextWindowTooSmallError";
+  }
+}
+
 const MICROCOMPACT_MARKER = "[microcompacted stale tool result";
 
 function summarizeForMicrocompact(body: string, turn: number, capture?: SourceCapture): string {
@@ -830,16 +932,22 @@ function summarizeForMicrocompact(body: string, turn: number, capture?: SourceCa
  * Replaces stale `tool_result` / `function_call_output` / `role: "tool"` bodies
  * that are strictly older than `keepRecentTurns` (default 6) turns and larger than
  * `minChars` with compact tombstones while keeping tool_use/tool_result pairing intact.
+ *
+ * With `batchChars`, nothing is replaced until the stale bodies that are still whole add up to at
+ * least that many characters; then all of them are replaced at once. Returns how many were replaced.
  */
 export function microcompactToolResults(
   items: Array<Record<string, unknown>>,
   currentTurn: number,
   turnByItem: WeakMap<object, number>,
-  options: { keepRecentTurns?: number; minChars?: number; capture?: SourceCapture } = {},
+  options: { keepRecentTurns?: number; minChars?: number; capture?: SourceCapture; batchChars?: number } = {},
 ): number {
   const keepRecentTurns = options.keepRecentTurns ?? MICROCOMPACT_KEEP_RECENT_TURNS;
   const minChars = options.minChars ?? MICROCOMPACT_MIN_CHARS;
-  let compacted = 0;
+  /** The stale bodies that are still whole: where each one is held, and its turn. */
+  const stale: Array<{ holder: Record<string, unknown>; key: "content" | "output"; turn: number }> = [];
+  const whole = (body: unknown): body is string =>
+    typeof body === "string" && body.length > minChars && !body.startsWith(MICROCOMPACT_MARKER);
 
   for (const item of items) {
     const itemTurn = turnByItem.get(item);
@@ -847,36 +955,47 @@ export function microcompactToolResults(
 
     // OpenAI-compatible: { role: "tool", tool_call_id, content }
     if (item.role === "tool" && typeof item.content === "string") {
-      if (item.content.length > minChars && !item.content.startsWith(MICROCOMPACT_MARKER)) {
-        item.content = summarizeForMicrocompact(item.content, itemTurn, options.capture);
-        compacted++;
-      }
+      if (whole(item.content)) stale.push({ holder: item, key: "content", turn: itemTurn });
       continue;
     }
 
     // Codex Responses: { type: "function_call_output", call_id, output }
     if (item.type === "function_call_output" && typeof item.output === "string") {
-      if (item.output.length > minChars && !item.output.startsWith(MICROCOMPACT_MARKER)) {
-        item.output = summarizeForMicrocompact(item.output, itemTurn, options.capture);
-        compacted++;
-      }
+      if (whole(item.output)) stale.push({ holder: item, key: "output", turn: itemTurn });
       continue;
     }
 
     // Anthropic: { role: "user", content: [{ type: "tool_result", tool_use_id, content, is_error? }] }
     if (item.role === "user" && Array.isArray(item.content)) {
       for (const block of item.content as Array<Record<string, unknown>>) {
-        if (block && block.type === "tool_result" && typeof block.content === "string") {
-          if (block.content.length > minChars && !block.content.startsWith(MICROCOMPACT_MARKER)) {
-            block.content = summarizeForMicrocompact(block.content, itemTurn, options.capture);
-            compacted++;
-          }
-        }
+        if (block && block.type === "tool_result" && whole(block.content))
+          stale.push({ holder: block, key: "content", turn: itemTurn });
       }
     }
   }
 
-  return compacted;
+  const chars = stale.reduce((sum, entry) => sum + (entry.holder[entry.key] as string).length, 0);
+  if (stale.length === 0 || chars < (options.batchChars ?? 0)) return 0;
+  for (const entry of stale)
+    entry.holder[entry.key] = summarizeForMicrocompact(entry.holder[entry.key] as string, entry.turn, options.capture);
+  return stale.length;
+}
+
+/**
+ * Takes the model's thinking out of the earlier turns of an Anthropic conversation. Current Claude
+ * models bind a thinking block to the conversation that produced it: sent back after an earlier
+ * message was edited, the block is refused. Sending none of them back is accepted, so that is done
+ * whenever old tool results were shortened.
+ */
+export function dropThinkingBlocks(messages: Array<Record<string, unknown>>): void {
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const kept = (message.content as Array<Record<string, unknown>>).filter(
+      (block) => block?.type !== "thinking" && block?.type !== "redacted_thinking",
+    );
+    // A turn that held nothing else must still say something to stay a valid turn.
+    message.content = kept.length > 0 ? kept : [{ type: "text", text: "(no text)" }];
+  }
 }
 
 export function classifyToolResultError(
@@ -1298,7 +1417,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "file_write",
     description:
-      "Propose a reviewed file replacement on the target host using the hash from a prior file_read. Shows a full diff to the user for approval and records the change in the shared team activity log.",
+      "Propose a reviewed file replacement on the target host using the hash from a prior file_read. Shows a full diff to the user for approval and records the change in the shared team activity log. It writes as the account sshs3 logs in with. A file that account may not write (most files under /etc) is edited with sshs3_change and sudo instead (for example `sudo sed -i …` or `sudo tee`), with a check and a rollback. When this tool answers \"permission denied\", do that instead of stopping.",
     parameters: {
       type: "object",
       properties: {
@@ -1755,7 +1874,6 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         contextWindowTokens: { type: "number", description: "AI context window budget in tokens (16000 to 900000)." },
         terminalContextChars: { type: "number", description: "Max characters of terminal scrollback per session included in AI context (1000 to 64000)." },
         maxOutputTokens: { type: "number", description: "Max output tokens per AI model turn (512 to 32768)." },
-        maxToolTurns: { type: "number", description: "Max tool-call loop turns per AI run (1 to 60)." },
         reasoningEffort: { type: "string", enum: ["low", "medium", "high"], description: "AI reasoning effort level." },
         temperature: { type: "number", description: "AI sampling temperature (0.0 to 1.0)." },
         background: { type: "boolean", description: "Keep sshs3 AI Hub running in background tray." },
@@ -1800,7 +1918,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_investigate",
     description:
-      "Hand questions to investigators that only look, in parallel, each a separate model run with a fresh context, and get their reports back together. Use it when answering needs a lot of reading (configuration and logs on several servers, the team's activity, runbooks) that would otherwise fill your own context, or when independent questions can be looked into at the same time. Investigators can read the workspace, the knowledge base and files on the servers, and run commands in a terminal of their own on your target when one can be opened. They are told to only look and are given no change card and no file write; nothing checks what their commands do. Give each one a single precise question and where to look. Not for something you can answer with one or two calls yourself.",
+      "Hand questions to investigators that only look, in parallel, each a separate model run with a fresh context, and get their reports back together. Use it when answering needs a lot of reading (configuration and logs on several servers, the team's activity, runbooks) that would otherwise fill your own context, or when independent questions can be looked into at the same time. Investigators can read the workspace, the knowledge base and files on the servers, and run commands in a terminal of their own on your target when one can be opened. They are told to only look and are given no change card and no file write; nothing checks what their commands do. Give each one a single precise question and where to look. At most four work at the same time: with more questions, the rest wait their turn, and all reports come back together. Not for something you can answer with one or two calls yourself.",
     parameters: {
       type: "object",
       properties: {
@@ -2070,7 +2188,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_agent_and_mcp_manage",
     description:
-      "List, create, update, delete, delegate to, handoff to, or run a parallel Multi-Agent Workforce of specialized AI Mission Agents; install 1-Click Open-Source MCP Marketplace presets; configure and test MCP servers; or manage the Infrastructure Dependency Graph. Also: programs that run as external agents (save_runner with idOrName, name, command, args, cwd; delete_runner; test_runner), what an MCP tool may do unasked (set_mcp_tool_policy), and this app's own MCP server and the keys other agents reach it with (set_local_mcp_server, list_mcp_keys, create_mcp_key, revoke_mcp_key). A new key is shown to the person once on the change's card; you are never given it.",
+      "List, create, update, delete, delegate to, handoff to, or run a parallel Multi-Agent Workforce of specialized AI Mission Agents; install 1-Click Open-Source MCP Marketplace presets; configure and test MCP servers; or manage the Infrastructure Dependency Graph. Also: programs that run as external agents (save_runner with idOrName, name, command, args, cwd, env; delete_runner; test_runner), what an MCP tool may do unasked (set_mcp_tool_policy), and this app's own MCP server and the keys other agents reach it with (set_local_mcp_server, list_mcp_keys, create_mcp_key, revoke_mcp_key). A new key is shown to the person once on the change's card; you are never given it.",
     parameters: {
       type: "object",
       properties: {
@@ -2107,7 +2225,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         },
         presetId: {
           type: "string",
-          description: "MCP Marketplace preset ID when operation is 'install_mcp_preset' (e.g. 'preset-mcp-prometheus', 'preset-mcp-grafana-loki', 'preset-mcp-kubernetes-helm', 'preset-mcp-postgres-tunnel', 'preset-mcp-terraform-ansible', 'preset-mcp-github-gitops').",
+          description: "install_mcp_preset: the id of a preset as the catalog gives it. Operation 'list' returns the catalog (`mcpCatalog`); take the id from there. Outside the demo lab the catalog holds 'preset-mcp-kubernetes' and 'preset-mcp-filesystem'. In the demo lab its ids begin with 'demo-mcp-'.",
         },
         prompt: {
           type: "string",
@@ -2210,11 +2328,17 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           description: "HTTP endpoint URL for http MCP server.",
         },
         cwd: { type: "string", description: "save_runner: the folder the external agent's program works in." },
+        env: {
+          type: "array",
+          items: { type: "string" },
+          description: `save_runner: names of environment variables to pass to the program, for example ["ANTHROPIC_API_KEY"]. ${RUNNER_ENV_NOTE}`,
+        },
         serverIdOrName: { type: "string", description: "set_mcp_tool_policy: the MCP server. create_mcp_key: an SSH server the key is held to, by its whole name, id or host." },
         toolName: { type: "string", description: "set_mcp_tool_policy: the tool on that MCP server." },
         policy: { type: "string", enum: ["allow", "ask", "deny"], description: "set_mcp_tool_policy: allow (runs unasked), ask (a person approves each call) or deny." },
         scopes: { type: "array", items: { type: "string", enum: ["read", "tickets", "run"] }, description: "create_mcp_key: what the key may do." },
-        expiresInDays: { type: "number", description: "create_mcp_key: days until the key stops working." },
+        expiresInDays: { type: "number", description: "create_mcp_key: days until the key stops working, 1 to 3650. Left out, the key works for 30 days." },
+        neverExpires: { type: "boolean", description: "create_mcp_key: true for a key that never stops working. Only when the person asked for exactly that." },
         tools: {
           type: "array",
           items: { type: "string" },
@@ -2592,6 +2716,29 @@ export function messageForModel(m: Pick<AgentMessage, "role" | "text">, capture?
   return capture && plain !== m.text ? capture.project(kept, maskContext(m.text)) : kept;
 }
 
+/** How many of a conversation's latest messages a run is given. */
+export const CONVERSATION_WINDOW = 30;
+
+/**
+ * The part of the conversation a run is given: its latest CONVERSATION_WINDOW messages. When
+ * earlier ones are left out, the model is told so in a line of its own that comes first; it used
+ * to be given the tail as if that were the whole conversation. With `userFirst` (Anthropic, where
+ * a conversation must open with the user) a window that would begin with the assistant's words
+ * gets a line before it too.
+ */
+export function conversationWindow(all: AgentMessage[], userFirst = false): AgentMessage[] {
+  const kept = all.slice(-CONVERSATION_WINDOW);
+  const left = all.length - kept.length;
+  const line = (text: string): AgentMessage => ({ id: "conversation-window", role: "user", text, at: (kept[0]?.at ?? 1) - 1 });
+  if (left > 0)
+    return [
+      line(`[sshs3] This conversation is longer than what you are shown: its first ${left} ${left === 1 ? "message was" : "messages were"} left out. What follows are the latest ${kept.length}. If you need something from the earlier part, say so.`),
+      ...kept,
+    ];
+  if (userFirst && kept[0]?.role === "assistant") return [line("[sshs3] The conversation so far:"), ...kept];
+  return kept;
+}
+
 export function conversationWithToolLog(task: AgentTask, capture?: SourceCapture): AgentMessage[] {
   // Notes for the person are left out; a summary or handoff packet (CONTEXT_NOTE_PREFIX) is context the
   // model must have, and is given as something it was told.
@@ -2944,8 +3091,11 @@ function extractAiRuntimeTuning(
   initialContext?: unknown,
 ): {
   snapshotMaxChars: number;
-  /** Size of the run's transcript, in characters, at which it is compacted. */
+  /** Size of everything a request carries, in characters, at which the run is compacted. */
   compactAtChars: number;
+  /** The context window that is set, in tokens, and what it holds in characters at four to a token. */
+  contextWindowTokens: number;
+  windowChars: number;
   maxOutputTokens: number;
   maxTurns: number;
   reasoningEffort: "low" | "medium" | "high";
@@ -2977,21 +3127,25 @@ function extractAiRuntimeTuning(
       : "medium";
   const temperature =
     typeof cfg.temperature === "number" ? cfg.temperature : 0.2;
-  // Scale snapshot char budget proportionally to contextWindowTokens (16k -> 12k chars, 128k+ -> 36k chars)
+  // The snapshot's share grows with the window: 0.3 characters per token of it, never under 8,000
+  // characters (windows up to about 26k tokens) and never over 64,000 (from about 213k tokens).
   const snapshotMaxChars = Math.max(
     8000,
     Math.min(64_000, Math.round(contextWindowTokens * 0.3)),
   );
   return {
     snapshotMaxChars,
-    // About half the window (4 characters per token is generous for tool
-    // output), less what the instructions and the snapshot take.
+    // A little over half the window at four characters per token, with a margin of the snapshot's
+    // size plus 20,000 characters, and never under 40,000. Everything a request carries is measured
+    // against it: the tool list, the instructions, the snapshot and the conversation (handoverDue).
     compactAtChars: Math.max(
       40_000,
       Math.round(contextWindowTokens * 4 * 0.55) - snapshotMaxChars - 20_000,
     ),
+    contextWindowTokens,
+    windowChars: contextWindowTokens * 4,
     maxOutputTokens,
-    // Thorough mode reads more and verifies each step: it gets twice the turns.
+    // No run has a limit on how many times it goes round, thorough mode or not.
     maxTurns: Number.POSITIVE_INFINITY,
     reasoningEffort,
     temperature,
@@ -3205,6 +3359,16 @@ export class DirectAgentRuntime implements AgentRuntime {
     };
   }
   private steeringQueue: string[] = [];
+  /** Every message the person sent while this run worked, in order: a compaction keeps them as written. */
+  private steered: string[] = [];
+  /** How much of the answer of the turn in progress was shown before the person's last message. */
+  private steerCut = 0;
+  /** The messages that came in since the last turn, taken into the conversation. */
+  private takeSteering(): string[] {
+    const taken = this.steeringQueue.splice(0);
+    this.steered.push(...taken);
+    return taken;
+  }
   /** Names of the tools this run offered the model; anything else is refused. */
   private offered?: Set<string>;
   private onEvent?: (event: RunEvent) => void;
@@ -3533,6 +3697,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   }
 
   private isFallbackEligibleError(error: unknown): boolean {
+    // Another model would be given the same conversation and the same window.
+    if (error instanceof ContextWindowTooSmallError) return false;
     if (error instanceof CircuitOpenError || error instanceof SseIdleTimeoutError) return true;
     if (error instanceof UpstreamHttpError && isCircuitTrippingStatus(error.status)) return true;
     return isTimeoutOrNetworkError(error);
@@ -3549,6 +3715,12 @@ export class DirectAgentRuntime implements AgentRuntime {
   async steer(text: string): Promise<void> {
     if (this.cancelled) throw new Error("Run is not active");
     this.steeringQueue.push(boundedContext(text));
+    // In the conversation the person's message now follows what was shown so far. The answer the
+    // run ends with is what comes after it: what was said before stays where it stands.
+    this.kept = "";
+    this.keptLast = "";
+    this.steerCut += this.shown.length;
+    this.shown = "";
   }
 
   async stop(): Promise<void> {
@@ -3582,6 +3754,18 @@ export class DirectAgentRuntime implements AgentRuntime {
     this.turnUsage = undefined;
     this.compaction = "idle";
     this.lastHandoverChars = 0;
+    this.handoverItems = 0;
+    this.resultsSinceHandover = 0;
+    this.roundsSinceHandover = 0;
+    this.resultsAtLastLook = 0;
+    this.tightHandovers = 0;
+    this.kept = "";
+    this.keptLast = "";
+    this.shown = "";
+    this.steered = [];
+    this.steerCut = 0;
+    this.cutTurns = 0;
+    this.thinkLess = false;
     this.runCalls = [];
     this.discipline = newDiscipline(
       task.todos ? [...task.todos] : [],
@@ -3598,9 +3782,12 @@ export class DirectAgentRuntime implements AgentRuntime {
         try {
           if (activeModel.kind === "openai-codex") {
             const auth = new CodexAuthProvider(this.authBaseDir);
-            const creds = await auth.resolveCredentials(this.fetchImpl ?? globalThis.fetch);
+            const send = this.fetchImpl ?? globalThis.fetch;
+            const creds = await auth.resolveCredentials(send);
             if (creds) {
-              await this.runResponsesLoop(task, activeModel, creds, onEvent, cachedInitialContext);
+              // The sign-in is read when the run starts. One that is refused later is renewed, not fatal.
+              await this.runResponsesLoop(task, activeModel, creds, onEvent, cachedInitialContext, (refused) =>
+                auth.renewAfterRefusal(refused, send));
             } else {
               await this.runWithoutProvider(task, NO_CODEX_SESSION, onEvent);
             }
@@ -3646,6 +3833,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             }
             throw error;
           }
+          this.takeBackShown(onEvent);
           onEvent({
             type: "run.degraded",
             text: `Degraded from ${activeModel.kind}:${activeModel.model} to ${nextModel.kind}:${nextModel.model} (${reason})`,
@@ -3666,9 +3854,15 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
       // A configured provider's own failure (rejected key, network, HTTP status)
       // is the result: the scripted demo copilot never stands in for it.
+      const limited = error instanceof UpstreamHttpError && error.status === 429 ? this.rateLimitStop : undefined;
+      const said = friendlyProviderError(error, activeModel);
       onEvent({
         type: "run.failed",
-        error: this.answerText(friendlyProviderError(error, activeModel)),
+        error: this.answerText(
+          limited
+            ? `The provider's rate limit asks to wait ${plainDuration(limited.askedMs)}${limited.waitedMs ? `, after ${plainDuration(limited.waitedMs)} of waiting already` : ""}. A run waits ${plainDuration(retryPolicy.rateLimitMaxWaitMs)} at most for one answer. Try again later, or choose another model in AI settings. The provider said: ${said}`
+            : said,
+        ),
         usage: this.spentUsage(),
       });
     }
@@ -4103,31 +4297,69 @@ export class DirectAgentRuntime implements AgentRuntime {
   }
 
   /**
-   * Whether to ask for the handover note now: the transcript has outgrown its
-   * budget and no request for one is pending. Called between tool rounds.
+   * Whether to ask for a handover note before this turn. Called before every request.
+   *
+   * Everything a request carries counts toward the limit: the tool list and the instructions
+   * (`fixedChars`), the conversation the run started from, the last handover and what was added
+   * since. A note can only replace what was added since the last one, so a note is asked for only
+   * when that part has grown enough to be worth replacing and holds at least one new tool result.
+   * Measuring the whole run instead asked for note after note once the kept digest alone was over
+   * the threshold, each one a paid request.
+   *
+   * Throws when the window that is set cannot hold the run at all: what no note can shrink leaves
+   * no room to work, or one note after another had to be written after a single round of tool calls.
    */
-  /**
-   * Whether to ask for a handover note before this turn. Everything that is
-   * sent counts toward the limit (the tool definitions too), but a note is
-   * asked for only when the run itself has grown by enough for a note to
-   * replace: when the conversation it started from is already over the
-   * limit, asking again every turn would only loop (a note replaces the run's
-   * own turns, never that starting conversation).
-   */
-  private handoverDue(transcript: unknown[], baseLength: number, fixedChars: number, limit: number): boolean {
+  private handoverDue(
+    transcript: unknown[],
+    baseLength: number,
+    fixedChars: number,
+    tuning: { compactAtChars: number; windowChars: number; contextWindowTokens: number },
+  ): boolean {
     if (this.compaction !== "idle") return false;
-    const grown = JSON.stringify(transcript.slice(baseLength)).length;
-    const total = JSON.stringify(transcript.slice(0, baseLength)).length + grown + fixedChars;
-    if (total <= limit || grown < Math.max(8_000, this.lastHandoverChars * 3)) return false;
+    const kept = baseLength + this.handoverItems;
+    const floor = transcriptChars(transcript.slice(0, kept)) + fixedChars;
+    const added = transcriptChars(transcript.slice(kept));
+    const set = tuning.contextWindowTokens.toLocaleString("en-US");
+    // Only a run with tools goes round and can be compacted. One request without tools is sent as
+    // it is: if it is too long, the provider says so, and nothing was paid for.
+    if (this.offered?.size && floor + MIN_HANDOVER_GROWTH > tuning.windowChars) {
+      const needs = (Math.ceil(floor / 4 / 1000) * 1000).toLocaleString("en-US");
+      throw new ContextWindowTooSmallError(
+        this.handoverItems
+          ? `This run stopped because the context window that is set (${set} tokens) is too small to go on in. The tools, the conversation and the run's own notes take an estimated ${needs} tokens, which leaves no room to work in. Raise the context window in AI settings, choose a model with a larger one, or start a new conversation.`
+          : `This conversation does not fit in the context window that is set (${set} tokens). The tools and the conversation so far take an estimated ${needs} tokens before the agent has done anything, which leaves no room to work in. Raise the context window in AI settings, choose a model with a larger one, or start a new conversation.`,
+      );
+    }
+    // A round: one model turn's tool calls. New results since the last look are one more round.
+    if (this.resultsSinceHandover > this.resultsAtLastLook) this.roundsSinceHandover++;
+    this.resultsAtLastLook = this.resultsSinceHandover;
+    if (floor + added <= tuning.compactAtChars) return false;
+    if (this.resultsSinceHandover === 0 || added < Math.max(MIN_HANDOVER_GROWTH, this.lastHandoverChars * 2)) return false;
+    this.tightHandovers = this.roundsSinceHandover <= 1 ? this.tightHandovers + 1 : 0;
+    if (this.tightHandovers >= MAX_TIGHT_HANDOVERS)
+      throw new ContextWindowTooSmallError(
+        `This run stopped because the context window that is set (${set} tokens) is too small to work in: after every step the agent had to write its notes again. Raise the context window in AI settings, choose a model with a larger one, or start a new conversation with a narrower question.`,
+      );
     this.compaction = "asked";
     return true;
   }
-  /** How long the last note's message was: the next note is asked for only once the run has grown well past it. */
+  /** How long the last handover message was: the next note is asked for only once the run has added well over that. */
   private lastHandoverChars = 0;
+  /** 1 once the run continues from a handover message, which then follows the conversation it started from. */
+  private handoverItems = 0;
+  /** Tool results since the last handover (or the start): a note with nothing new to record is not asked for. */
+  private resultsSinceHandover = 0;
+  /** Rounds of tool calls since the last handover (or the start), and the result count when last looked at. */
+  private roundsSinceHandover = 0;
+  private resultsAtLastLook = 0;
+  /** Handovers in a row that each came after a single round of tool calls. */
+  private tightHandovers = 0;
   /** The endpoint refused `stream_options`: usage is not asked for again in this run. */
   private noStreamUsage = false;
   /** The endpoint refused `reasoning_effort`: omitted for the rest of this run. */
   private noReasoningEffort = false;
+  /** Anthropic: the model or endpoint refused `output_config.effort`: omitted for the rest of this run. */
+  private noAnthropicEffort = false;
   /**
    * The endpoint takes tools only with reasoning switched off, and leaving the setting out is not
    * enough (OpenAI's gpt-6 models on /chat/completions): "none" is sent for the rest of this run.
@@ -4143,16 +4375,86 @@ export class DirectAgentRuntime implements AgentRuntime {
   /** The endpoint takes its own default temperature only: none is sent for the rest of this run. */
   private noTemperature = false;
 
+  /**
+   * What the run has said of its answer in earlier turns, kept for the final answer: the text of
+   * a turn that was cut at the output limit, which the next turn goes on from, and the text of a
+   * turn that ended without a tool call and was sent back to work. That turn was the model's
+   * answer as far as it knew: a report followed by "All items are complete." is the report.
+   */
+  private kept = "";
+  /** Turns in a row that ended at the output limit. */
+  private cutTurns = 0;
+  /** The last turn used up its output before any text: the next one is asked with the lowest reasoning effort. */
+  private thinkLess = false;
+
+  /** The run's answer: what was kept of earlier turns, then the text it ended on. */
+  private finalAnswer(turnText: string, fallback: string): string {
+    const lastText = this.afterSteer(turnText);
+    if (!this.kept) return lastText || (this.steerCut ? "" : fallback);
+    // Sent back to work, the model sometimes says the same thing again: once is enough.
+    return lastText.trim() && lastText.trim() !== this.keptLast ? this.kept + lastText : this.kept.trimEnd();
+  }
+  /** The last whole turn that was kept, trimmed: the same text again is not kept twice. */
+  private keptLast = "";
+  /** A turn without a tool call is sent back to work: its text stays part of the answer. */
+  private keepAnswered(turnText: string, onEvent: (event: RunEvent) => void): void {
+    if (!turnText) return;
+    const part = this.afterSteer(turnText);
+    if (part.trim() !== this.keptLast) this.kept += `${part}\n\n`;
+    this.keptLast = part.trim();
+    onEvent({ type: "message.delta", delta: "\n\n" });
+  }
+  /**
+   * The part of a turn's text that belongs to the answer. When the person wrote in the middle of
+   * the turn, what was shown before their message stands before it in the conversation: only the
+   * rest comes after it.
+   */
+  private afterSteer(turnText: string): string {
+    return this.steerCut ? this.answerText(turnText).slice(this.steerCut) : turnText;
+  }
+
+  /**
+   * A turn ended at the output limit. Returns what the model is told so that it goes on, and
+   * keeps the turn's text for the answer. Throws when going on would not help: the limit was
+   * reached again and again, or twice running before any text was written.
+   */
+  private afterCut(turnText: string, inToolCall: boolean, maxOutputTokens: number): string {
+    this.cutTurns++;
+    const limit = maxOutputTokens.toLocaleString("en-US");
+    if (!turnText && !inToolCall && this.cutTurns > 1)
+      throw new Error(
+        `The model reached its output limit (${limit} tokens) twice before it wrote anything. Raise "Longest answer" in AI settings, or lower the reasoning effort there.`,
+      );
+    if (this.cutTurns > MAX_CUT_TURNS)
+      throw new Error(
+        `The model reached its output limit (${limit} tokens) ${this.cutTurns} times in a row, so the run was stopped. What it wrote is in the conversation. Raise "Longest answer" in AI settings.`,
+      );
+    this.kept += this.afterSteer(turnText);
+    this.thinkLess = !turnText && !inToolCall;
+    return inToolCall ? CUT_IN_CALL : turnText ? CUT_GO_ON : CUT_BEFORE_TEXT;
+  }
+  /** A turn ended by itself: the count of cut turns starts over. */
+  private turnEndedWhole(): void {
+    this.cutTurns = 0;
+    this.thinkLess = false;
+  }
+
   /** Ends a compaction: what the run continues from, built from the note the model just wrote. */
   private finishCompaction(note: string): string {
     this.compaction = "idle";
-    this.lastHandoverChars = note.length;
-    return handoverMessage(
+    const message = handoverMessage(
       note,
       this.discipline.todos,
       this.runCalls.slice(-DIGEST_CALLS),
       c => this.capture.project(boundedContext(c.output, 500), this.capture.historical(c)),
+      this.steered.slice(-KEPT_STEERING_MESSAGES),
     );
+    this.lastHandoverChars = message.length;
+    this.handoverItems = 1;
+    this.resultsSinceHandover = 0;
+    this.roundsSinceHandover = 0;
+    this.resultsAtLastLook = 0;
+    return message;
   }
 
   /** The message that sends the run back to work when it wants to stop too early, if any. */
@@ -4180,6 +4482,9 @@ export class DirectAgentRuntime implements AgentRuntime {
     const breaker = breakers.get(url);
     const wire = typeof init.body === "string" ? this.capture.wire(init.body, this.nowMs()) : undefined;
     const requestInit: RequestInit = { ...init, ...(wire && { body: wire.body }), redirect: "manual" };
+    this.rateLimitStop = undefined;
+    /** What this request has waited for the provider's rate limit so far. */
+    let rateLimitWaited = 0;
 
     for (let attempt = 0; ; attempt++) {
       if (!breaker.canRequest(this.nowMs())) {
@@ -4228,6 +4533,30 @@ export class DirectAgentRuntime implements AgentRuntime {
         breaker.releaseProbe();
       }
 
+      // A rate limit that says when to ask again is waited out, as long as the provider asks, up
+      // to a total for the turn. These waits are not among the few tries a passing failure gets.
+      const asked = response?.status === 429 ? askedRetryDelayMs(response.headers, this.nowMs()) : undefined;
+      if (response && asked !== undefined) {
+        const counted = Math.max(asked, 1_000);
+        if (rateLimitWaited + counted > retryPolicy.rateLimitMaxWaitMs) {
+          this.rateLimitStop = { askedMs: asked, waitedMs: rateLimitWaited };
+          return response;
+        }
+        rateLimitWaited += counted;
+        this.onEvent?.({
+          type: "run.retrying",
+          text: `Waiting for the provider's rate limit. Asking again in ${plainDuration(asked)}.`,
+          delayMs: asked,
+          endpoint: endpointKey,
+          status: 429,
+        } as RunEvent);
+        await response.body?.cancel().catch(() => {});
+        await this.pause(asked);
+        if (this.cancelled) throw new Error("Run cancelled");
+        attempt--;
+        continue;
+      }
+
       if (!retryable || attempt >= retryPolicy.attempts || circuitOpened) {
         if (response) {
           if (response.ok && wire) {
@@ -4254,20 +4583,27 @@ export class DirectAgentRuntime implements AgentRuntime {
       } as RunEvent);
 
       await response?.body?.cancel().catch(() => {});
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, delay);
-        this.abort.signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true },
-        );
-      });
+      await this.pause(delay);
       if (this.cancelled) throw new Error("Run cancelled");
     }
   }
+
+  /** Waits, and stops waiting at once when the run is stopped. */
+  private pause(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.abort.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      this.abort.signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+  /** The last request gave up on a rate limit: what the provider asked for, and what had been waited. */
+  private rateLimitStop?: { askedMs: number; waitedMs: number };
 
   private async streamSseWithBreaker(
     endpoint: string,
@@ -4301,6 +4637,46 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
       throw error;
     }
+  }
+
+  /** What the person was shown of the answer of the turn in progress. */
+  private shown = "";
+  /**
+   * The turn in progress is asked again (the same model once more, or another one): what the
+   * person was shown of its answer is taken back first. The hub removes it from the conversation,
+   * so nothing stands there twice when it is written again.
+   */
+  private takeBackShown(onEvent: (event: RunEvent) => void): void {
+    if (this.shown) onEvent({ type: "message.retract", text: this.shown });
+    this.shown = "";
+  }
+
+  /**
+   * The answer of a turn broke off in the middle of its stream. Returns true when the turn is to
+   * be asked again, after what was shown of the broken answer was taken back.
+   */
+  private async retryBrokenStream(
+    error: unknown,
+    breaks: number,
+    endpoint: string,
+    onEvent: (event: RunEvent) => void,
+  ): Promise<boolean> {
+    if (this.cancelled || this.abort.signal.aborted || !isStreamBreak(error) || breaks >= retryPolicy.streamRetries) return false;
+    this.takeBackShown(onEvent);
+    const delay = computeRetryDelayMs(breaks);
+    onEvent({
+      type: "run.retrying",
+      text: `The connection to the model broke in the middle of its answer. Asking again (attempt ${breaks + 1} of ${retryPolicy.streamRetries}).`,
+      attempt: breaks + 1,
+      maxAttempts: retryPolicy.streamRetries,
+      delayMs: delay,
+      endpoint: this.circuitBreakers().normalizeKey(endpoint),
+    } as RunEvent);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      this.abort.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+    return !this.cancelled;
   }
 
   private async tryDegradeSameKind<T extends HermesModelConfig>(
@@ -4423,6 +4799,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             output = JSON.stringify({
               ok: true,
               observations: parsed.hypotheses.map(h => ({ hypothesis: h.id, evidence: h.evidence.map(e => e.id) })),
+              ...(parsed.withdrawn ? { withdrawn: parsed.withdrawn } : {}),
               open: parsed.hypotheses.filter((h) => h.status === "open").length,
               confirmed: parsed.hypotheses.filter((h) => h.status === "confirmed").length,
               ruledOut: parsed.hypotheses.filter((h) => h.status === "ruled-out").length,
@@ -4522,6 +4899,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       ...(sourceSpans && { sourceSpans }),
     };
     this.runCalls.push(record);
+    this.resultsSinceHandover++;
     // A tool call instead of the note: the note is asked for again after this round.
     if (this.compaction === "asked") this.compaction = "idle";
     this.onEvent?.({ type: "tool.result", tool: record });
@@ -4534,9 +4912,16 @@ export class DirectAgentRuntime implements AgentRuntime {
     creds: CodexCredentials | undefined,
     onEvent: (event: RunEvent) => void,
     initialContextCache?: { loaded: boolean; value: unknown },
+    /** For a ChatGPT sign-in: gives a sign-in to go on with after the one in use was refused, or null. */
+    renewSignIn?: (refusedAccessToken: string) => Promise<CodexCredentials | null>,
   ): Promise<void> {
     let activeModel = model;
     let supportsEffort = true;
+    // The sign-in was renewed for the turn in progress: a second refusal of that turn is final.
+    let signInRenewed = false;
+    // Nothing is stored at the provider (`store: false`), so the model's reasoning can only be sent
+    // back in its encrypted form, and that form is only returned when it is asked for.
+    let supportsInclude = true;
     const resolveTarget = (m: typeof model) => {
       if (m.kind === "custom") {
         const baseUrl = m.baseUrl.replace(/\/$/, "");
@@ -4579,7 +4964,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     const instructions = buildSystemInstructions(task, initialContext, rules);
 
     const inputItems: Array<Record<string, unknown>> = [];
-    for (const msg of conversationWithToolLog(task, this.capture).slice(-30)) {
+    for (const msg of conversationWindow(conversationWithToolLog(task, this.capture))) {
       if (msg.role === "system") continue;
       const role = msg.role === "assistant" ? "assistant" : "user";
       const contentParts: Array<Record<string, unknown>> = [
@@ -4634,14 +5019,14 @@ export class DirectAgentRuntime implements AgentRuntime {
     let lastTurnToolNames: string[] = [];
     const triedKeys = new Set<string>([this.modelKey(activeModel)]);
     let degradeCount = 0;
+    let streamBreaks = 0;
 
     // What a compaction keeps: the conversation as it stood when the run began.
     const baseLength = inputItems.length;
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       turnsUsed = turn + 1;
-      microcompactToolResults(inputItems, turn, turnByItem, { capture: this.capture });
-      while (this.steeringQueue.length > 0) {
-        const steered = this.steeringQueue.shift()!;
+      microcompactToolResults(inputItems, turn, turnByItem, { capture: this.capture, batchChars: microcompactBatchChars(tuning.compactAtChars) });
+      for (const steered of this.takeSteering()) {
         inputItems.push({
           type: "message",
           role: "user",
@@ -4649,14 +5034,15 @@ export class DirectAgentRuntime implements AgentRuntime {
         });
       }
 
-      if (this.handoverDue(inputItems, baseLength, JSON.stringify(wireTools).length, tuning.compactAtChars))
+      // The instructions travel beside the conversation here, so they are counted with the tool list.
+      if (this.handoverDue(inputItems, baseLength, JSON.stringify(wireTools).length + instructions.length, tuning))
         inputItems.push({
           type: "message",
           role: "user",
           content: [{ type: "input_text", text: HANDOVER_REQUEST }],
         });
 
-      const turnEffort = resolveTurnReasoningEffort({
+      const turnEffort = this.thinkLess ? "low" : resolveTurnReasoningEffort({
         configuredEffort: tuning.reasoningEffort,
         turn,
         task,
@@ -4669,6 +5055,11 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       const toolCalls: ParsedToolCall[] = [];
       let turnText = "";
+      let cutInCall = false;
+      // Whether this turn's answer had begun to arrive.
+      this.shown = "";
+      this.steerCut = 0;
+      let streaming = false;
       this.commitTurn();
       let usage: Record<string, number> | undefined;
       const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
@@ -4676,7 +5067,10 @@ export class DirectAgentRuntime implements AgentRuntime {
         (text) => {
           if (this.compaction === "asked" || !text) return;
           const safe = deltaMasker.push(text);
-          if (safe) onEvent({ type: "message.delta", delta: safe });
+          if (safe) {
+            this.shown += safe;
+            onEvent({ type: "message.delta", delta: safe });
+          }
         },
         (raw) => {
           usage = { ...normalizeProviderUsage(egressOpts.provider, raw, resolvedModel) };
@@ -4697,6 +5091,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               ...(wireTools.length > 0 ? { tools: wireTools } : {}),
               max_output_tokens: tuning.maxOutputTokens,
               ...(supportsEffort ? { reasoning: { effort: turnEffort } } : {}),
+              ...(supportsInclude ? { include: ["reasoning.encrypted_content"] } : {}),
               // No `temperature`: the ChatGPT Codex backend answers 400 "Unsupported parameter: temperature".
               store: false,
               stream: true,
@@ -4708,6 +5103,24 @@ export class DirectAgentRuntime implements AgentRuntime {
 
         if (!response.ok) {
           const errText = boundedContext(await response.text().catch(() => ""), 1500);
+          // A ChatGPT sign-in lasts about an hour and a run can last longer: refused in the middle
+          // of the run, it is renewed once and the turn is asked again.
+          if (response.status === 401 && creds && renewSignIn && !signInRenewed) {
+            const renewed = await renewSignIn(creds.accessToken).catch(() => null);
+            if (renewed) {
+              creds = renewed;
+              signInRenewed = true;
+              turn--;
+              continue;
+            }
+          }
+          // An endpoint that does not know `include`: asked again without it. Its reasoning items then
+          // come without their encrypted content and are not sent back (see below).
+          if (model.kind === "custom" && supportsInclude && response.status === 400 && /\binclude\b|encrypted_content/i.test(errText) && /unsupported|not supported|unrecognized|unknown|invalid/i.test(errText)) {
+            supportsInclude = false;
+            turn--;
+            continue;
+          }
           if (model.kind === "custom" && supportsEffort && response.status === 400 && /reasoning/i.test(errText) && /unsupported|not supported|unrecognized/i.test(errText)) {
             supportsEffort = false;
             turn--;
@@ -4721,6 +5134,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         if (!response.body) throw new Error("The model response stream is missing.");
 
+        streaming = true;
         await this.streamSseWithBreaker(
           endpoint,
           response.body,
@@ -4728,13 +5142,22 @@ export class DirectAgentRuntime implements AgentRuntime {
           (data) => responseTurn.accept(data),
           onEvent,
           () => {
-            const { items, calls } = responseTurn.finish();
-            inputItems.push(...items);
+            const { items, calls, cutInCall: inCall } = responseTurn.finish();
+            // A reasoning item without its encrypted content cannot be sent back when nothing is stored.
+            inputItems.push(...items.filter((item) => item.type !== "reasoning" || typeof item.encrypted_content === "string"));
             toolCalls.push(...calls);
             turnText = responseTurn.text;
+            cutInCall = Boolean(inCall);
           },
         );
+        streamBreaks = 0;
+        signInRenewed = false;
       } catch (error) {
+        if (streaming && await this.retryBrokenStream(error, streamBreaks, endpoint, onEvent)) {
+          streamBreaks++;
+          turn--;
+          continue;
+        }
         const degraded = await this.tryDegradeSameKind(
           error,
           activeModel,
@@ -4745,6 +5168,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           onEvent,
         );
         if (degraded) {
+          this.takeBackShown(onEvent);
           activeModel = degraded.model;
           tuning = extractAiRuntimeTuning(activeModel, initialContext);
           degradeCount++;
@@ -4757,6 +5181,20 @@ export class DirectAgentRuntime implements AgentRuntime {
       this.commitTurn();
 
       if (turnText && this.compaction !== "asked") finalOutput = turnText;
+
+      // Cut at the output limit: what came is kept and the model is asked to go on. A note that was
+      // cut is used as far as it got.
+      if (responseTurn.cut && this.compaction !== "asked") {
+        inputItems.push({
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: this.afterCut(turnText, cutInCall, tuning.maxOutputTokens) }],
+        });
+        lastTurnHadError = false;
+        lastTurnToolNames = [];
+        continue;
+      }
+      if (!responseTurn.cut) this.turnEndedWhole();
 
       if (toolCalls.length === 0) {
         if (this.compaction === "asked") {
@@ -4777,14 +5215,21 @@ export class DirectAgentRuntime implements AgentRuntime {
             role: "user",
             content: [{ type: "input_text", text: nudge }],
           });
-          if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
+          this.keepAnswered(turnText, onEvent);
+          lastTurnHadError = false;
+          lastTurnToolNames = [];
+          continue;
+        }
+        // The person wrote while this turn was being written: that is answered before the run ends.
+        if (this.steeringQueue.length > 0) {
+          this.keepAnswered(turnText, onEvent);
           lastTurnHadError = false;
           lastTurnToolNames = [];
           continue;
         }
         onEvent({
           type: "run.completed",
-          output: this.answerText(finalOutput),
+          output: this.answerText(this.finalAnswer(turnText, finalOutput)),
           usage: this.spentUsage(usage?.context_tokens),
         });
         return;
@@ -4855,7 +5300,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    for (const msg of conversationWithToolLog(task, this.capture).slice(-30)) {
+    for (const msg of conversationWindow(conversationWithToolLog(task, this.capture))) {
       if (msg.role === "system") continue;
       if (msg.role === "user" && msg.images?.length) {
         messages.push({
@@ -4892,20 +5337,19 @@ export class DirectAgentRuntime implements AgentRuntime {
     let lastTurnToolNames: string[] = [];
     const triedKeys = new Set<string>([this.modelKey(activeModel)]);
     let degradeCount = 0;
+    let streamBreaks = 0;
 
     // What a compaction keeps: the conversation as it stood when the run began.
     const baseLength = messages.length;
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       turnsUsed = turn + 1;
-      microcompactToolResults(messages, turn, turnByItem, { capture: this.capture });
-      while (this.steeringQueue.length > 0) {
-        messages.push({ role: "user", content: this.steeringQueue.shift()! });
-      }
+      microcompactToolResults(messages, turn, turnByItem, { capture: this.capture, batchChars: microcompactBatchChars(tuning.compactAtChars) });
+      for (const steered of this.takeSteering()) messages.push({ role: "user", content: steered });
 
-      if (this.handoverDue(messages, baseLength, JSON.stringify(tools).length, tuning.compactAtChars))
+      if (this.handoverDue(messages, baseLength, JSON.stringify(tools).length, tuning))
         messages.push({ role: "user", content: HANDOVER_REQUEST });
 
-      const turnEffort = resolveTurnReasoningEffort({
+      const turnEffort = this.thinkLess ? "low" : resolveTurnReasoningEffort({
         configuredEffort: tuning.reasoningEffort,
         turn,
         task,
@@ -4924,6 +5368,11 @@ export class DirectAgentRuntime implements AgentRuntime {
       let turnText = "";
       const toolCallsByIndex = new Map<number, ParsedToolCall>();
       let finished = false;
+      let cut = false;
+      // Whether this turn's answer had begun to arrive.
+      this.shown = "";
+      this.steerCut = 0;
+      let streaming = false;
       this.commitTurn();
       let usage: Record<string, number> | undefined;
       const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
@@ -4988,6 +5437,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         if (!response.body) throw new Error("Model response stream missing");
 
+        streaming = true;
         await this.streamSseWithBreaker(
           endpoint,
           response.body,
@@ -5014,7 +5464,8 @@ export class DirectAgentRuntime implements AgentRuntime {
             }
             const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
             const reason = choices?.[0]?.finish_reason;
-            if (reason === "length" || reason === "content_filter") throw new Error("The model stopped before its response was complete.");
+            if (reason === "content_filter") throw new Error("The model stopped before its response was complete.");
+            if (reason === "length") cut = true;
             if (typeof reason === "string" && reason) finished = true;
             const delta = choices?.[0]?.delta as Record<string, unknown> | undefined;
             if (!delta) return;
@@ -5023,7 +5474,10 @@ export class DirectAgentRuntime implements AgentRuntime {
               turnText += delta.content;
               if (this.compaction !== "asked") {
                 const safe = deltaMasker.push(delta.content);
-                if (safe) onEvent({ type: "message.delta", delta: safe });
+                if (safe) {
+                  this.shown += safe;
+                  onEvent({ type: "message.delta", delta: safe });
+                }
               }
             }
             if (Array.isArray(delta.tool_calls)) {
@@ -5044,10 +5498,16 @@ export class DirectAgentRuntime implements AgentRuntime {
           },
           onEvent,
           () => {
-            if (!finished) throw new Error("The model connection ended before the response finished.");
+            if (!finished) throw new StreamEndedEarlyError();
           },
         );
+        streamBreaks = 0;
       } catch (error) {
+        if (streaming && await this.retryBrokenStream(error, streamBreaks, endpoint, onEvent)) {
+          streamBreaks++;
+          turn--;
+          continue;
+        }
         const degraded = await this.tryDegradeSameKind(
           error,
           activeModel,
@@ -5058,6 +5518,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           onEvent,
         );
         if (degraded) {
+          this.takeBackShown(onEvent);
           activeModel = degraded.model;
           tuning = extractAiRuntimeTuning(activeModel, initialContext);
           degradeCount++;
@@ -5069,8 +5530,22 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       this.commitTurn();
 
-      const toolCalls = [...toolCallsByIndex.values()].filter((c) => c.name);
+      const started = [...toolCallsByIndex.values()].filter((c) => c.name);
+      // A call that was being written when the output limit was reached is incomplete: it is not made.
+      const toolCalls = cut ? [] : started;
       if (turnText && this.compaction !== "asked") finalOutput = turnText;
+
+      // Cut at the output limit: what came is kept and the model is asked to go on. A note that was
+      // cut is used as far as it got.
+      if (cut && this.compaction !== "asked") {
+        const goOn = this.afterCut(turnText, started.length > 0, tuning.maxOutputTokens);
+        if (turnText) messages.push({ role: "assistant", content: turnText });
+        messages.push({ role: "user", content: goOn });
+        lastTurnHadError = false;
+        lastTurnToolNames = [];
+        continue;
+      }
+      if (!cut) this.turnEndedWhole();
 
       if (toolCalls.length === 0) {
         if (this.compaction === "asked") {
@@ -5084,14 +5559,22 @@ export class DirectAgentRuntime implements AgentRuntime {
         if (nudge) {
           messages.push({ role: "assistant", content: turnText || "(no text)" });
           messages.push({ role: "user", content: nudge });
-          if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
+          this.keepAnswered(turnText, onEvent);
+          lastTurnHadError = false;
+          lastTurnToolNames = [];
+          continue;
+        }
+        // The person wrote while this turn was being written: that is answered before the run ends.
+        if (this.steeringQueue.length > 0) {
+          messages.push({ role: "assistant", content: turnText || "(no text)" });
+          this.keepAnswered(turnText, onEvent);
           lastTurnHadError = false;
           lastTurnToolNames = [];
           continue;
         }
         onEvent({
           type: "run.completed",
-          output: this.answerText(finalOutput),
+          output: this.answerText(this.finalAnswer(turnText, finalOutput)),
           usage: this.spentUsage(usage?.context_tokens),
         });
         return;
@@ -5141,6 +5624,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     initialContextCache?: { loaded: boolean; value: unknown },
   ): Promise<void> {
     let activeModel = model;
+    this.noAnthropicEffort = false;
     const resolveAnthropicEndpoint = (m: Extract<HermesModelConfig, { kind: "anthropic" }>) => {
       const base = (m.baseUrl || "https://api.anthropic.com").replace(/\/$/, "");
       return base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
@@ -5176,8 +5660,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    const messages: Array<Record<string, unknown>> = conversationWithToolLog(task, this.capture)
-      .slice(-30)
+    const messages: Array<Record<string, unknown>> = conversationWindow(conversationWithToolLog(task, this.capture), true)
       .map((m) => {
         const role = m.role === "assistant" ? "assistant" : "user";
         if (role === "user" && m.images?.length) {
@@ -5217,38 +5700,35 @@ export class DirectAgentRuntime implements AgentRuntime {
     let turnsUsed = 0;
     let finalOutput = "";
     const turnByItem = new WeakMap<object, number>();
-    let lastTurnHadError = false;
-    let lastTurnToolNames: string[] = [];
     const triedKeys = new Set<string>([this.modelKey(activeModel)]);
     let degradeCount = 0;
+    let streamBreaks = 0;
 
     // What a compaction keeps: the conversation as it stood when the run began.
     const baseLength = messages.length;
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       turnsUsed = turn + 1;
-      microcompactToolResults(messages, turn, turnByItem, { capture: this.capture });
-      while (this.steeringQueue.length > 0) {
-        messages.push({ role: "user", content: this.steeringQueue.shift()! });
-      }
+      if (microcompactToolResults(messages, turn, turnByItem, { capture: this.capture, batchChars: microcompactBatchChars(tuning.compactAtChars) }) > 0)
+        dropThinkingBlocks(messages);
+      for (const steered of this.takeSteering()) messages.push({ role: "user", content: steered });
 
       if (
         this.handoverDue(
           messages,
           baseLength,
           JSON.stringify(tools).length + JSON.stringify(system).length,
-          tuning.compactAtChars,
+          tuning,
         )
       ) {
         messages.push({ role: "user", content: HANDOVER_REQUEST });
       }
 
-      resolveTurnReasoningEffort({
-        configuredEffort: tuning.reasoningEffort,
-        turn,
-        task,
-        lastTurnHadError,
-        lastTurnToolNames,
-      });
+      // The reasoning effort that is set, sent as `output_config.effort`. The same for the whole run
+      // (high when a plan was asked for): changing it between turns would make the provider read the
+      // conversation anew each time, which its prompt cache otherwise saves.
+      const effort = this.thinkLess
+        ? "low"
+        : resolveTurnReasoningEffort({ configuredEffort: tuning.reasoningEffort, turn: 0, task, lastTurnHadError: false, lastTurnToolNames: [] });
 
       const endpoint = resolveAnthropicEndpoint(activeModel);
       const egressOpts = this.extractEgressContext(activeModel, endpoint, initialContext);
@@ -5262,6 +5742,10 @@ export class DirectAgentRuntime implements AgentRuntime {
       let anthropicDeltaUsage: Record<string, unknown> = {};
       let sawMessageStart = false;
       let finished = false;
+      // Whether this turn's answer had begun to arrive.
+      this.shown = "";
+      this.steerCut = 0;
+      let streaming = false;
       const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
       this.commitTurn();
 
@@ -5280,6 +5764,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               max_tokens: tuning.maxOutputTokens,
               // No `temperature`: current Claude models reject sampling parameters.
               cache_control: { type: "ephemeral" },
+              ...(this.noAnthropicEffort ? {} : { output_config: { effort } }),
               system,
               messages,
               ...(tools.length > 0 ? { tools } : {}),
@@ -5292,6 +5777,13 @@ export class DirectAgentRuntime implements AgentRuntime {
 
         if (!response.ok) {
           const errText = boundedContext(await response.text().catch(() => ""), 1500);
+          // A model or an endpoint that does not take the effort setting (older Claude models, some
+          // compatible servers): asked again without it, for the rest of the run.
+          if (response.status === 400 && !this.noAnthropicEffort && /output_config|effort/i.test(errText)) {
+            this.noAnthropicEffort = true;
+            turn--;
+            continue;
+          }
           throw new UpstreamHttpError(
             response.status,
             this.circuitBreakers().normalizeKey(endpoint),
@@ -5300,6 +5792,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         if (!response.body) throw new Error("Anthropic response stream missing");
 
+        streaming = true;
         await this.streamSseWithBreaker(
           endpoint,
           response.body,
@@ -5342,7 +5835,10 @@ export class DirectAgentRuntime implements AgentRuntime {
                 blocks.set(idx, block);
                 if (this.compaction !== "asked") {
                   const safe = deltaMasker.push(delta.text);
-                  if (safe) onEvent({ type: "message.delta", delta: safe });
+                  if (safe) {
+                    this.shown += safe;
+                    onEvent({ type: "message.delta", delta: safe });
+                  }
                 }
               } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
                 const call = toolCalls.get(idx);
@@ -5367,10 +5863,16 @@ export class DirectAgentRuntime implements AgentRuntime {
           },
           onEvent,
           () => {
-            if (!stopReason && !finished) throw new Error("The model connection ended before the response finished.");
+            if (!stopReason && !finished) throw new StreamEndedEarlyError();
           },
         );
+        streamBreaks = 0;
       } catch (error) {
+        if (streaming && await this.retryBrokenStream(error, streamBreaks, endpoint, onEvent)) {
+          streamBreaks++;
+          turn--;
+          continue;
+        }
         const degraded = await this.tryDegradeSameKind(
           error,
           activeModel,
@@ -5381,6 +5883,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           onEvent,
         );
         if (degraded) {
+          this.takeBackShown(onEvent);
           activeModel = degraded.model;
           tuning = extractAiRuntimeTuning(activeModel, initialContext);
           degradeCount++;
@@ -5409,24 +5912,37 @@ export class DirectAgentRuntime implements AgentRuntime {
       this.turnUsage = normalized as unknown as Record<string, number>;
       this.commitTurn();
 
-      const calls = [...toolCalls.values()].filter((c) => c.name);
+      const started = [...toolCalls.values()].filter((c) => c.name);
+      const cut = stopReason === "max_tokens";
+      // A tool call cut off at the output limit has incomplete arguments: it is not made.
+      const calls = cut ? [] : started;
       if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       // A declined request is a result of its own, not an empty answer.
       if (stopReason === "refusal")
         throw new Error("The model declined this request (stop reason: refusal).");
-      // A tool call cut off at the output limit has incomplete arguments.
-      if (stopReason === "max_tokens" && !calls.length) throw new Error("The model reached its output limit before it finished.");
-      if (stopReason === "max_tokens" && calls.length > 0)
-        throw new Error(
-          "The model reached its output limit in the middle of a tool call; raise the max output tokens setting.",
-        );
+
+      // Cut at the output limit: what came is kept and the model is asked to go on. A note that was
+      // cut is used as far as it got.
+      if (cut && this.compaction !== "asked") {
+        const goOn = this.afterCut(turnText, started.length > 0, tuning.maxOutputTokens);
+        // The turn as far as it is whole: its text, and thinking that was finished (it carries its signature).
+        const whole = [...blocks.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, block]) => block)
+          .filter((block) =>
+            block.type === "text" ? Boolean(block.text)
+              : block.type === "thinking" ? typeof block.signature === "string" && block.signature !== ""
+                : block.type === "redacted_thinking");
+        if (whole.some((block) => block.type === "text")) messages.push({ role: "assistant", content: whole });
+        messages.push({ role: "user", content: goOn });
+        continue;
+      }
+      if (!cut) this.turnEndedWhole();
 
       if (calls.length === 0 && this.compaction === "asked") {
         messages.length = baseLength;
         messages.push({ role: "user", content: this.finishCompaction(turnText) });
-        lastTurnHadError = false;
-        lastTurnToolNames = [];
         continue;
       }
       if (calls.length === 0) {
@@ -5439,14 +5955,18 @@ export class DirectAgentRuntime implements AgentRuntime {
         if (nudge) {
           messages.push({ role: "assistant", content: said });
           messages.push({ role: "user", content: nudge });
-          if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
-          lastTurnHadError = false;
-          lastTurnToolNames = [];
+          this.keepAnswered(turnText, onEvent);
+          continue;
+        }
+        // The person wrote while this turn was being written: that is answered before the run ends.
+        if (this.steeringQueue.length > 0) {
+          if (said.length > 0) messages.push({ role: "assistant", content: said });
+          this.keepAnswered(turnText, onEvent);
           continue;
         }
         onEvent({
           type: "run.completed",
-          output: this.answerText(finalOutput),
+          output: this.answerText(this.finalAnswer(turnText, finalOutput)),
           usage: this.spentUsage(normalized.context_tokens),
         });
         return;
@@ -5478,11 +5998,9 @@ export class DirectAgentRuntime implements AgentRuntime {
       if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
 
       const toolResults: Array<Record<string, unknown>> = [];
-      let turnHadError = false;
       for (const c of calls) {
         if (this.cancelled) break;
         const { output, isError } = await this.executeToolCallDetailed(c);
-        if (isError) turnHadError = true;
         const formattedOutput = await this.formatToolOutput(task, c.name, c.id, output, initialContext);
         toolResults.push({
           type: "tool_result",
@@ -5494,8 +6012,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       const toolMsg = { role: "user", content: toolResults };
       turnByItem.set(toolMsg, turn);
       messages.push(toolMsg);
-      lastTurnHadError = turnHadError;
-      lastTurnToolNames = calls.map((c) => c.name);
     }
 
     onEvent({
