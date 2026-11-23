@@ -343,11 +343,11 @@ export function AuditLogView({
             tone: "",
           };
 
-  // A green "verified" over nothing reads as proof. The demo lab writes no
-  // audit entries at all, and an empty log has nothing to verify.
+  // A green "verified" over nothing reads as proof, and an empty log has nothing to verify. The demo lab's
+  // log stays empty until an agent's run does something: the notice says so, and says what is not recorded.
   const demo = hub.demoMode === true;
   const emptyLog = verification?.ok === true && verification.entries === 0;
-  // A demo log can still hold a few setting changes; then the real verdict is shown with a note.
+  // A demo log that holds what an agent's run did gets the real verdict, with a note.
   const demoEmpty = demo && (!verification || emptyLog);
   const neutral = demoEmpty || emptyLog;
   const noEntries = entries.length === 0;
@@ -386,7 +386,8 @@ export function AuditLogView({
           {demoEmpty ? (
             <span data-testid="audit-demo-notice">
               Demo lab: audit entries are recorded locally inside the isolated demo workspace and are never sent outside.
-              Run a command or start an incident to see hash-chained entries here.
+              The log is empty until an agent runs a command or makes a change. A command you type in a terminal, a
+              scripted walkthrough, starting an incident and a change of the safety rules are not recorded here.
             </span>
           ) : emptyLog ? (
             <span data-testid="audit-empty-notice">

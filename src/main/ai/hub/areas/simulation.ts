@@ -5,9 +5,9 @@ import { savePageByPerson } from "../KbCompile";
 import { ensureBaseFleet } from "../../../sim/baseFleet";
 import { SCENARIOS, scenarioById, startScenario, stopScenario } from "../../../sim/lab";
 import { runLines, scoreScenario, type SimScenario } from "../../../sim/Scenario";
-import { simWorld, type SimWorld } from "../../../sim/SimWorld";
+import type { SimWorld } from "../../../sim/SimWorld";
 import { parseAlerts } from "../AlertIntake";
-import { upsertDemoServer, deleteDemoServer, appendDemoActivity, deleteDemoActivityByPrefix, getDemoActivityLog, getDemoMemories, getDemoSchedules, isDemoMode, saveDemoWorkforceRun } from "../demoWorkspace";
+import { upsertDemoServer, deleteDemoServer, appendDemoActivity, deleteDemoActivityByPrefix, getDemoActivityLog, getDemoMemories, getDemoSchedules, isDemoMode, mcpCatalog, saveDemoWorkforceRun } from "../demoWorkspace";
 import { boundedContext, clip } from "../privacy";
 import { requiredText } from "../hubHelpers";
 import { active } from "../hubShared";
@@ -22,6 +22,8 @@ interface HubSimulation {
   ticketId?: string;
   pageId?: string;
   lastReplay?: { mode: "careful" | "careless"; ran: number; at: string; lines: string[] };
+  /** The report the last scripted walkthrough wrote: the last line of its transcript, where a person reads it. */
+  replayReport?: string;
 }
 
 // The demo hosts and their shells are process-wide. Keep their incident and its owner's artifacts together.
@@ -153,15 +155,26 @@ export class SimulationPart {
   async endSimulation(): Promise<void> {
     await changeSimulation(async () => {
       await clearSimulation();
-      if (isDemoMode() && !process.env.VITEST) ensureBaseFleet();
+      // The servers that are always there were behind the incident the whole time, and stay.
+      if (isDemoMode()) ensureBaseFleet();
     });
   }
 
   /** Seeds local demo-only proposals, example eval cases, daily report, runbooks, and base fleet. */
   seedDemoWorkspaceState(this: HubService): void {
     const now = Date.now();
-    // 1. Ensure always-on stateful base fleet is available in live demo sessions when no scenario is active.
-    if (!simulation && isDemoMode() && !process.env.VITEST) ensureBaseFleet();
+    // 0. A demo preset added by an earlier version was kept under an id the simulation does not know
+    // (preset-mcp-…). It gets its demo id, so it is answered by the simulation like the others.
+    const demoPresetIds = new Set(mcpCatalog().map((p) => p.id));
+    const demoIdOf = (id: string): string => {
+      const demoId = id.replace(/^preset-mcp-/, "demo-mcp-");
+      return demoPresetIds.has(demoId) ? demoId : id;
+    };
+    for (const server of this.store.data.mcpServers ?? []) server.id = demoIdOf(server.id);
+    for (const agent of this.store.data.agents ?? []) if (agent.mcpServerIds) agent.mcpServerIds = agent.mcpServerIds.map(demoIdOf);
+    // 1. The servers that are always there in a demo (sim/baseFleet.ts): built once for the process, also
+    // while an incident runs, which then has them behind it. A test of the scripted servers switches them off.
+    if (isDemoMode()) ensureBaseFleet();
     // 2. Seed 2 clearly-labelled demo MemoryProposals when none exist yet.
     if (!(this.store.data.memoryProposals?.length)) {
       const proposals: MemoryProposal[] = [
@@ -318,7 +331,9 @@ export class SimulationPart {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((t) => [...t.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text)
       .find(Boolean) : undefined;
-    const effectiveReport = report ?? ticket?.result ?? (lastReplay?.mode === "careful" ? scenario.story : undefined);
+    // The report check reads a report somebody can read: a finished run's, the ticket's, or the one the
+    // scripted walkthrough wrote at the end of its transcript. With none of them the check stays open.
+    const effectiveReport = report ?? ticket?.result ?? run.replayReport;
     const score = scoreScenario(scenario, { world: run.world, report: effectiveReport });
     return {
       scenarios,
@@ -537,16 +552,19 @@ export class SimulationPart {
         const script = run.scenario.solutions[mode];
         const results = runLines(run.world, script);
         const transcript = results.map((r) => `$ ${r.line}${r.code ? ` [exit ${r.code}]` : ""}${r.output.trim() ? `\n${clip(r.output.trim(), 240)}` : ""}`);
+        // The walkthrough ends with a report, as a run does, and the report says that it is scripted. It is the
+        // last line of the transcript, so the report check never passes on a report nobody can read.
+        const report = `Scripted walkthrough, no AI model. ${mode === "careful" ? run.scenario.story : "Applied a quick workaround."}`;
+        const reportLine = `Report: ${report}`;
+        run.replayReport = report;
         run.lastReplay = {
           mode,
           ran: results.length,
           at: new Date().toISOString(),
-          lines: transcript.slice(0, 20),
+          lines: [...transcript.slice(0, 20), reportLine],
         };
-        const score = scoreScenario(run.scenario, {
-          world: run.world,
-          report: mode === "careful" ? run.scenario.story : "Applied quick workaround.",
-        });
+        transcript.push(reportLine);
+        const score = scoreScenario(run.scenario, { world: run.world, report });
         this.changed();
         return {
           reply: {
@@ -565,21 +583,6 @@ export class SimulationPart {
             notes: [
               `Scripted ${mode} walkthrough (no AI model): ran ${results.length} commands, ${score.passed} of ${score.total} checks pass.`,
             ],
-          },
-        };
-      }
-      case "sim-advance-time": {
-        if (!isDemoMode()) throw new Error("Advancing simulated time works in the demo lab only.");
-        const minutes = Number(request.minutes);
-        if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 10080) {
-          throw new Error("Minutes must be a positive number up to 10080 (7 days).");
-        }
-        const world = simulation?.world ?? simWorld();
-        world.advance(Math.round(minutes * 60_000));
-        this.changed();
-        return {
-          reply: {
-            notes: [`Advanced simulated lab clock by ${Math.round(minutes)} minute${Math.round(minutes) === 1 ? "" : "s"}.`],
           },
         };
       }

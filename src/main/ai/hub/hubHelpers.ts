@@ -4,6 +4,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { createTwoFilesPatch } from "diff";
+import { scriptedDemoText } from "../../demo/DemoVirtualPty";
 import { querySimMcpTool } from "../../sim/SimMcpBridge";
 
 
@@ -236,6 +237,10 @@ export function simulateDemoNodeCommand(
   srv: WorkspaceServerSummary,
   command: string,
 ): string {
+  // One script for a showcase server, whichever way a command reaches it: a cluster run prints what the
+  // server's terminal prints, and what the simulated node of the same cluster says (sim/programs/showcase.ts).
+  const scripted = scriptedDemoText(srv.name || srv.host, command);
+  if (scripted) return scripted.text;
   const cmdLower = command.toLowerCase();
   if (srv.cluster === "NetApp-ONTAP-Prod-SE") {
     if (cmdLower.includes("qos") || cmdLower.includes("latency")) {
@@ -385,6 +390,11 @@ export function simulateDemoStorageOps(
   };
 }
 
+/**
+ * What a demo MCP server answers: read from the simulated servers where the lab has something to read
+ * (sim/SimMcpBridge.ts), otherwise a scripted example. Every answer says `simulated: true`, and a tool
+ * with neither says that nothing was called, so nobody takes it for something that happened.
+ */
 export function simulateDemoMcpTool(
   toolName: string,
   args: Record<string, unknown>,
@@ -395,6 +405,7 @@ export function simulateDemoMcpTool(
   if (toolName === "ontap_get_volume_metrics") {
     return JSON.stringify(
       {
+        simulated: true,
         cluster: "NetApp-ONTAP-Prod-SE",
         sampledAt: new Date().toISOString(),
         volumes: [
@@ -432,6 +443,7 @@ export function simulateDemoMcpTool(
   if (toolName === "ontap_list_snapmirror_lags") {
     return JSON.stringify(
       {
+        simulated: true,
         cluster: "NetApp-ONTAP-Prod-SE -> Uppsala DC2 (netapp-fas9000-dr-01)",
         totalRelationships: 28,
         healthyCount: 28,
@@ -445,6 +457,7 @@ export function simulateDemoMcpTool(
   if (toolName === "storagegrid_ilm_queue_status") {
     return JSON.stringify(
       {
+        simulated: true,
         grid: "NetApp-StorageGRID-S3 (11.8)",
         activePolicy: "ILM-Prod-FabricPool-EC63",
         evaluationRateObjectsPerSec: 4820,
@@ -457,8 +470,9 @@ export function simulateDemoMcpTool(
     );
   }
   return JSON.stringify({
+    simulated: true,
     tool: toolName,
-    status: "ok",
+    note: "This demo server has no example answer for this tool. Nothing was called and nothing was changed.",
     timestamp: new Date().toISOString(),
     args,
   });

@@ -63,7 +63,7 @@ export class SimStorageProvider implements IStorageProvider {
     if (!simWorld().shell(host).mayWrite(`${path}/x`, false)) throw new Error(`EACCES: permission denied, mkdir '${path}'`);
     host.mkdir(path);
     host.settle();
-    simWorld().runLaws();
+    simWorld().worldOf(host).runLaws();
   }
 
   async delete(remotePath: string): Promise<void> {
@@ -75,7 +75,7 @@ export class SimStorageProvider implements IStorageProvider {
     if (!host.read(path) && !shell.mayWrite(`${path}/x`, false)) throw new Error(`EACCES: permission denied, rmdir '${path}'`);
     host.remove(path);
     host.settle();
-    simWorld().runLaws();
+    simWorld().worldOf(host).runLaws();
   }
 
   async rename(oldPath: string, newPath: string): Promise<void> {
@@ -89,7 +89,7 @@ export class SimStorageProvider implements IStorageProvider {
     host.write(to, file.content, { pad: file.pad, mode: file.mode, owner: file.owner });
     host.remove(from);
     host.settle();
-    simWorld().runLaws();
+    simWorld().worldOf(host).runLaws();
   }
 
   async readFile(remotePath: string): Promise<Buffer> {
@@ -107,7 +107,7 @@ export class SimStorageProvider implements IStorageProvider {
     const wrong = simWorld().shell(host).writeFile(path, Buffer.from(data).toString("utf8"), false, false);
     if (wrong) throw new Error(`${wrong === "Permission denied" ? "EACCES" : wrong === "No space left on device" ? "ENOSPC" : "ENOENT"}: ${wrong.toLowerCase()}, open '${path}'`);
     host.settle();
-    simWorld().runLaws();
+    simWorld().worldOf(host).runLaws();
   }
 
   async createReadStream(remotePath: string, start?: number, end?: number): Promise<NodeJS.ReadableStream> {

@@ -49,7 +49,11 @@ interface DemoClusterMutableState {
   multipathFixed: boolean;
 }
 
-const demoClusterState: DemoClusterMutableState = {
+/**
+ * What was fixed in the showcase so far. One state for all of its servers, the scripted ones and the
+ * ones the base fleet simulates (sim/programs/showcase.ts): two nodes of one cluster agree.
+ */
+export const demoClusterState: DemoClusterMutableState = {
   ontapQosFixed: false,
   snapmirrorResynced: false,
   cephScrubFixed: false,
@@ -61,6 +65,33 @@ export function executeDemoServerCommand(
   hostOrName: string,
   rawCmd: string
 ): { output: string; exitCode: number } {
+  return (
+    scriptedDemoAnswer(hostOrName, rawCmd) ?? {
+      exitCode: 0,
+      output: `[demo:${hostOrName}] Executed: ${rawCmd.trim()}\r\nStatus: OK (0 errors, response time 0.4ms). Type 'help' for more demo commands, or 'simulate-error' to try AI troubleshooting.`,
+    }
+  );
+}
+
+/**
+ * The script's answer as plain text: no terminal colours, lines ended the way a command's output is.
+ * For a cluster run and for the base fleet's simulated servers, which print it as their own.
+ */
+export function scriptedDemoText(hostOrName: string, rawCmd: string): { text: string; exitCode: number } | undefined {
+  const answer = scriptedDemoAnswer(hostOrName, rawCmd);
+  // eslint-disable-next-line no-control-regex -- the escape character is what a colour code starts with
+  return answer && { text: answer.output.replace(/\u001b\[[0-9;]*m/g, "").replace(/\r\n/g, "\n"), exitCode: answer.exitCode };
+}
+
+/**
+ * What the showcase's script says to a command, or nothing when it has no answer of its own for it.
+ * The base fleet's simulated servers answer the appliances' own commands from here, so they say what
+ * the scripted servers beside them say.
+ */
+export function scriptedDemoAnswer(
+  hostOrName: string,
+  rawCmd: string
+): { output: string; exitCode: number } | undefined {
   const cmd = rawCmd.trim();
   const lower = cmd.toLowerCase();
   const h = hostOrName.toLowerCase();
@@ -515,10 +546,7 @@ export function executeDemoServerCommand(
     };
   }
 
-  return {
-    exitCode: 0,
-    output: `[demo:${hostOrName}] Executed: ${cmd}\r\nStatus: OK (0 errors, response time 0.4ms). Type 'help' for more demo commands, or 'simulate-error' to try AI troubleshooting.`,
-  };
+  return undefined;
 }
 
 export class DemoVirtualPty implements IPty {

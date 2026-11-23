@@ -1,3 +1,22 @@
+/**
+ * The packaged Hermes engine, started for real and held to its contract with the hub: a run is admitted,
+ * the engine is offered the `sshs3` tool and no other, its tool call reaches the broker, and the final
+ * answer comes back as events. This file plays the model on 127.0.0.1, so no model service is called.
+ *
+ * It is skipped in a normal test run and in CI: no workflow sets its variable. To run it:
+ *
+ *   1. Build the engine (docs/ai-hub.md, "Build and focused checks"):
+ *        npm run hermes:desktop:stage
+ *        npm run hermes:build -- --arch x64 --python <a Python to build with>
+ *      It lands in build-resources/hermes-native-runtime.
+ *   2. Run this file with the variable set and the engine's folder named:
+ *        SSHS3_HERMES_INTEGRATION=1 SSHS3_HERMES_RUNTIME_DIR=build-resources/hermes-native-runtime \
+ *          npm test -- tests/main/aiHub.hermes.integration.test.ts
+ *
+ * Without SSHS3_HERMES_RUNTIME_DIR the engine is looked for in build-resources/hermes. The folder has
+ * to hold what HermesManager starts: manifest.json, the Python it names, and sshs3_bootstrap.py.
+ * The engine gets 90 seconds to start and the test three minutes.
+ */
 import { describe, it, expect, vi } from "vitest";
 import http from "node:http";
 import fs from "node:fs/promises";

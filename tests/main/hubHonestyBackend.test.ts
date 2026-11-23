@@ -88,11 +88,19 @@ describe("M1 backend honesty & correctness fixes", () => {
     expect(disabledTest.reply?.notes?.[0]).toContain("turned off");
     expect(disabledTest.mcpServers!.find((m) => m.id === "srv-off")?.lastTestedAt).toBeGreaterThan(0);
 
-    // Live server success reports exact tool count; live server failure reports exact error
-    await hub.request({
-      action: "mcp-save",
-      server: { id: "srv-live", name: "Live HTTP", transport: "http", url: "https://mcp.example.com/mcp", enabled: true },
-    });
+    // A server somebody typed in is not tested in the demo lab: nothing is started or called there.
+    const live = { id: "srv-live", name: "Live HTTP", transport: "http" as const, url: "https://mcp.example.com/mcp", enabled: true };
+    await hub.request({ action: "mcp-save", server: live });
+    const notInDemo = await hub.request({ action: "mcp-test", id: "srv-live" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(notInDemo.reply?.notes?.[0]).toBe(
+      "Live HTTP was not tested. The demo lab starts no MCP program and calls no MCP address. Only the demo's own servers answer here, and what they answer is simulated.",
+    );
+    expect(notInDemo.mcpServers!.find((m) => m.id === "srv-live")?.lastTestedAt).toBeUndefined();
+
+    // Outside the demo: live server success reports exact tool count; live server failure reports exact error
+    const { hub: realHub } = await makeHub({ demo: false });
+    await realHub.request({ action: "mcp-save", server: live });
     spy.mockResolvedValueOnce({
       ok: true,
       tools: [
@@ -100,16 +108,16 @@ describe("M1 backend honesty & correctness fixes", () => {
         { name: "tool_b", description: "b" },
       ],
     });
-    const liveOk = await hub.request({ action: "mcp-test", id: "srv-live" });
+    const liveOk = await realHub.request({ action: "mcp-test", id: "srv-live" });
     expect(liveOk.reply?.notes?.[0]).toBe("Connected to Live HTTP: found 2 tools.");
     expect(liveOk.mcpServers!.find((m) => m.id === "srv-live")?.discoveredTools).toHaveLength(2);
 
     spy.mockResolvedValueOnce({ ok: false, tools: [], error: "HTTP 503" });
-    const liveErr = await hub.request({ action: "mcp-test", id: "srv-live" });
+    const liveErr = await realHub.request({ action: "mcp-test", id: "srv-live" });
     expect(liveErr.reply?.notes?.[0]).toBe("Could not connect to Live HTTP: HTTP 503.");
 
     spy.mockResolvedValueOnce({ ok: false, tools: [], error: "A shared server does not call itself." });
-    const dotErr = await hub.request({ action: "mcp-test", id: "srv-live" });
+    const dotErr = await realHub.request({ action: "mcp-test", id: "srv-live" });
     expect(dotErr.reply?.notes?.[0]).toBe("Could not connect to Live HTTP: A shared server does not call itself.");
   });
 

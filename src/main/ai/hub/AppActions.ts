@@ -39,7 +39,7 @@ import {
 } from "./demoWorkspace";
 import { simWorld } from "../../sim/SimWorld";
 import { SCRIPTED_DEMO_NOTE } from "../../sim/scripted";
-import { isDemoTarget } from "../../demo/demoMode";
+import { DEMO_MCP_REFUSAL, isDemoTarget } from "../../demo/demoMode";
 import { nextRef, sensitiveForChat } from "./ToolBroker";
 import { allowedServerNamed, chatChannelReadable, sensitiveFile } from "./chatFence";
 
@@ -612,6 +612,9 @@ export async function handleAppAction(
           `MCP tool "${resolved.toolName}" on server "${resolved.server.name}" is denied by tool policy.`,
         );
       }
+      // In the demo lab only the demo's own servers answer. Any other (a person typed it in) is refused
+      // here, before anybody is asked to approve a call that will not be made.
+      if (isDemoMode() && !isDemoTarget(resolved.server.id)) throw new Error(DEMO_MCP_REFUSAL);
       if (resolved.tool.inputSchema) {
         validateMcpInputSchema(resolved.toolName, resolved.tool.inputSchema, p);
       }

@@ -435,6 +435,10 @@ describe('the agent bot in chat, asked through the web server', () => {
     // Nothing went to a real chat.
     expect(slack.calls).toEqual([]);
     await expect(maria.ask({ action: 'chat-answering-try', channel: 'not a channel!', as: 'guest', text: 'x' })).rejects.toThrow('Choose a channel');
+    // A message is all that can be tried: a request that names a card to press or react to, and has no text, does nothing.
+    const posted = dm.reply!.chatTry!.posts[0].id;
+    const press = { action: 'chat-answering-try', channel: 'COPS', as: 'me', text: '', interaction: { kind: 'react', postId: posted, emoji: ':not-checked:' } };
+    await expect(maria.ask(press as never)).rejects.toThrow('Write something for the agent bot.');
   }, 30_000);
 
   it('forgets the links of an account that is removed', async () => {

@@ -71,6 +71,11 @@ describe("audit log verdicts", () => {
     expect(screen.getByTestId("audit-demo-notice")).toHaveTextContent(
       "Demo lab: audit entries are recorded locally inside the isolated demo workspace and are never sent outside.",
     );
+    // It says when entries come, and does not promise any for what writes none (tests/main/simUpgradeM1.test.ts holds the hub to this).
+    expect(screen.getByTestId("audit-demo-notice")).toHaveTextContent(
+      "The log is empty until an agent runs a command or makes a change. A command you type in a terminal, a scripted walkthrough, starting an incident and a change of the safety rules are not recorded here.",
+    );
+    expect(screen.getByTestId("audit-demo-notice")).not.toHaveTextContent(/Run a command or start an incident/);
     expect(screen.queryByTestId("audit-chain-badge")).not.toBeInTheDocument();
     expect(screen.queryByText(/Every command an agent runs/)).not.toBeInTheDocument();
     expect(screen.getByTestId("audit-verdict")).not.toHaveClass("ai-audit-ok");

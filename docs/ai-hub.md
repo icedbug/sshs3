@@ -320,7 +320,9 @@ explicitly enabled presentation on top of the same terminal authority.
   host as the server's own account), and an HTTP address goes through
   `guardUrl` like a notification. Redirects are not followed, and an address
   counts as connected only when it answers `initialize` and `tools/list` as
-  an MCP server, not whenever it answers JSON.
+  an MCP server, not whenever it answers JSON. In demo mode `assertMcpReach`
+  refuses every server: a demo process starts no MCP program and calls no
+  MCP address (see [MCP in the demo](#the-demo-labs-incidents-srcmainsim)).
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory
   entries keep all their metadata (tier, cluster, confidence, success/failure
   and usage counts, feedback score, `autoLearned`, `sourceCommand`,
@@ -361,7 +363,7 @@ parts that define the same method name are refused when the file loads.
 | `areas/alerts.ts` | Alerts in: an alert becomes a ticket; the address and the routing rules | 4 |
 | `areas/evals.ts` | Tests for the agents; the nightly upkeep and the daily report | 5 |
 | `areas/audit.ts` | The audit log and terminal recordings | 3 |
-| `areas/simulation.ts` | The demo lab's incidents and its scripted run | 3 |
+| `areas/simulation.ts` | The demo lab's incidents and its scripted run | 4 |
 | `areas/schedules.ts` | Schedules | 3 |
 | `areas/chatAndAtlassian.ts` | The context bot (what the team says in chat), Jira and Confluence: where a request reaches the bridges | 16 |
 | `areas/chatAnswering.ts` | The agent bot in chat: its settings and connection, linking a chat account, answering its changes in the app. It hands each request to the web server (`host.chatAnswering`), which checks who asks | 11 |
@@ -725,12 +727,16 @@ reads them. There are none in the desktop app and none in the demo lab.
   entry. They
   are removed after `retentionDays` on every installation, and are this
   computer's own: they are not shared. `recordSessions: false` turns them off.
-- **The demo lab writes neither.** In demo mode an agent's commands and
-  changes are not written to the audit log, and no terminal is recorded. The
-  Timeline there shows invented example data (`demoWorkspace.ts`), and says
-  so. The Audit log screen says that nothing is written to it instead of
-  "verified", and in any mode an empty log reads "nothing to verify yet",
-  not as a chain that holds.
+- **The demo lab keeps its own.** In demo mode the audit log and the
+  recordings are written inside the demo's own data folder. The log is not
+  anchored in a bucket and not sent anywhere. The Timeline there shows
+  invented example data (`demoWorkspace.ts`), and says so. While the demo's
+  log is empty, the Audit log screen says so instead of "verified". It says
+  that entries come when an agent runs a command or makes a change, and
+  names what is not recorded in the demo: a command typed in a terminal, a
+  scripted walkthrough, starting an incident, and a change of the safety
+  rules (`safety-policy-save` skips the log in demo mode). In any mode an
+  empty log reads "nothing to verify yet", not as a chain that holds.
 - **The player.** From a timeline item or a log entry: pauses over 2 s
   shortened, speed, scrubbing, the commands as a list with ✓ or the exit
   code, and a log entry opens it at its own command.
@@ -1208,6 +1214,10 @@ placed before the early return for a pending save); three seconds later
   the notification channels (`flushInbox`): its card is in the chat thread,
   where the people who may answer it are. What waits for a second person
   still goes.
+
+- In the demo lab nothing is sent to a channel. `flushInbox` returns before
+  a channel is told, and Send a test answers "Demo: nothing is sent from the
+  demo lab." and records no delivery on the channel.
 
 Not done: delivery through an HTTP proxy, a persistent retry queue (three
 tries in memory, then the failure is shown on the channel), approving from
@@ -1914,7 +1924,8 @@ test workspace: one for the context bot, one for the agent bot.
 Demo mode has a lab of simulated servers that hold state, and incidents to
 play in it. It serves two things: showing an agent solve something, and
 finding out whether an agent solves it well. Nothing in it reaches a real
-machine or a real service.
+machine or a real service. That holds for MCP too: a demo process starts no
+MCP program and calls no MCP address (MCP in the demo, below).
 
 **Servers that remember.** A `SimHost` has files, folders, disks, services,
 processes, packages, certificates, peers, and a journal. A command reads and
@@ -1925,14 +1936,40 @@ command (`host.laws`, `host.settle()`, and cross-host `world.laws` /
 `world.settle()`): once the WAL archive works again, PostgreSQL archives its
 backlog and the disk empties; once an ONTAP export policy allows a worker node,
 a stuck Kubernetes pod mounts its PVC and becomes Running. There are no background
-timers: the same state gives the same answer, and `sim-advance-time` advances the
-simulated clock deterministically.
+timers: the same state gives the same answer. The lab's clock moves only when a
+scenario or a test moves it (`world.advance`). The app has no request for it.
 
-**Always-on base fleet (`baseFleet.ts`).** Live demo sessions start with a
-stateful base fleet (Kubernetes control plane and GPU worker, NetApp ONTAP AFF
-A800 nodes, StorageGRID admin, Ceph monitor/manager, ActiveIQ Harvest, and SAN
-bastion) so terminals, facts, dependency links, and demo MCP tools have live
-state even before a specific incident is started.
+**The base fleet (`baseFleet.ts`).** A demo process always has seven of the
+demo workspace's fourteen showcase servers simulated: the Kubernetes control
+plane and GPU worker, the first NetApp ONTAP node, the StorageGRID admin node,
+the Ceph monitor, the Active IQ server and the SAN bastion. Their terminals,
+files, facts and the demo's MCP tools work on one state. The other seven (the
+second ONTAP node, the DR system, the storage nodes, MinIO, the Ceph OSD node,
+TrueNAS) stay scripted (`DemoVirtualPty`, `DemoStorageProvider`).
+
+The fleet tells the showcase's story, the one the demo's conversation, its
+workforce run and its scripted answer tell: `vol_ai_scratch_03` has no QoS
+limit, the GPU worker's multipath uses `multibus` where the control plane has
+`group_by_prio`, one SnapMirror relationship is broken off, and Ceph has a
+warning. What an appliance says about its cluster (`volume`, `qos`, `storage`,
+`snapmirror`, `ceph`, `storagegrid-status`) comes from the showcase's script
+and its record of what was fixed (`programs/showcase.ts`, `demoClusterState`).
+So the simulated node and the scripted node of one cluster agree, and a fix
+made on one shows on the other. A cluster run on a scripted server prints what
+that server's terminal prints. The fleet's files are the ones the scripted
+file manager shows (`demoServerFiles`). An appliance command the script has no
+answer for is "not part of this simulation", as on any simulated server.
+
+The fleet is built once for the process and keeps its state. An incident's lab
+is a `SimWorld` of its own with the fleet behind it (`SimWorld.behind`).
+Starting an incident adds its servers beside the fleet. A fleet server is
+still found by its name, and what is run on it is no part of the incident's
+score. Ending the incident takes its servers away and leaves the fleet as it
+was. Tests run with the fleet on, as a demo process does. A test of the
+scripted servers switches it off with `setBaseFleetForTesting(false)`, and
+`tests/setup/freshLab.ts` empties the lab after every test.
+`tests/main/simBaseFleet.test.ts` runs every command that the seeded schedules,
+runbooks, workforce runs, conversation and scripted answer name.
 
 **A command line, within limits.** `SimShell` reads pipes, `&&`, `||`, `;`,
 redirections, quotes, globs, `sudo` and `sh -c`. The commands are tables:
@@ -1944,8 +1981,9 @@ redirections, quotes, globs, `sudo` and `sh -c`. The commands are tables:
 | `commands/net.ts` | `ssh` (cross-host inside `SimWorld`), `curl getent host nslookup dig ping nc iptables nft` against the lab's own names and ports |
 | `programs/postgres.ts` | `psql -c` (what a server says about itself), `pg_lsclusters pg_isready pg_ctlcluster` |
 | `programs/nginx.ts` | `nginx -t`, `-T`, `-s reload` |
-| `programs/k8s.ts` | stateful `kubectl`, `tridentctl`, `multipath` |
+| `programs/k8s.ts` | stateful `kubectl` (several kinds at once, volume attachments), `tridentctl`, `multipath` |
 | `programs/storage.ts` | reusable ONTAP `vserver`, `volume`/`vol`, `qos`, `cluster`, `storage aggregate show` |
+| `programs/showcase.ts` | the base fleet's appliance commands, from the showcase's script: ONTAP `volume`, `qos`, `storage`, `snapmirror`; `ceph`, `zpool`, `zfs`; `storagegrid-status`, `aws s3 ls`; and `iostat`, `vmstat` |
 | a scenario's own | `aws s3`, `certbot`, `ceph`, and scenario-specific tools |
 
 A command the lab does not have answers `command not found`, and an option it
@@ -1960,17 +1998,30 @@ and local isolated demo audit/recordings work as on a real server), the file
 manager (`SimStorageProvider`, signed in as the login user), a cluster run,
 server facts (`sim/facts.ts` prints the real facts script's format including
 `@@sshs3:peers`, so the real parser and dependency discovery are used), and
-stateful demo MCP servers (`SimMcpBridge.ts`, deriving Prometheus, NetBox,
-Alertmanager, Grafana, PagerDuty, and NetApp Harvest answers from live
-`SimWorld` state and marking them `simulated: true`) all work on the same
-`SimWorld`.
+the demo's MCP tools (`SimMcpBridge.ts`: the Prometheus, Alertmanager, Grafana,
+Loki, NetBox, Kubernetes and NetApp Harvest tools answer from the lab's
+servers) all work on the same `SimWorld`.
+
+**MCP in the demo.** The demo's MCP servers are invented: the two that come
+with the workspace and the nine its catalog offers. Each has an id that starts
+with `demo-mcp-`, and that id is what makes a server simulated
+(`isDemoTarget`). Adding one, Test and a tool call answer from the simulation
+(`simulateDemoMcpTool`): from the lab's servers where there is something to
+read, else a scripted example, else a note that nothing was called. Every
+answer says `simulated: true`. A demo process never uses the MCP client. Test
+on a server a person typed in says it was not tested. A tool call on such a
+server is refused before anybody is asked to approve it. `assertMcpReach`
+refuses in demo mode whatever asks. A preset that an earlier version stored as
+`preset-mcp-…` gets its demo id when the demo starts.
+`tests/main/demoMcpNothingStarts.test.ts` adds, tests and calls every preset,
+and fails if the MCP client is asked for anything.
 
 **An incident is a `SimScenario`** (`scenarios/*.ts`): `build(world)` puts the
 servers in the lab with the fault in them; `alert`, `chat` and `activity` are
 where the clues are; `checks` say what a good outcome is; `solutions` are a
 careful and a careless way through it, as lines to run. Starting one
-(`sim-start`, demo mode only) adds its servers to the inventory, puts its
-chat in the team's chat index as a simulated bot (labelled `Demo (simulated)`
+(`sim-start`, demo mode only) adds its servers to the inventory, beside the
+base fleet, puts its chat in the team's chat index as a simulated bot (labelled `Demo (simulated)`
 with no external links), writes its activity, and posts its alert through the
 normal alert intake, so a ticket appears on the board. `sim-reset` removes its
 servers, ticket, and `sim-*` activity events again.
@@ -1989,18 +2040,16 @@ servers, ticket, and `sim-*` activity events again.
 **Judged from the state, not by a model.** Every check is one of four kinds:
 the trouble is gone (`resolved`), its cause is fixed (`root-cause`), nothing
 was broken on the way (`no-damage`), and the report names the cause
-(`report`, a word match against a short list). The persistent **Scenario Bar**
+(`report`, a word match against a short list). The report is one that was
+written: the last answer of a finished run on the incident, the ticket's
+result, or the report a scripted walkthrough writes as the last line of its
+transcript, which says that it is scripted. With none of these the report
+check stays open. The persistent **Scenario Bar**
 (`panel/ScenarioBar.tsx`) stays visible across every tab in demo mode so you
 can launch an incident, open its terminal or ticket, expand the live checks,
 or run a deterministic scripted walkthrough (`sim-replay` in `careful` or
 `careless` mode, clearly labelled as a scripted walkthrough with no AI model).
 The "Scenarios" card in Workforce exposes the same controls and spoiler toggle.
-
-**Interactive simulated chat (`SimChat`).** In Settings under Agent in chat,
-`chat-answering-try` accepts optional `interaction` actions (`click` approve or
-deny, and `react` emoji) so approval buttons and reactions can be exercised
-against the in-process `SimChat` transport without external Slack or Mattermost
-accounts.
 
 **From the command line:** `npm run sim` lists all 8 incidents with their tags;
 `npm run sim -- <id> --careful` (or `--careless`) runs a scripted solution;
@@ -2061,7 +2110,8 @@ careful way with no unsimulated command, and red on exactly
 **The desktop app, started.** `npm run test:smoke:demo` (after
 `npm run build`) starts the Electron app in its demo lab and goes into the AI
 workspace over the app's own IPC: the hub answers and says it is the demo,
-the five incidents are offered, the board is drawn, one incident is started,
+the incidents are offered (the script asks for at least five, there are
+eight), the board is drawn, one incident is started,
 its alert is a ticket on the board, and the incident is taken back. On a
 machine without a display it runs under
 `xvfb-run --auto-servernum npm run test:smoke:demo`. `npm run test:smoke`
@@ -2831,6 +2881,15 @@ its actual native Python contract. `SSHS3_HERMES_NATIVE_RUNTIME_DIR` can select
 a relocated, packaged or installed runtime instead of
 `build-resources/hermes-native-runtime`.
 
+Tests that need something extra are skipped unless their variable is set:
+
+| Test | Runs with | What it needs | Where it runs |
+|---|---|---|---|
+| `tests/main/nativeHermesTools.test.ts` (the native contract case) | `HERMES_NATIVE_CONTRACT=1` | The built native runtime | The native workflow (`ai-hub.yml`) |
+| `tests/main/aiHub.shell.integration.test.ts` | `SSHS3_SHELL_INTEGRATION=1` | The shells of the platform | The native workflow (`ai-hub.yml`) |
+| `tests/main/aiHub.hermes.integration.test.ts` | `SSHS3_HERMES_INTEGRATION=1` | The built Hermes engine. Name its folder with `SSHS3_HERMES_RUNTIME_DIR`, or it is looked for in `build-resources/hermes`. It plays the model itself | Nowhere by itself: no workflow sets the variable. The file's first lines say how to run it |
+| `tests/main/chatAgentRealModel.test.ts` | `SSHS3_CHAT_REAL_MODEL=1`, `SSHS3_SIM_API_KEY`, `SSHS3_SIM_BASE_URL` | A real model | Nowhere by itself: it spends model calls |
+
 The native CI workflow in `.github/workflows/ai-hub.yml` stages that same source
 pin on fresh Windows and Ubuntu runners. It prepares original Desktop workspace
 dependencies with the frozen upstream npm lock, assembles the engine through
@@ -2930,7 +2989,7 @@ remaining platform/product work.
 - `src/main/ai/hub/ChatSources.ts`, `ChatIndex.ts`, `ChatBridge.ts`: the context bot in Slack and Mattermost, the index of what was said, and the search over it. It only reads.
 - `src/main/web/chatAgent/`, `src/main/net/wsClient.ts`, `src/main/ai/hub/chatFence.ts`, `src/main/ai/hub/areas/chatRuns.ts`, `areas/chatAnswering.ts`: the agent bot that answers in Slack and Mattermost (see "Agent in chat").
 - `src/main/ai/hub/Atlassian.ts`, `AtlassianBridge.ts`, `AtlassianStore.ts`: Jira on the board and Confluence in the knowledge base.
-- `src/main/demo/`: launch-time demo mode, outward sync guard, demo PTY and storage provider.
+- `src/main/demo/`: launch-time demo mode, where a desktop process keeps its data (`dataDir.ts`, applied by `index.ts` and `desktopEntry.ts`), outward sync guard, demo PTY and storage provider.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.
 - `src/shared/types/aiHub.ts`, `src/shared/types/ai.ts`: hub requests, snapshot, memory, safety policy and provider/model types.
 - `src/shared/ipc/createMultiSSHApi.ts`: the `MultiSSHApi` used by both the preload and the web client.

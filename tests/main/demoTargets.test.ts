@@ -10,6 +10,7 @@ import { SFTPStorageProvider } from "../../src/main/storage/SFTPStorageProvider"
 import { S3StorageProvider } from "../../src/main/storage/S3StorageProvider";
 import { SSHPtyManager } from "../../src/main/ssh/SSHPtyManager";
 import { McpClientManager } from "../../src/main/ai/hub/McpClientManager";
+import { setBaseFleetForTesting } from "../../src/main/sim/SimWorld";
 import type { HubHost } from "../../src/main/ai/hub/HubService";
 import type { AgentTask, WorkspaceServerSummary } from "../../src/shared/types/aiHub";
 import type { SSHConnectionConfig } from "../../src/shared/types/ssh";
@@ -277,6 +278,8 @@ describe("AI tools on demo targets", () => {
 
   it("scripts cluster commands only for demo servers, recognised by id rather than address", async () => {
     setDemoModeForTesting(true);
+    // This is about the scripted example servers. The base fleet simulates this one (tests/main/simBaseFleet.test.ts), so it is off here.
+    setBaseFleetForTesting(false);
     const hub = await createHub();
     const cap = await hub.broker.issue(autonomousTask("task-demo-cluster"));
     const run = async () =>

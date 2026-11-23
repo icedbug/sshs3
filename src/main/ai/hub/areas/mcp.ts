@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { AgentChange, HubReply, AgentTask, McpServerConfig, McpToolPolicy } from "../../../../shared/types/aiHub";
 import { guardUrl, type GuardedTarget } from "../Notifier";
 import { deleteDemoMcpServer, getDemoMcpServers, isDemoMode, mcpCatalog, saveDemoMcpServer } from "../demoWorkspace";
-import { isDemoTarget } from "../../../demo/demoMode";
+import { DEMO_MCP_REFUSAL, isDemoTarget } from "../../../demo/demoMode";
 import { LocalMcpServer } from "../LocalMcpServer";
 import { McpTokenStore } from "../../../web/McpTokenStore";
 import { clip, safeError } from "../privacy";
@@ -59,6 +59,8 @@ export class McpPart {
 
   /** Asked each time an MCP server is about to be started or called: see McpClientManager. */
   async assertMcpReach(this: HubService, server: McpServerConfig): Promise<GuardedTarget | void> {
+    // The last line of defence for the demo: whatever path led here, nothing is started and nothing is called.
+    if (isDemoMode()) throw new Error(DEMO_MCP_REFUSAL);
     this.assertMcpProgramAllowed(server);
     if (server.transport !== "http") return;
     const url = server.url?.trim();
@@ -237,14 +239,18 @@ export class McpPart {
     let reply: HubReply | undefined;
     switch (request.action) {
       case "mcp-install-preset": {
+        // The demo's presets were once called preset-mcp-…: that spelling still finds them.
+        const wanted = isDemoMode() ? request.presetId.replace(/^preset-mcp-/, "demo-mcp-") : request.presetId;
         const preset = mcpCatalog().find(
           (p) =>
-            p.id === request.presetId ||
+            p.id === wanted ||
             p.name.toLowerCase() === request.presetId.toLowerCase(),
         );
         if (!preset) throw new Error(`MCP preset "${request.presetId}" not found`);
         // In the demo lab a preset is a scripted fixture: nothing is started for it.
         if (!isDemoMode()) this.assertMcpProgramAllowed(preset);
+        // Its id is what makes it simulated. One without a demo id would be refused at every use, so it is not added.
+        else if (!isDemoTarget(preset.id)) throw new Error(DEMO_MCP_REFUSAL);
         const installed: McpServerConfig = {
           id: preset.id,
           name: preset.name,
@@ -352,6 +358,9 @@ export class McpPart {
               `${srv.name} is a demo server. Its ${toolCount} tool${toolCount === 1 ? "" : "s"} are simulated locally and not connected to a real network.`,
             ],
           };
+        } else if (isDemoMode()) {
+          // Not one of the demo's own servers (a person typed it in): it is not tested, and its status says nothing new.
+          reply = { notes: [`${srv.name} was not tested. ${DEMO_MCP_REFUSAL}`] };
         } else {
           const result = await this.mcp.testAndDiscover(srv);
           srv.status = result.ok ? "connected" : "error";

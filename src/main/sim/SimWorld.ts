@@ -30,6 +30,13 @@ export class SimWorld {
   onRan?: () => void;
   /** Set while a scenario builds its servers: see `SimHost.settingUp`. */
   building = false;
+  /**
+   * The servers that are always there, beside this lab's own: an incident's lab has the demo's base
+   * fleet behind it. They are found from here by name, and they keep their own commands, names, clock
+   * and state: what is run on them is no part of this lab's score, and they are still there, as they
+   * were left, when this lab is gone.
+   */
+  behind?: SimWorld;
 
   constructor(private readonly base: () => number = Date.now) {}
 
@@ -62,15 +69,29 @@ export class SimWorld {
     return host;
   }
 
-  /** A host by its name, its address, or another name it was given. */
+  /**
+   * A host by its name, its address, or another name it was given: one of this lab's, or one of the
+   * lab behind it. Each name is tried in both before the next, so a server's own name always finds it,
+   * whatever address another server shares with it.
+   */
   host(...refs: (string | undefined)[]): SimHost | undefined {
     for (const ref of refs) {
       const key = ref?.trim().toLowerCase();
       if (!key) continue;
-      const found = this.hosts.get(key) ?? this.hosts.get(this.aliases.get(key) ?? "");
+      const found = this.hosts.get(key) ?? this.hosts.get(this.aliases.get(key) ?? "") ?? this.behind?.host(key);
       if (found) return found;
     }
     return undefined;
+  }
+
+  /** Every server that answers from here: this lab's own, then the ones behind it. */
+  everyHost(): SimHost[] {
+    return [...this.hosts.values(), ...(this.behind?.everyHost() ?? [])];
+  }
+
+  /** The lab a host is in: this one, or the one behind it. */
+  worldOf(host: SimHost): SimWorld {
+    return this.hosts.get(host.name.toLowerCase()) === host ? this : (this.behind?.worldOf(host) ?? this);
   }
 
   /** The address a name leads to, or nothing when it does not resolve. An address is its own answer. */
@@ -84,8 +105,10 @@ export class SimWorld {
     for (const [name, command] of Object.entries(commands)) this.commands.set(name, command);
   }
 
-  /** A new shell on a host: its own working directory, the host's one state. */
+  /** A new shell on a host: its own working directory, the host's one state. A host of the lab behind this one gets that lab's commands. */
   shell(host: SimHost): SimShell {
+    const owner = this.worldOf(host);
+    if (owner !== this) return owner.shell(host);
     const shell = new SimShell(host, this.commands, this);
     this.shells.push(shell);
     return shell;
@@ -106,13 +129,59 @@ export class SimWorld {
 }
 
 let current: SimWorld | undefined;
+let base: SimWorld | undefined;
+let empty: SimWorld | undefined;
 
-/** The lab as it stands. Empty until something put servers in it. */
+/**
+ * The lab as it stands: the one an incident put in place, else the servers that are always there,
+ * else a lab with nothing in it.
+ */
 export function simWorld(): SimWorld {
-  return (current ??= new SimWorld());
+  return current ?? base ?? (empty ??= new SimWorld());
 }
 
-/** Puts a new lab in place: what a scenario does when it starts, and a test before each case. */
+/**
+ * Puts an incident's lab in place, or takes it away again (`undefined`). The servers that are always
+ * there stay: an incident's lab has them behind it (`SimWorld.behind`).
+ */
 export function setSimWorld(world: SimWorld | undefined): void {
   current = world;
+  empty = undefined;
+}
+
+/** The servers that are always there in a demo process (sim/baseFleet.ts), if they were built. */
+export function baseWorld(): SimWorld | undefined {
+  return base;
+}
+
+/** Puts the always-there servers in place. A lab that is running gets them behind it at once. */
+export function setBaseWorld(world: SimWorld | undefined): void {
+  base = world;
+  if (current && current !== world) current.behind = world;
+}
+
+let baseFleetOn = true;
+
+/** Whether a demo process has its always-there servers. It does, unless a test switched them off. */
+export function baseFleetWanted(): boolean {
+  return baseFleetOn;
+}
+
+/**
+ * Test-only: a test of the scripted example servers behind the base fleet runs without the fleet.
+ * Throws outside Vitest, so application code cannot switch the fleet off.
+ */
+export function setBaseFleetForTesting(on: boolean): void {
+  if (!process.env.VITEST) throw new Error("The demo's base fleet is always on outside tests");
+  baseFleetOn = on;
+  if (!on) setBaseWorld(undefined);
+}
+
+/** Test-only: no lab, no always-there servers, and the fleet wanted again. Run after every test (tests/setup/freshLab.ts). */
+export function resetLabForTesting(): void {
+  if (!process.env.VITEST) throw new Error("The lab is reset between tests only");
+  current = undefined;
+  base = undefined;
+  empty = undefined;
+  baseFleetOn = true;
 }

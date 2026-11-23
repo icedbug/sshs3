@@ -125,10 +125,11 @@ describe('TeamVaultCryptoService', () => {
     });
   });
 
-  describe('wrapVaultKeyForRecipient / unwrapVaultKey against the real `age` CLI', { retry: 2 }, () => {
-    // Real age + pty + FIFO subprocesses: now and then (a few percent of full-suite runs) age exits 0 but the FIFO reader's
-    // open() never completes, which readChannelAfterExit turns into a 5 s "wrote no output" error. The round trip has
-    // no PIN or card, so a retry is harmless. The root cause is not found (CPU load alone does not reproduce it).
+  describe('wrapVaultKeyForRecipient / unwrapVaultKey against the real `age` CLI', () => {
+    // Real age + pty + FIFO subprocesses, and no retry. This used to fail in a few percent of full-suite runs with
+    // "age finished but wrote no output": age does not wait for a reader, and the reader's open() could still be
+    // waiting in the thread pool when age had already written and gone. The channel now holds the FIFO open before
+    // age starts (AgePtyPinRelay, openFifoChannel; tests/main/AgePtyPinRelay.test.ts makes that order certain).
     // Prefer the CI-fetched copy (build-resources/age/<platform>) so this also runs on a machine
     // without a system-wide age: the real service resolves a bare `age` via PATH in this file.
     const bundledDir = path.join(process.cwd(), 'build-resources', 'age', process.platform === 'win32' ? 'win' : 'linux');
@@ -170,10 +171,8 @@ describe('TeamVaultCryptoService', () => {
     );
   });
 
-  describe('encryptForRecipient / decryptWithIdentity against the real `age` CLI', { retry: 2 }, () => {
-    // Real age + pty + FIFO subprocesses: now and then (a few percent of full-suite runs) age exits 0 but the FIFO reader's
-    // open() never completes, which readChannelAfterExit turns into a 5 s "wrote no output" error. The round trip has
-    // no PIN or card, so a retry is harmless. The root cause is not found (CPU load alone does not reproduce it).
+  describe('encryptForRecipient / decryptWithIdentity against the real `age` CLI', () => {
+    // Real age + pty + FIFO subprocesses, and no retry: see the round trip above for what used to fail here.
     const hasAge = !spawnSync('age', ['--version'], { stdio: 'ignore' }).error;
     const hasAgeKeygen = !spawnSync('age-keygen', ['--version'], { stdio: 'ignore' }).error;
 

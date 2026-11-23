@@ -30,6 +30,14 @@ export const DEMO_WORKSPACE_DIR_NAME = 'demo-workspace';
  */
 export const DEMO_ID_PREFIX = 'demo-';
 
+/**
+ * What a person or a model is told when something in a demo process would have started an MCP program
+ * or called an MCP address. A demo process does neither: only servers with a demo id answer, from the
+ * simulation. Every path to the MCP client says this instead of using it.
+ */
+export const DEMO_MCP_REFUSAL =
+  "The demo lab starts no MCP program and calls no MCP address. Only the demo's own servers answer here, and what they answer is simulated.";
+
 /** Whether this command line / environment asks for demo mode. */
 export function demoModeRequested(argv: readonly string[], env: NodeJS.ProcessEnv): boolean {
   return argv.includes(DEMO_FLAG) || DEMO_ENV_VARS.some((name) => env[name] === '1');

@@ -1,19 +1,28 @@
+import { demoServerFiles } from "../demo/DemoStorageProvider";
 import { fileCommands } from "./commands/files";
 import { netCommands } from "./commands/net";
 import { systemCommands } from "./commands/system";
 import { k8sCommands, type SimK8sState, type SimMultipathState } from "./programs/k8s";
-import { ontapStorageCommands, type OntapClusterState } from "./programs/storage";
-import { setSimWorld, simWorld, SimWorld } from "./SimWorld";
+import { SHOWCASE_ONTAP_COMMANDS, showcaseCommands, showcaseOntapState } from "./programs/showcase";
+import { ontapStorageCommands } from "./programs/storage";
+import type { SimHost } from "./SimHost";
+import { baseFleetWanted, baseWorld, setBaseWorld, simWorld, SimWorld } from "./SimWorld";
 
 const DAY = 86_400_000;
 
 /**
- * Builds an always-on stateful base fleet matching the core demo workspace servers.
- * Used in `SSHS3_DEMO=1` when no specific incident scenario is active, so terminals,
- * SFTP, ServerFacts, and SimMcpBridge operate on genuine stateful SimHosts instead
- * of falling back to stateless canned strings.
+ * The servers that are always there in a demo process: seven of the demo workspace's showcase servers,
+ * simulated, so their terminals, files, facts and the demo's MCP tools work on servers that hold state.
  *
- * Unit tests that call `emptyLab()` directly continue to get an empty SimWorld.
+ * They tell the showcase's story, the one the demo's conversation, its scripted answers and its other
+ * (scripted) servers tell: a scratch volume without a QoS limit on the ONTAP cluster, a GPU worker
+ * whose multipath uses `multibus` where the control plane has `group_by_prio`, a SnapMirror
+ * relationship that is broken off, a Ceph cluster with a warning. What an appliance says about its
+ * cluster comes from the showcase's script (programs/showcase.ts), so the simulated node and the
+ * scripted node of one cluster agree, and the files are the showcase's own (`demoServerFiles`).
+ *
+ * An incident's lab is a world of its own with this one behind it (`SimWorld.behind`): starting an
+ * incident adds its servers beside these and takes nothing away, and ending it leaves these as they are.
  */
 export function buildBaseFleet(clock?: () => number): SimWorld {
   const world = new SimWorld(clock);
@@ -22,8 +31,115 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
   world.register(netCommands);
   world.register(k8sCommands);
   world.register(ontapStorageCommands);
+  // After the others: on these servers the showcase's `volume`, `qos` and `storage` are the ones that answer.
+  world.register(showcaseCommands);
   world.building = true;
   const now = world.now();
+
+  // The cluster both Kubernetes nodes belong to: one state, so `kubectl` says the same on either.
+  const k8s: SimK8sState = {
+    nodes: [
+      { name: "k8s-storage-cp-01", status: "Ready", roles: "control-plane", age: "94d", version: "v1.31.2" },
+      { name: "k8s-gpu-io-worker-01", status: "Ready", roles: "worker", age: "94d", version: "v1.31.2" },
+    ],
+    pods: [
+      {
+        namespace: "trident",
+        name: "trident-controller-67d9b8f9c-x8k2p",
+        ready: "1/1",
+        status: "Running",
+        restarts: 0,
+        age: "45d",
+        node: "k8s-storage-cp-01",
+        logs: ["Trident CSI 24.06.1 controller ready", "Connected to ONTAP SVM svm-prod-nfs (10.30.10.11)"],
+        events: ["Normal  Started  45d  kubelet  Started container trident-main"],
+      },
+      {
+        namespace: "trident",
+        name: "trident-node-linux-9m4lw",
+        ready: "2/2",
+        status: "Running",
+        restarts: 0,
+        age: "45d",
+        node: "k8s-gpu-io-worker-01",
+        logs: ["Trident CSI 24.06.1 node plugin ready"],
+        events: ["Normal  Started  45d  kubelet  Started container trident-main"],
+      },
+      {
+        namespace: "ai-training",
+        name: "dataset-loader-7c5d9f6b4-q2x8n",
+        ready: "1/1",
+        status: "Running",
+        restarts: 0,
+        age: "45d",
+        node: "k8s-gpu-io-worker-01",
+        pvc: "pvc-llm-dataset-flexgroup-01",
+        logs: ["Mounted /mnt/trident/fg_llm_datasets (nfs4, nconnect=8)"],
+        events: ["Normal  Started  45d  kubelet  Started container loader"],
+      },
+      {
+        namespace: "ai-training",
+        name: "llm-finetune-llama4-70b-0",
+        ready: "1/1",
+        status: "Running",
+        restarts: 0,
+        age: "12d",
+        node: "k8s-gpu-io-worker-01",
+        pvc: "pvc-llm-checkpoints-02",
+        logs: ["checkpoint-step-12000 written", "p99 write latency above target on /checkpoints"],
+        events: ["Normal  Started  12d  kubelet  Started container trainer"],
+      },
+      {
+        namespace: "prod-db",
+        name: "postgresql-ha-0",
+        ready: "1/1",
+        status: "Running",
+        restarts: 0,
+        age: "94d",
+        node: "k8s-gpu-io-worker-01",
+        pvc: "data-postgresql-ha-0",
+        logs: ["database system is ready to accept connections"],
+        events: ["Normal  Started  94d  kubelet  Started container postgresql"],
+      },
+    ],
+    pvcs: [
+      { namespace: "ai-training", name: "pvc-llm-dataset-flexgroup-01", status: "Bound", volume: "pvc-1192a8c0-ontap-fg", capacity: "80Ti", accessModes: "RWX", storageClass: "ontap-flexgroup-ai", age: "45d" },
+      { namespace: "ai-training", name: "pvc-llm-checkpoints-02", status: "Bound", volume: "pvc-8f92a1b0-ontap-san", capacity: "4Ti", accessModes: "RWO", storageClass: "ontap-san-nvme", age: "12d" },
+      { namespace: "prod-db", name: "data-postgresql-ha-0", status: "Bound", volume: "pvc-4401b2d9-ontap-san", capacity: "12Ti", accessModes: "RWO", storageClass: "ontap-san-nvme", age: "94d" },
+    ],
+    storageClasses: [
+      { name: "ontap-flexgroup-ai", provisioner: "csi.trident.netapp.io", reclaimPolicy: "Retain", bindingMode: "Immediate" },
+      { name: "ontap-nas-premium", provisioner: "csi.trident.netapp.io", reclaimPolicy: "Retain", bindingMode: "Immediate" },
+      { name: "ontap-san-nvme", provisioner: "csi.trident.netapp.io", reclaimPolicy: "Retain", bindingMode: "WaitForFirstConsumer" },
+    ],
+    events: [{ namespace: "ai-training", lastSeen: "12m", type: "Normal", reason: "SuccessfulMountVolume", object: "pod/llm-finetune-llama4-70b-0", message: "MountVolume.SetUp succeeded for volume pvc-8f92a1b0-ontap-san" }],
+    tridentBackends: [
+      { name: "tbc-ontap-nas-premium", driver: "ontap-nas", svm: "svm-prod-nfs", state: "online", volumes: 38 },
+      { name: "tbc-ontap-nas-flexgroup-ai", driver: "ontap-nas-flexgroup", svm: "svm-prod-nfs", state: "online", volumes: 14 },
+      { name: "tbc-ontap-san-nvme-iscsi", driver: "ontap-san", svm: "svm-prod-iscsi", state: "online", volumes: 27 },
+    ],
+    tridentVolumes: [
+      { name: "pvc-1192a8c0-ontap-fg", size: "80Ti", storageClass: "ontap-flexgroup-ai", state: "online", protocol: "file", backend: "tbc-ontap-nas-flexgroup-ai", exportPolicy: "trident_k8s_prod" },
+      { name: "pvc-8f92a1b0-ontap-san", size: "4Ti", storageClass: "ontap-san-nvme", state: "online", protocol: "block", backend: "tbc-ontap-san-nvme-iscsi" },
+      { name: "pvc-4401b2d9-ontap-san", size: "12Ti", storageClass: "ontap-san-nvme", state: "online", protocol: "block", backend: "tbc-ontap-san-nvme-iscsi" },
+    ],
+  };
+  // The LUN both nodes see. The control plane follows the team's standard; the GPU worker does not, which is
+  // the showcase's finding. Under multibus the paths that are not optimized carry I/O too, and the lab's
+  // multipath (programs/k8s.ts) shows them as faulty until the policy is group_by_prio and the maps are reloaded.
+  const multipath = (policy: SimMultipathState["pathGroupingPolicy"]): SimMultipathState => ({
+    device: "mpatha",
+    wwid: "3600a0980383146525a2b516a4b38724d",
+    vendor: "NETAPP,LUN C-Mode",
+    size: "4.0T",
+    pathGroupingPolicy: policy,
+    paths: [
+      { dev: "sdb", state: "active ready running", prio: 50 },
+      { dev: "sdc", state: "active ready running", prio: 50 },
+      { dev: "sdd", state: policy === "group_by_prio" ? "enabled ready running" : "active faulty running", prio: 10 },
+      { dev: "sde", state: policy === "group_by_prio" ? "enabled ready running" : "active faulty running", prio: 10 },
+    ],
+  });
 
   // 1. Kubernetes control plane + Trident CSI
   const k8sCp = world.addHost(
@@ -44,58 +160,11 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
   k8sCp.packages = { "kubelet": "1.31.2-1.1", "kubectl": "1.31.2-1.1", "containerd.io": "1.7.22-1" };
   k8sCp.addService({ name: "kubelet", description: "Kubernetes Kubelet", ports: [{ proto: "tcp", port: 10250 }], command: "/usr/bin/kubelet" });
   k8sCp.addService({ name: "kube-apiserver", description: "Kubernetes API Server", ports: [{ proto: "tcp", port: 6443 }], command: "/usr/bin/kube-apiserver" });
+  k8sCp.addService({ name: "multipathd", description: "Device-Mapper Multipath Device Controller", command: "/sbin/multipathd -d -s" });
   k8sCp.write("/etc/kubernetes/admin.conf", "apiVersion: v1\nkind: Config\ncurrent-context: k8s-trident-prod\n");
-  k8sCp.write("/var/log/trident/trident-controller.log", `${new Date(now - 600_000).toISOString()} level=info msg="Trident backend ontap-nas-prod online"\n`);
-  k8sCp.facts.set("k8s", {
-    nodes: [
-      { name: "k8s-storage-cp-01", status: "Ready", roles: "control-plane", age: "94d", version: "v1.31.2" },
-      { name: "k8s-gpu-io-worker-01", status: "Ready", roles: "worker", age: "94d", version: "v1.31.2" },
-    ],
-    pods: [
-      {
-        namespace: "trident",
-        name: "trident-controller-7c9d4b8c5-x2p9k",
-        ready: "6/6",
-        status: "Running",
-        restarts: 0,
-        age: "14d",
-        node: "k8s-storage-cp-01",
-        logs: ["Trident CSI 24.06 controller ready", "Connected to ONTAP SVM svm-prod-nfs (10.30.10.11)"],
-        events: ["Normal  Started  14d  kubelet  Started container trident-main"],
-      },
-      {
-        namespace: "prod",
-        name: "orders-api-6d4f8b9c7-k9m2p",
-        ready: "1/1",
-        status: "Running",
-        restarts: 0,
-        age: "6d",
-        node: "k8s-gpu-io-worker-01",
-        pvc: "orders-data-pvc",
-        logs: ["Listening on :8080", "Connected to PostgreSQL and ONTAP NFS volume"],
-        events: ["Normal  Started  6d  kubelet  Started container orders-api"],
-      },
-    ],
-    pvcs: [
-      {
-        namespace: "prod",
-        name: "orders-data-pvc",
-        status: "Bound",
-        volume: "pvc-8f2a109c",
-        capacity: "500Gi",
-        accessModes: "RWX",
-        storageClass: "ontap-nas-prod",
-        age: "42d",
-      },
-    ],
-    storageClasses: [
-      { name: "ontap-nas-prod", provisioner: "csi.trident.netapp.io", reclaimPolicy: "Retain", bindingMode: "Immediate" },
-      { name: "ontap-san-nvme", provisioner: "csi.trident.netapp.io", reclaimPolicy: "Retain", bindingMode: "WaitForFirstConsumer" },
-    ],
-    events: [{ namespace: "prod", lastSeen: "12m", type: "Normal", reason: "SuccessfulMountVolume", object: "pod/orders-api-6d4f8b9c7-k9m2p", message: "MountVolume.SetUp succeeded for volume pvc-8f2a109c" }],
-    tridentBackends: [{ name: "ontap-nas-prod", driver: "ontap-nas", svm: "svm-prod-nfs", state: "online", volumes: 18 }],
-    tridentVolumes: [{ name: "pvc-8f2a109c", size: "500Gi", storageClass: "ontap-nas-prod", state: "online", protocol: "file", backend: "ontap-nas-prod", exportPolicy: "trident_k8s_prod" }],
-  } satisfies SimK8sState);
+  k8sCp.write("/var/log/trident/trident-controller.log", `${new Date(now - 600_000).toISOString()} level=info msg="Trident backend tbc-ontap-nas-premium online"\n`);
+  k8sCp.facts.set("k8s", k8s);
+  k8sCp.facts.set("multipath", multipath("group_by_prio"));
 
   // 2. Kubernetes GPU/IO Worker
   const k8sWorker = world.addHost(
@@ -116,43 +185,30 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
     { mount: "/", device: "/dev/nvme0n1p2", fs: "ext4", sizeKb: 400 * 1024 * 1024, baseUsedKb: 84 * 1024 * 1024 },
     { mount: "/var/lib/kubelet", device: "/dev/nvme1n1", fs: "xfs", sizeKb: 1000 * 1024 * 1024, baseUsedKb: 210 * 1024 * 1024 },
   ];
+  k8sWorker.packages = { "kubelet": "1.31.2-1.1", "kubectl": "1.31.2-1.1", "containerd.io": "1.7.22-1" };
   k8sWorker.addService({ name: "kubelet", description: "Kubernetes Kubelet", ports: [{ proto: "tcp", port: 10250 }], command: "/usr/bin/kubelet" });
   k8sWorker.addService({ name: "multipathd", description: "Device-Mapper Multipath Device Controller", command: "/sbin/multipathd -d -s" });
-  k8sWorker.write("/etc/multipath.conf", "defaults {\n    user_friendly_names yes\n    path_grouping_policy group_by_prio\n    prio alua\n}\n");
-  k8sWorker.facts.set("multipath", {
-    device: "mpatha",
-    wwid: "3600a09803831456b722b524f31426631",
-    vendor: "NETAPP,LUN C-Mode",
-    size: "2.0T",
-    pathGroupingPolicy: "group_by_prio",
-    paths: [
-      { dev: "sda", state: "active ready running", prio: 50 },
-      { dev: "sdb", state: "enabled ready running", prio: 10 },
-    ],
-  } satisfies SimMultipathState);
+  k8sWorker.facts.set("k8s", k8s);
+  k8sWorker.facts.set("multipath", multipath("multibus"));
 
   // 3. NetApp ONTAP AFF A800 Node A
   const ontapA = world.addHost(
-    { name: "netapp-aff-a800-01a", address: "10.30.10.11", user: "admin", kind: "ontap" },
+    { name: "netapp-aff-a800-01a", address: "10.30.10.11", user: "admin", kind: "ontap", os: { id: "ontap", version: "9.15.1P2", pretty: "NetApp Release 9.15.1P2" }, uptimeSeconds: 148 * 86_400 },
     "demo-netapp-aff-a800-01a",
   );
   ontapA.only = {
-    commands: new Set(["vserver", "volume", "vol", "qos", "cluster", "storage"]),
-    unknown: (name) => `Error: "${name}" is not a recognized command\n`,
+    commands: new Set(SHOWCASE_ONTAP_COMMANDS),
+    unknown: (name) => `Error: "${name}" is not a recognized command`,
   };
-  ontapA.facts.set("ontap", {
-    clusterName: "NetApp-ONTAP-Prod-SE",
-    version: "ONTAP 9.15.1",
-    nodes: ["netapp-aff-a800-01a", "netapp-aff-a800-01b"],
-    volumes: [
-      { vserver: "svm-prod-iscsi", name: "vol_pg_prod_01", aggregate: "aggr1_nvme_prod", state: "online", sizeGb: 4096, usedPct: 62, exportPolicy: "default", qosPolicyGroup: "pg-prod-db-extreme", latencyMs: 0.34 },
-      { vserver: "svm-prod-nfs", name: "vol_k8s_pvc_prod", aggregate: "aggr1_nvme_prod", state: "online", sizeGb: 8192, usedPct: 54, exportPolicy: "trident_k8s_prod", qosPolicyGroup: "pg-k8s-prod", latencyMs: 0.47 },
-      { vserver: "svm-prod-iscsi", name: "vol_analytics_scratch", aggregate: "aggr2_nvme_db", state: "online", sizeGb: 2048, usedPct: 48, exportPolicy: "default", qosPolicyGroup: "pg-batch-ceiling", latencyMs: 1.15 },
-    ],
-    exportRules: [
-      { vserver: "svm-prod-nfs", policy: "trident_k8s_prod", ruleIndex: 1, clientMatch: "10.30.50.0/24", roRule: "sys", rwRule: "sys", superuser: "sys" },
-    ],
-  } satisfies OntapClusterState);
+  ontapA.facts.set("ontap", showcaseOntapState());
+  ontapA.facts.set(
+    "motd",
+    [
+      "NetApp ONTAP 9.15.1P2 cluster shell: netapp-aff-a800-01a (10.30.10.11)",
+      "Cluster: NetApp-ONTAP-Prod-SE. HA partner: netapp-aff-a800-01b.",
+      "Commands here: qos statistics volume latency show, volume show, storage aggregate show, storage failover show, snapmirror show, vserver show, cluster show, help.",
+    ].join("\n"),
+  );
 
   // 4. StorageGRID Gateway
   const sgAdmin = world.addHost(
@@ -173,6 +229,7 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
   sgAdmin.addService({ name: "storagegrid-lb", description: "StorageGRID S3 Load Balancer", ports: [{ proto: "tcp", port: 10443 }], command: "/usr/sbin/storagegrid-lb" });
   sgAdmin.certs.set("/etc/ssl/certs/s3-dc1.pem", { subject: "CN=s3-dc1.storage.acme.se", issuer: "CN=Acme Internal CA", notBefore: now - 60 * DAY, notAfter: now + 180 * DAY, names: ["s3-dc1.storage.acme.se"] });
   sgAdmin.write("/etc/ssl/certs/s3-dc1.pem", "-----BEGIN CERTIFICATE-----\nSIMULATED-SG-CERT\n-----END CERTIFICATE-----\n");
+  sgAdmin.facts.set("showcase-storagegrid", true);
 
   // 5. Ceph Monitor / Manager
   const cephMon = world.addHost(
@@ -188,7 +245,7 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
   );
   cephMon.disks = [{ mount: "/", device: "/dev/nvme0n1p2", fs: "ext4", sizeKb: 250 * 1024 * 1024, baseUsedKb: 58 * 1024 * 1024 }];
   cephMon.addService({ name: "ceph-mon", description: "Ceph cluster monitor daemon", ports: [{ proto: "tcp", port: 3300 }], command: "/usr/bin/ceph-mon -f" });
-  cephMon.write("/etc/ceph/ceph.conf", "[global]\nfsid = 4b8e2f0a-91d4-4c6e-a123-90e4b1c8d771\nmon_host = 10.30.40.10\n");
+  cephMon.facts.set("showcase-ceph", true);
 
   // 6. Monitoring / ActiveIQ Harvest Host
   const aiq = world.addHost(
@@ -208,6 +265,8 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
   aiq.disks = [{ mount: "/", device: "/dev/sda2", fs: "ext4", sizeKb: 200 * 1024 * 1024, baseUsedKb: 64 * 1024 * 1024 }];
   aiq.addService({ name: "prometheus", description: "Prometheus Monitoring Server", ports: [{ proto: "tcp", port: 9090 }], command: "/usr/bin/prometheus" });
   aiq.addService({ name: "grafana-server", description: "Grafana Dashboard Server", ports: [{ proto: "tcp", port: 3000 }], command: "/usr/sbin/grafana-server" });
+  // Listed in the ONTAP cluster: what is run on every node of that cluster is answered here too.
+  aiq.facts.set("showcase-ontap", true);
 
   // 7. SAN Bastion Jump Host
   const bastion = world.addHost(
@@ -228,20 +287,30 @@ export function buildBaseFleet(clock?: () => number): SimWorld {
   bastion.addService({ name: "sshd", description: "OpenBSD Secure Shell server", ports: [{ proto: "tcp", port: 22 }], command: "/usr/sbin/sshd -D" });
   bastion.write("/home/jacob/README.txt", "Demo lab jump host. Use ssh <host> '<cmd>' to inspect other simulated servers in this lab.\n");
 
+  // The showcase's own files, the ones its scripted servers show in the file manager: on the worker
+  // /etc/multipath.conf says multibus, on the others group_by_prio.
+  for (const host of world.hosts.values()) writeShowcaseFiles(host);
+
   world.building = false;
   for (const host of world.hosts.values()) host.settingUp = false;
   world.settle();
   return world;
 }
 
+function writeShowcaseFiles(host: SimHost): void {
+  for (const file of demoServerFiles(host.name)) host.write(file.path, `${file.content}\n`, { mode: file.permissions?.includes("x") ? 0o755 : 0o644 });
+}
+
 /**
- * Ensures the process-wide SimWorld has at least the stateful base fleet loaded
- * when no scenario is active. Does not overwrite an already-populated SimWorld.
+ * Puts the base fleet in place when it is not there yet, and gives it back. It is built once for the
+ * process and keeps its state from then on: an incident's lab comes and goes in front of it. Without
+ * the fleet (a test switched it off) the lab is given back as it stands.
  */
 export function ensureBaseFleet(): SimWorld {
-  const current = simWorld();
-  if (current.hosts.size > 0) return current;
+  if (!baseFleetWanted()) return simWorld();
+  const there = baseWorld();
+  if (there) return there;
   const fleet = buildBaseFleet();
-  setSimWorld(fleet);
+  setBaseWorld(fleet);
   return fleet;
 }

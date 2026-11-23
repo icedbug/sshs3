@@ -109,9 +109,17 @@ const kubectl: SimCommand = (ctx, args) => {
   if (sub === "get") {
     const kind = (rest[1] ?? "").toLowerCase();
     const targetName = rest[2];
+    if (kind.includes(",")) {
+      // Several kinds at once (`get sc,pvc`): each list in turn, with a blank line between, as kubectl prints them.
+      const parts = kind.split(",").filter(Boolean).map((one) => kubectl(ctx, args.map((a) => (a === rest[1] ? one : a))));
+      return parts.find((p) => p.code !== 0) ?? ok(parts.map((p) => p.out).join("\n"));
+    }
     if (kind === "pods" || kind === "pod" || kind === "po") {
-      const pods = state.pods.filter((p) => !p.deleted && (!ns || p.namespace === ns) && (!targetName || p.name === targetName));
+      // `--field-selector=status.phase!=Running`: the pods that are not running, which is what it is asked for.
+      const notRunning = /status\.phase!=Running/.test(values.get("field-selector") ?? "");
+      const pods = state.pods.filter((p) => !p.deleted && (!ns || p.namespace === ns) && (!targetName || p.name === targetName) && (!notRunning || p.status !== "Running"));
       if (targetName && !pods.length) return fail(`Error from server (NotFound): pods "${targetName}" not found\n`, 1);
+      if (notRunning && !pods.length) return ok("No resources found\n");
       if (values.get("o") === "json" || values.get("output") === "json") return ok(`${JSON.stringify({ items: pods }, null, 2)}\n`);
       const head = allNs ? ["NAMESPACE", "NAME", "READY", "STATUS", "RESTARTS", "AGE", "NODE"] : ["NAME", "READY", "STATUS", "RESTARTS", "AGE"];
       const rows = pods.map((p) => (allNs ? [p.namespace, p.name, p.ready, p.status, String(p.restarts), p.age, p.node] : [p.name, p.ready, p.status, String(p.restarts), p.age]));
@@ -138,6 +146,15 @@ const kubectl: SimCommand = (ctx, args) => {
     if (kind === "sc" || kind === "storageclass" || kind === "storageclasses") {
       const head = ["NAME", "PROVISIONER", "RECLAIMPOLICY", "VOLUMEBINDINGMODE"];
       return ok(formatTable([head, ...state.storageClasses.map((s) => [s.name, s.provisioner, s.reclaimPolicy, s.bindingMode])]));
+    }
+    if (kind === "volumeattachment" || kind === "volumeattachments") {
+      // One for each volume a pod uses, on the node the pod is on: attached once the pod runs. They belong to no namespace.
+      const rows = state.pods.flatMap((p) => {
+        const pvc = p.deleted || !p.pvc ? undefined : state.pvcs.find((c) => c.name === p.pvc && c.namespace === p.namespace && !c.forceDeleted);
+        return pvc ? [[`csi-${pvc.volume.replace(/[^a-z0-9]/g, "").slice(0, 16)}`, "csi.trident.netapp.io", pvc.volume, p.node, String(p.status === "Running"), p.age]] : [];
+      });
+      if (!rows.length) return ok("No resources found\n");
+      return ok(formatTable([["NAME", "ATTACHER", "PV", "NODE", "ATTACHED", "AGE"], ...rows]));
     }
     throw new NotSimulated(`kubectl get ${kind}`);
   }

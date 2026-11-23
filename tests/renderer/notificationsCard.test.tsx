@@ -39,6 +39,24 @@ describe("notification channels", () => {
     await waitFor(() => expect(within(row).getByRole("status")).toHaveTextContent("Not delivered: The channel answered 404"));
   });
 
+  it("says in the demo lab that nothing was sent, and shows no delivery", async () => {
+    const demo = (): HubSnapshot => {
+      const snap = hub({ demoMode: true });
+      // The demo lab keeps no delivery on a channel.
+      delete (snap.notifications!.channels[0] as { last?: unknown }).last;
+      return snap;
+    };
+    const act = vi.fn(async (request: HubRequest) => ({ ...demo(), reply: request.action === "notify-channel-test" ? { notifyTest: { ok: false, error: "Demo: nothing is sent from the demo lab." } } : undefined }) as HubSnapshot);
+    render(<NotificationsCard hub={demo()} act={act} />);
+    const row = screen.getByTestId("notify-channel-c1");
+    fireEvent.click(within(row).getByRole("button", { name: "Send a test" }));
+    await waitFor(() => expect(within(row).getByRole("status")).toHaveTextContent("Demo: nothing is sent from the demo lab."));
+    expect(within(row).getByRole("status").textContent).toBe("Demo: nothing is sent from the demo lab.");
+    expect(row).not.toHaveTextContent("Arrived");
+    expect(row).not.toHaveTextContent("Not delivered");
+    expect(row).not.toHaveTextContent("last delivered");
+  });
+
   it("adds a channel with its address, and keeps the address when an existing one is edited", async () => {
     const act = vi.fn(async () => hub());
     render(<NotificationsCard hub={hub()} act={act} />);

@@ -270,44 +270,86 @@ export function createFifo(dir: string): Promise<string> {
   });
 }
 
-/** Reads everything written to `fifoPath` by its one expected writer, resolving once that
- * writer closes its end (EOF). */
-export function readFifoOnce(fifoPath: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    const stream = fs.createReadStream(fifoPath);
-    stream.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
-}
-
 /**
- * Lets a reader that is still waiting for a writer give up. `readFifoOnce` opens the FIFO for reading, and that open()
- * blocks one of libuv's four threadpool threads until some writer opens the other end. If `age` fails before it opens
- * `-o <fifo>` (wrong PIN, bad identity, cancelled), no writer ever comes: removing the FIFO does not wake the reader, the
- * thread stays blocked for the life of the process, and after four such failures every async fs call in the app hangs.
- * Opening the write end without writing a byte releases the reader, which then sees end-of-file. It does nothing when no
- * reader is waiting (ENXIO) or the FIFO is already gone, and it runs on the calling thread (O_NONBLOCK) so it cannot
- * itself get stuck behind a starved threadpool.
+ * Opens a FIFO as the channel `age` writes its output through, with both ends held by this process
+ * from the moment this returns.
+ *
+ * `age` opens its `-o` target read-write (Go's `os.Create`), and a FIFO opened read-write never waits
+ * for a reader: `age` opens it, writes, closes and exits, whoever is or is not listening. A FIFO that
+ * nobody has open keeps nothing. So if the reader's open() has not reached the kernel by the time
+ * `age` closes, what `age` wrote is gone, `age` has exited with 0, and the reader then waits for a
+ * writer that never comes. That is what happened here once in a while: the reader used to be opened
+ * through Node's file streams, whose open() waits its turn in libuv's four-thread pool, and on a busy
+ * machine `age` could finish first.
+ *
+ * So the read end is opened here, on the calling thread, before `age` exists (non-blocking: such an
+ * open does not wait for a writer). The pipe then holds what `age` writes until it is read. It is read
+ * as a socket, by the event loop, not through the thread pool: nothing can be queued behind other
+ * work, a payload larger than the pipe's buffer is drained while `age` writes it, and no pool thread is
+ * left blocked when a run fails before `age` writes anything.
+ *
+ * A write end is held too, until the output is asked for. With no writer at all a reader is at
+ * end-of-file, on some systems before a first writer ever came and on all of them between two writers,
+ * and `age` may open the target more than once. Holding a writer keeps the reader waiting until this
+ * process says that `age` is done.
  */
-export function releaseFifoReader(fifoPath: string): void {
+function openFifoChannel(fifoPath: string): SecretOutputChannel {
+  const readFd = fs.openSync(fifoPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  let heldWriteFd: number | undefined;
   try {
-    const fd = fs.openSync(fifoPath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
-    fs.closeSync(fd);
-  } catch {
-    // ENXIO: nobody is waiting (the reader already finished). ENOENT: already removed.
+    heldWriteFd = fs.openSync(fifoPath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    fs.closeSync(readFd);
+    throw err;
   }
+  const releaseWriter = (): void => {
+    if (heldWriteFd === undefined) return;
+    fs.closeSync(heldWriteFd);
+    heldWriteFd = undefined;
+  };
+
+  const reader = new net.Socket({ fd: readFd, readable: true, writable: false });
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const output = new Promise<Buffer>((resolve, reject) => {
+    reader.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_OUTPUT_BYTES) {
+        reader.destroy(new Error(`"age" produced too much output (over ${MAX_OUTPUT_BYTES} bytes), aborting`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    reader.on('end', () => resolve(Buffer.concat(chunks)));
+    reader.on('error', reject);
+    // Closed without an end: the channel was torn down while it still waited.
+    reader.on('close', () => reject(new Error('Secret output channel was closed before any data arrived')));
+  });
+  // A failed run never calls read(), so don't let this surface as an unhandled rejection.
+  output.catch(() => {});
+
+  return {
+    path: fifoPath,
+    read: () => {
+      // `age` has finished: with our writer gone too, the reader gets what is in the pipe and then its end.
+      releaseWriter();
+      return output;
+    },
+    dispose: async () => {
+      releaseWriter();
+      reader.destroy();
+      await removeFifo(fifoPath);
+    },
+  };
 }
 
-// After `age` has exited successfully, its output is already in the FIFO. If the reader still has nothing after this
-// long, `age` did not deliver it (seen once in a while on a heavily loaded machine: `age` exits 0 but the reader's open()
-// never completes) and waiting longer only freezes the unlock.
+// After `age` has exited successfully, its output is already in the channel, and reading it takes no time worth
+// naming. This is how long a read may still take before it is given up: waiting longer only freezes the unlock.
 export const CHANNEL_GRACE_MS = 5000;
 
 /**
- * `channel.read()`, but bounded: rejects with a clear error instead of waiting forever when `age` finished without
- * delivering its output. The caller's `dispose()` then releases the blocked reader.
+ * `channel.read()`, but bounded, and never empty: rejects with a clear error instead of waiting forever, or handing
+ * back nothing, when `age` finished without delivering its output.
  */
 export async function readChannelAfterExit(channel: SecretOutputChannel, graceMs: number = CHANNEL_GRACE_MS): Promise<Buffer> {
   let timer: NodeJS.Timeout | undefined;
@@ -315,7 +357,9 @@ export async function readChannelAfterExit(channel: SecretOutputChannel, graceMs
     timer = setTimeout(() => reject(new Error('"age" finished but wrote no output')), graceMs);
   });
   try {
-    return await Promise.race([channel.read(), giveUp]);
+    const output = await Promise.race([channel.read(), giveUp]);
+    if (output.length === 0) throw new Error('"age" finished but wrote no output');
+    return output;
   } finally {
     clearTimeout(timer);
   }
@@ -332,9 +376,9 @@ export async function removeFifo(fifoPath: string): Promise<void> {
 
 /**
  * A one-shot, never-on-disk channel for a secret that `age` writes with `-o <path>`: a FIFO on
- * Linux/macOS, a named pipe on Windows, where `mkfifo` doesn't exist. Listening/reading starts
- * immediately — `age` blocks opening a FIFO until a reader is there — so create the channel
- * BEFORE spawning `age`, then call `read()` once it has exited.
+ * Linux/macOS, a named pipe on Windows, where `mkfifo` doesn't exist. The channel listens from the
+ * moment it is made. `age` does not wait for a listener (see `openFifoChannel`), so create the
+ * channel BEFORE spawning `age`, then call `read()` once it has exited.
  */
 export interface SecretOutputChannel {
   /** The path to hand `age` as `-o`. */
@@ -360,17 +404,12 @@ function windowsPipePath(name: string): string {
 export async function createSecretOutputChannel(dir: string): Promise<SecretOutputChannel> {
   if (process.platform !== 'win32') {
     const fifoPath = await createFifo(dir);
-    const readPromise = readFifoOnce(fifoPath);
-    // A failed run never calls read(), so don't let this surface as an unhandled rejection.
-    readPromise.catch(() => {});
-    return {
-      path: fifoPath,
-      read: () => readPromise,
-      dispose: async () => {
-        releaseFifoReader(fifoPath);
-        await removeFifo(fifoPath);
-      },
-    };
+    try {
+      return openFifoChannel(fifoPath);
+    } catch (err) {
+      await removeFifo(fifoPath).catch(() => {});
+      throw err;
+    }
   }
 
   const pipePath = windowsPipePath(`sshs3-${crypto.randomUUID()}`);

@@ -24,6 +24,9 @@ import { log } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
+/** What "Send a test" answers in the demo lab, where nothing is sent to a channel. */
+const DEMO_NOTHING_SENT = "Demo: nothing is sent from the demo lab.";
+
 /**
  * The inbox and what is sent out of it.
  *
@@ -360,15 +363,13 @@ export class InboxPart {
           { inboxLink: link },
         );
         if (isDemoMode()) {
-          const preview = clip(rendered.body || rendered.url, 180);
-          const result = {
-            ok: true,
-            status: 200,
-            error: `Demo lab (simulated): nothing was sent over the network. Preview: ${preview}`,
-          };
-          channel.last = { at: Date.now(), ...result };
-          await this.notifyStore.save();
-          reply = { notifyTest: result, notes: [result.error] };
+          // The demo lab sends nothing. The answer says so and is not a delivery: none is kept on the channel,
+          // and one an earlier version kept there from a made-up test is taken off.
+          if (channel.last) {
+            channel.last = undefined;
+            await this.notifyStore.save();
+          }
+          reply = { notifyTest: { ok: false, error: DEMO_NOTHING_SENT } };
           break;
         }
         const result = await deliver(rendered, this.outboundGuard(), { waits: [] });

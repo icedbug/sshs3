@@ -135,7 +135,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     // A home folder per test file: no test reads or writes the real one (see the file).
-    setupFiles: ['tests/setup/isolateHome.ts'],
+    // And a demo lab of its own per test: no test starts with the simulated servers an earlier one left.
+    setupFiles: ['tests/setup/isolateHome.ts', 'tests/setup/freshLab.ts'],
     globalSetup: ['tests/setup/homeRoot.ts'],
     coverage: {
       provider: 'v8',

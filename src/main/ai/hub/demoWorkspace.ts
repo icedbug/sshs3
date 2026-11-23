@@ -1503,10 +1503,14 @@ export function mcpCatalog(): McpCatalogPreset[] {
   return isDemoMode() ? MCP_MARKETPLACE_CATALOG : MCP_PRESETS;
 }
 
-/** Demo lab only: none of these servers exist. */
+/**
+ * Demo lab only: none of these servers exist. Each id starts with `demo-`, which is what makes a server
+ * a simulated one (demo/demoMode.ts): one that was added answers from the simulation, and its command is
+ * never started and its address never called.
+ */
 export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
   {
-    id: "preset-mcp-prometheus",
+    id: "demo-mcp-prometheus",
     name: "Prometheus & Alertmanager MCP",
     category: "observability",
     icon: "📊",
@@ -1527,7 +1531,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-grafana-loki",
+    id: "demo-mcp-grafana-loki",
     name: "Grafana Dashboards & Loki Logs MCP",
     category: "observability",
     icon: "📈",
@@ -1547,7 +1551,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-kubernetes-helm",
+    id: "demo-mcp-kubernetes-helm",
     name: "Kubernetes & Helm Official MCP",
     category: "kubernetes",
     icon: "☸️",
@@ -1568,7 +1572,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-postgres-tunnel",
+    id: "demo-mcp-postgres-tunnel",
     name: "PostgreSQL & Redis SSH-Tunnel Inspector MCP",
     category: "database",
     icon: "🐘",
@@ -1589,7 +1593,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-terraform-ansible",
+    id: "demo-mcp-terraform-ansible",
     name: "Terraform & Ansible IaC Drift MCP",
     category: "gitops",
     icon: "🏗️",
@@ -1610,7 +1614,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-github-gitops",
+    id: "demo-mcp-github-gitops",
     name: "GitHub / GitLab Infra PR & Runbook MCP",
     category: "gitops",
     icon: "🐙",
@@ -1631,7 +1635,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-trivy-falco",
+    id: "demo-mcp-trivy-falco",
     name: "Trivy CVE Scanner & Falco Runtime Security MCP",
     category: "security",
     icon: "🛡️",
@@ -1652,7 +1656,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-netbox-ipam",
+    id: "demo-mcp-netbox-ipam",
     name: "NetBox CMDB, IPAM & SAN Fabric Topology MCP",
     category: "network",
     icon: "🌐",
@@ -1672,7 +1676,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     ],
   },
   {
-    id: "preset-mcp-opentelemetry-jaeger",
+    id: "demo-mcp-opentelemetry-jaeger",
     name: "OpenTelemetry & Jaeger Distributed Tracing MCP",
     category: "observability",
     icon: "🔭",

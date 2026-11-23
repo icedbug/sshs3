@@ -4,7 +4,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app } from 'electron';
 import './ai/desktop/nativeWindow';
 import { nativeTools } from './ai/desktop/nativeTools';
-import { demoWorkspaceDir, isDemoMode } from './demo/demoMode';
+import { isDemoMode } from './demo/demoMode';
+import { nativeHermesDataDirs } from './demo/dataDir';
 
 // A detached GUI may outlive its launching shell. Closed stdio must not recurse through
 // exception loggers or freeze the main process.
@@ -23,18 +24,20 @@ if (process.env.SSHS3_FORCE_NATIVE_HERMES === '1') {
     : path.resolve(root, '../build-resources/hermes-desktop');
   const main = path.join(desktop, 'source/apps/desktop/dist/electron-main.mjs');
   if (!fs.existsSync(main)) throw new Error('Hermes Desktop has not been built. Run hermes:desktop:build first.');
-  const profileDir = process.env.SSHS3_USER_DATA_DIR || (process.env.PORTABLE_EXECUTABLE_DIR
-    ? path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data')
-    : path.join(app.getPath('appData'), 'sshs3'));
   // Demo mode (decided at launch, see ./demo/demoMode) keeps its data, Hermes' included, out of the real
-  // profile; index.ts applies the same (idempotent) redirect for the regular window.
-  const userData = isDemoMode() ? demoWorkspaceDir(profileDir) : profileDir;
+  // profile (./demo/dataDir); index.ts applies its own decision after this, which leaves the folder as it is.
+  const { userData, hermesHome } = nativeHermesDataDirs({
+    demoMode: isDemoMode(),
+    appData: app.getPath('appData'),
+    userDataOverride: process.env.SSHS3_USER_DATA_DIR,
+    portableDir: process.env.PORTABLE_EXECUTABLE_DIR,
+  });
   fs.mkdirSync(userData, { recursive: true });
   app.setPath('userData', userData);
   process.env.SSHS3_NATIVE_HERMES = '1';
   process.env.HERMES_DESKTOP_USER_DATA_DIR = userData;
   process.env.HERMES_DESKTOP_ISOLATED_BACKEND = '1';
-  process.env.HERMES_HOME = path.join(userData, 'hermes-native');
+  process.env.HERMES_HOME = hermesHome;
   process.env.HERMES_DESKTOP_HERMES_ROOT = path.join(desktop, 'source');
   const manifest = JSON.parse(fs.readFileSync(path.join(desktop, 'source-pin.json'), 'utf8')) as { commit?: string };
   if (manifest.commit !== 'f925b01791fe052e7d55dc975750c0bd985aff91') throw new Error('Hermes Desktop version does not match the host adapter.'); // pragma: allowlist secret

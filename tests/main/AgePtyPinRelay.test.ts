@@ -51,10 +51,8 @@ vi.mock('node-pty', () => {
 import {
   runAgeCommandViaPty,
   createFifo,
-  readFifoOnce,
   removeFifo,
   createSecretOutputChannel,
-  releaseFifoReader,
   readChannelAfterExit,
   stripAnsi,
   TeamVaultWrongPinError,
@@ -369,16 +367,11 @@ describe.skipIf(process.platform === 'win32')('FIFO helpers (binary-safe path fo
     await fsp.rm(tempDir, { recursive: true, force: true });
   });
 
-  it('creates a real FIFO (not a regular file), delivers writer bytes to the reader, and removes it', async () => {
+  it('creates a real FIFO (not a regular file) that only its owner may use, and removes it', async () => {
     const fifoPath = await createFifo(tempDir);
-    expect(fs.statSync(fifoPath).isFIFO()).toBe(true);
-
-    const payload = Buffer.from([0x00, 0x0a, 0x0d, 0xff, 0x41, 0x04]); // includes LF/CR/EOF-like bytes
-    const readPromise = readFifoOnce(fifoPath);
-    await fsp.writeFile(fifoPath, payload);
-
-    const result = await readPromise;
-    expect(result.equals(payload)).toBe(true);
+    const stat = fs.statSync(fifoPath);
+    expect(stat.isFIFO()).toBe(true);
+    expect(stat.mode & 0o777).toBe(0o600);
 
     await removeFifo(fifoPath);
     expect(fs.existsSync(fifoPath)).toBe(false);
@@ -404,6 +397,12 @@ describe('readChannelAfterExit', () => {
 
   it('gives up with a clear error when age finished but nothing ever arrives', async () => {
     await expect(readChannelAfterExit(channelOf(() => new Promise<Buffer>(() => undefined)), 30)).rejects.toThrow(
+      '"age" finished but wrote no output'
+    );
+  });
+
+  it('says the same when the channel ends with nothing in it, instead of handing back an empty secret', async () => {
+    await expect(readChannelAfterExit(channelOf(() => Promise.resolve(Buffer.alloc(0))), 1000)).rejects.toThrow(
       '"age" finished but wrote no output'
     );
   });
@@ -449,30 +448,90 @@ describe('createSecretOutputChannel', () => {
     expect(fs.existsSync(channel.path)).toBe(false);
   });
 
-  // A failed `age` run never opens the FIFO for writing. The reader's blocking open() then holds one of libuv's four
-  // threadpool threads forever unless dispose() releases it; four failures used to hang every async fs call.
+  // What `age` does with `-o <fifo>`: Go's os.Create opens it read-write, which never waits for a reader, then it
+  // writes, closes and exits. A FIFO nobody has open keeps nothing, so a reader that is not there yet loses it all.
+  const writeAsAgeDoes = (fifoPath: string, bytes: Buffer): void => {
+    const fd = fs.openSync(fifoPath, fs.constants.O_RDWR);
+    fs.writeSync(fd, bytes);
+    fs.closeSync(fd);
+  };
+
+  // The failure that was retried for a long time: `age` exited with 0 and the unlock said "wrote no output". The
+  // reader was opened through libuv's thread pool, and when the pool was busy `age` had come and gone before the
+  // open() reached the kernel. Here every thread of the pool is kept busy to make that the certain order of things.
   it.skipIf(process.platform === 'win32')(
-    'on POSIX dispose releases a reader that never got a writer, so failed runs do not exhaust the threadpool',
+    'on POSIX keeps what age wrote though age came and went while the thread pool was busy',
     async () => {
-      // One failed run after another, as in the app: each reader is blocked in open() when its run "fails" and the
-      // channel is disposed. Without the release the fifth iteration would hang (all four threads blocked).
+      const cryptoModule = await import('node:crypto');
+      let busyDone = 0;
+      const busy = Array.from(
+        { length: 4 },
+        () =>
+          new Promise<void>((resolve) =>
+            cryptoModule.pbkdf2('a', 'salt', 1_500_000, 64, 'sha512', () => {
+              busyDone++;
+              resolve();
+            })
+          )
+      );
+      const channel = await createSecretOutputChannel(os.tmpdir());
+      writeAsAgeDoes(channel.path, payload);
+      const read = await readChannelAfterExit(channel, 3000);
+      // It was read while the pool was still busy: nothing about the channel waits its turn there.
+      expect(busyDone).toBeLessThan(4);
+      expect(read.equals(payload)).toBe(true);
+      await channel.dispose();
+      await Promise.all(busy);
+    },
+    30000
+  );
+
+  it.skipIf(process.platform === 'win32')('on POSIX is not at its end when a writer opens the target, closes it and comes back', async () => {
+    const channel = await createSecretOutputChannel(os.tmpdir());
+    // A first open that writes nothing (newer versions of age look at the target before they write to it).
+    writeAsAgeDoes(channel.path, Buffer.alloc(0));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    writeAsAgeDoes(channel.path, payload);
+    expect((await readChannelAfterExit(channel, 2000)).equals(payload)).toBe(true);
+    await channel.dispose();
+  });
+
+  it.skipIf(process.platform === 'win32')('on POSIX drains more than a pipe holds while the writer is still writing', async () => {
+    const { execFile } = await import('node:child_process');
+    const channel = await createSecretOutputChannel(os.tmpdir());
+    // 300 kB through a 64 kB pipe: the writer can only finish if the channel reads while it writes.
+    const script = "const fs = require('node:fs'); const fd = fs.openSync(process.argv[1], fs.constants.O_RDWR); fs.writeSync(fd, Buffer.alloc(300000, 7)); fs.closeSync(fd);";
+    await new Promise<void>((resolve, reject) => execFile(process.execPath, ['-e', script, channel.path], { timeout: 10000 }, (err) => (err ? reject(err) : resolve())));
+    const read = await readChannelAfterExit(channel, 2000);
+    expect(read.length).toBe(300000);
+    expect(read.every((b) => b === 7)).toBe(true);
+    await channel.dispose();
+  }, 20000);
+
+  // A failed `age` run never writes to the FIFO. Nothing of the channel sits in libuv's thread pool, so however many
+  // runs fail, the pool still serves the app. (The reader once blocked a pool thread in open() for every failed run.)
+  it.skipIf(process.platform === 'win32')(
+    'on POSIX a run that wrote nothing ends with nothing, leaves no FIFO behind and holds no pool thread',
+    async () => {
       for (let i = 0; i < 8; i++) {
         const channel = await createSecretOutputChannel(os.tmpdir());
-        const read = channel.read();
-        await new Promise((resolve) => setTimeout(resolve, 40)); // let the reader reach its blocking open()
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await expect(readChannelAfterExit(channel, 1000)).rejects.toThrow('"age" finished but wrote no output');
         await channel.dispose();
-        expect((await read).length).toBe(0);
+        expect(fs.existsSync(channel.path)).toBe(false);
+        // Safe to call more than once.
+        await channel.dispose();
       }
-      // The threadpool still serves other fs work.
-      await expect(fsp.readFile(__filename, 'utf-8')).resolves.toContain('releaseFifoReader');
+      // And a run that is given up without ever asking for the output.
+      for (let i = 0; i < 8; i++) {
+        const channel = await createSecretOutputChannel(os.tmpdir());
+        await channel.dispose();
+        expect(fs.existsSync(channel.path)).toBe(false);
+        await expect(channel.read()).rejects.toThrow('closed before any data arrived');
+      }
+      // The thread pool still serves other fs work.
+      await expect(fsp.readFile(__filename, 'utf-8')).resolves.toContain('holds no pool thread');
     },
     10000
   );
-
-  it.skipIf(process.platform === 'win32')('releaseFifoReader does nothing for a missing path or a FIFO without a waiting reader', async () => {
-    expect(() => releaseFifoReader(path.join(os.tmpdir(), 'no-such.fifo'))).not.toThrow();
-    const fifoPath = await createFifo(os.tmpdir());
-    expect(() => releaseFifoReader(fifoPath)).not.toThrow();
-    await removeFifo(fifoPath);
-  });
 });

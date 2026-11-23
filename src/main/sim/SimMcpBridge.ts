@@ -4,9 +4,16 @@ import { ontapStateOf } from "./programs/storage";
 import { simWorld } from "./SimWorld";
 
 /**
- * Stateful simulated MCP bridge for demo MCP servers.
- * Derives live metrics, topology, alerts, and storage state from `simWorld()`
- * whenever simulated hosts exist, and marks every response clearly as simulated.
+ * What the demo's MCP servers answer, read from the simulated servers as they stand.
+ *
+ * The demo's MCP servers are the two that come with the demo workspace and the ones its catalog offers
+ * (ai/hub/demoWorkspace.ts: `demo-mcp-netapp-harvest`, `demo-mcp-prometheus`, `demo-mcp-grafana-loki`,
+ * `demo-mcp-kubernetes-helm`, `demo-mcp-netbox-ipam` and the rest). A tool is found here by the name its
+ * server lists, so a tool answers the same whichever demo server offers it. Every answer says
+ * `simulated: true`. A tool the lab has nothing to read from for gets no answer here (undefined), and the
+ * caller gives a scripted one.
+ *
+ * Nothing here starts a program or calls an address.
  */
 export function querySimMcpTool(
   toolName: string,
@@ -14,120 +21,73 @@ export function querySimMcpTool(
   serverId?: string,
 ): string | undefined {
   const world = simWorld();
-  const hosts = [...world.hosts.values()];
+  const hosts = world.everyHost();
   const scenario = runningScenario();
   const score = scoreRunning();
   const nowIso = new Date(world.now()).toISOString();
+  const answer = (body: Record<string, unknown>): string =>
+    JSON.stringify({ simulated: true, source: "demo-lab-sim-mcp", ...(serverId ? { server: serverId } : {}), tool: toolName, sampledAt: nowIso, ...body }, null, 2);
 
-  // 1. NetApp Harvest / ActiveIQ MCP
-  if (toolName === "ontap_get_volume_metrics" || serverId === "demo-mcp-netapp-harvest") {
-    if (toolName === "ontap_get_volume_metrics") {
-      const ontapHost = hosts.find((h) => h.kind === "ontap" || h.facts.has("ontap"));
-      const ontap = ontapHost ? ontapStateOf(ontapHost) : undefined;
-      if (ontap?.volumes.length) {
-        return JSON.stringify(
-          {
-            simulated: true,
-            source: "demo-lab-sim-mcp",
-            cluster: ontap.clusterName || "NetApp-ONTAP-Prod-SE",
-            sampledAt: nowIso,
-            volumes: ontap.volumes.map((v) => ({
-              svm: v.vserver,
-              volume: v.name,
-              aggregate: v.aggregate,
-              state: v.state,
-              usedPct: v.usedPct,
-              latencyMs: v.latencyMs,
-              qosPolicy: v.qosPolicyGroup,
-              exportPolicy: v.exportPolicy,
-            })),
-            filter: args,
-          },
-          null,
-          2,
-        );
-      }
-      return undefined;
-    }
-    if (toolName === "trident_inspect_pvc_mapping") {
-      const k8sHost = hosts.find((h) => h.facts.has("k8s"));
-      const k8s = k8sHost ? k8sStateOf(k8sHost) : undefined;
-      if (k8s?.pvcs.length) {
-        return JSON.stringify(
-          {
-            simulated: true,
-            source: "demo-lab-sim-mcp",
-            sampledAt: nowIso,
-            pvcs: k8s.pvcs,
-            tridentVolumes: k8s.tridentVolumes ?? [],
-            tridentBackends: k8s.tridentBackends ?? [],
-          },
-          null,
-          2,
-        );
-      }
-      return undefined;
-    }
-  }
-
-  // 2. Prometheus MCP (metrics derived from live SimWorld hosts)
-  if (serverId === "demo-mcp-prometheus" || toolName.startsWith("prom_") || toolName.startsWith("prometheus_") || toolName === "query_metrics") {
-    const metrics = hosts.map((h) => ({
-      host: h.name,
-      address: h.address,
-      kind: h.kind,
-      disks: h.disks.map((d) => ({ mount: d.mount, ...h.diskUse(d) })),
-      services: [...h.services.values()].map((s) => ({
-        name: s.name,
-        state: s.state,
-        healthy: s.state === "active" && !s.healthy?.(h),
-        detail: s.healthy?.(h) ?? undefined,
+  // NetApp Harvest and ActiveIQ: the volumes of the lab's ONTAP system, when it has one.
+  if (toolName === "ontap_get_volume_metrics") {
+    const ontapHost = hosts.find((h) => h.kind === "ontap" || h.facts.has("ontap"));
+    const ontap = ontapHost ? ontapStateOf(ontapHost) : undefined;
+    if (!ontap?.volumes.length) return undefined;
+    return answer({
+      cluster: ontap.clusterName || "NetApp-ONTAP-Prod-SE",
+      volumes: ontap.volumes.map((v) => ({
+        svm: v.vserver,
+        volume: v.name,
+        aggregate: v.aggregate,
+        state: v.state,
+        usedPct: v.usedPct,
+        latencyMs: v.latencyMs,
+        qosPolicy: v.qosPolicyGroup,
+        exportPolicy: v.exportPolicy,
       })),
-    }));
-    return JSON.stringify(
-      {
-        simulated: true,
-        source: "demo-lab-sim-mcp",
-        server: serverId ?? "demo-mcp-prometheus",
-        tool: toolName,
-        sampledAt: nowIso,
-        query: args.query ?? args.expr ?? "up",
-        hosts: metrics,
-      },
-      null,
-      2,
-    );
+      filter: args,
+    });
+  }
+  if (toolName === "trident_inspect_pvc_mapping") {
+    const k8sHost = hosts.find((h) => h.facts.has("k8s"));
+    const k8s = k8sHost ? k8sStateOf(k8sHost) : undefined;
+    if (!k8s?.pvcs.length) return undefined;
+    return answer({ pvcs: k8s.pvcs, tridentVolumes: k8s.tridentVolumes ?? [], tridentBackends: k8s.tridentBackends ?? [] });
   }
 
-  // 3. NetBox MCP (hosts, IPs, services, and peer topology from SimWorld)
-  if (serverId === "demo-mcp-netbox" || toolName.startsWith("netbox_") || toolName === "list_devices" || toolName === "get_topology") {
-    const devices = hosts.map((h) => ({
-      name: h.name,
-      primaryIp: h.address,
-      kind: h.kind,
-      os: h.os.pretty,
-      cpus: h.cpus,
-      memoryMb: h.memoryMb,
-      listeningPorts: h.listening().map((l) => `${l.proto}/${l.port} (${l.process})`),
-      peers: h.peers ?? [],
-    }));
-    return JSON.stringify(
-      {
-        simulated: true,
-        source: "demo-lab-sim-mcp",
-        server: serverId ?? "demo-mcp-netbox",
-        tool: toolName,
-        sampledAt: nowIso,
-        deviceCount: devices.length,
-        devices,
-      },
-      null,
-      2,
-    );
+  // Kubernetes: pods and events of the lab's cluster, when it has one.
+  if (toolName === "k8s_list_pods_and_events") {
+    const k8sHost = hosts.find((h) => h.facts.has("k8s"));
+    const k8s = k8sHost ? k8sStateOf(k8sHost) : undefined;
+    if (!k8s) return undefined;
+    return answer({
+      nodes: k8s.nodes,
+      pods: k8s.pods.filter((p) => !p.deleted).map((p) => ({ namespace: p.namespace, name: p.name, ready: p.ready, status: p.status, restarts: p.restarts, node: p.node, ...(p.pvc ? { pvc: p.pvc } : {}) })),
+      events: k8s.events,
+    });
   }
 
-  // 4. Alertmanager MCP (active scenario alert & failing checks from SimWorld)
-  if (serverId === "demo-mcp-alertmanager" || toolName.startsWith("alertmanager_") || toolName === "list_alerts") {
+  // Prometheus: what every server of the lab would report about itself.
+  if (toolName.startsWith("prometheus_")) {
+    return answer({
+      query: args.query ?? args.expr ?? "up",
+      hosts: hosts.map((h) => ({
+        host: h.name,
+        address: h.address,
+        kind: h.kind,
+        disks: h.disks.map((d) => ({ mount: d.mount, ...h.diskUse(d) })),
+        services: [...h.services.values()].map((s) => ({
+          name: s.name,
+          state: s.state,
+          healthy: s.state === "active" && !s.healthy?.(h),
+          detail: s.healthy?.(h) ?? undefined,
+        })),
+      })),
+    });
+  }
+
+  // Alertmanager: the running incident's alert, and what follows from the servers' state.
+  if (toolName.startsWith("alertmanager_")) {
     const alerts: Array<Record<string, unknown>> = [];
     if (scenario?.alert) {
       const resolved = score ? score.checks.filter((c) => c.kind === "resolved").every((c) => c.pass) : false;
@@ -152,66 +112,46 @@ export function querySimMcpTool(
         }
       }
     }
-    return JSON.stringify(
-      {
-        simulated: true,
-        source: "demo-lab-sim-mcp",
-        server: serverId ?? "demo-mcp-alertmanager",
-        tool: toolName,
-        sampledAt: nowIso,
-        alerts,
-      },
-      null,
-      2,
-    );
+    return answer({ alerts });
   }
 
-  // 5. Grafana MCP (dashboards reflecting live SimWorld hosts)
-  if (serverId === "demo-mcp-grafana" || toolName.startsWith("grafana_") || toolName === "get_dashboard") {
-    return JSON.stringify(
-      {
-        simulated: true,
-        source: "demo-lab-sim-mcp",
-        server: serverId ?? "demo-mcp-grafana",
-        tool: toolName,
-        sampledAt: nowIso,
-        scenario: scenario?.id ?? "base-fleet",
-        panels: hosts.map((h) => ({
-          host: h.name,
-          activeServices: [...h.services.values()].filter((s) => s.state === "active").length,
-          failedServices: [...h.services.values()].filter((s) => s.state === "failed").length,
-          maxDiskPct: Math.max(0, ...h.disks.map((d) => h.diskUse(d).pct)),
-        })),
-      },
-      null,
-      2,
-    );
+  // Grafana: one panel per server.
+  if (toolName.startsWith("grafana_")) {
+    return answer({
+      scenario: scenario?.id ?? "base-fleet",
+      panels: hosts.map((h) => ({
+        host: h.name,
+        activeServices: [...h.services.values()].filter((s) => s.state === "active").length,
+        failedServices: [...h.services.values()].filter((s) => s.state === "failed").length,
+        maxDiskPct: Math.max(0, ...h.disks.map((d) => h.diskUse(d).pct)),
+      })),
+    });
   }
 
-  // 6. PagerDuty MCP (active incident summary from running scenario)
-  if (serverId === "demo-mcp-pagerduty" || toolName.startsWith("pagerduty_") || toolName === "list_incidents") {
-    return JSON.stringify(
-      {
-        simulated: true,
-        source: "demo-lab-sim-mcp",
-        server: serverId ?? "demo-mcp-pagerduty",
-        tool: toolName,
-        sampledAt: nowIso,
-        incidents: scenario?.alert
-          ? [
-              {
-                id: `PD-SIM-${scenario.id.toUpperCase()}`,
-                title: scenario.alert.summary,
-                urgency: scenario.alert.severity === "critical" ? "high" : "low",
-                status: score && score.checks.filter((c) => c.kind === "resolved").every((c) => c.pass) ? "resolved" : "triggered",
-                target: scenario.target,
-              },
-            ]
-          : [],
-      },
-      null,
-      2,
-    );
+  // Loki: the newest lines of the servers' journals.
+  if (toolName.startsWith("loki_")) {
+    const wanted = typeof args.query === "string" ? args.query.toLowerCase() : "";
+    const linesOf = hosts
+      .flatMap((h) => h.journal.map((l) => ({ host: h.name, at: new Date(l.at).toISOString(), unit: l.unit, priority: l.priority ?? 6, text: l.text })))
+      .filter((l) => !wanted || `${l.host} ${l.unit} ${l.text}`.toLowerCase().includes(wanted))
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .slice(-50);
+    return answer({ query: args.query ?? "", lines: linesOf });
+  }
+
+  // NetBox: the lab's servers, their addresses and who they talk to.
+  if (toolName.startsWith("netbox_")) {
+    const devices = hosts.map((h) => ({
+      name: h.name,
+      primaryIp: h.address,
+      kind: h.kind,
+      os: h.os.pretty,
+      cpus: h.cpus,
+      memoryMb: h.memoryMb,
+      listeningPorts: h.listening().map((l) => `${l.proto}/${l.port} (${l.process})`),
+      peers: h.peers ?? [],
+    }));
+    return answer({ deviceCount: devices.length, devices });
   }
 
   return undefined;

@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { app, BrowserWindow, dialog, Menu, nativeImage, safeStorage, screen, Tray } from 'electron';
 import { createHub } from './ai/hub/createHub';
-import { DEMO_ENV_VARS, demoModeRelaunchArgs, demoWorkspaceDir, isDemoMode } from './demo/demoMode';
+import { DEMO_ENV_VARS, demoModeRelaunchArgs, isDemoMode } from './demo/demoMode';
+import { resolveUserDataDir } from './demo/dataDir';
 import { NativeDesktopShell } from './ai/desktop/NativeDesktopShell';
 import { getNativeWindow } from './ai/desktop/nativeWindow';
 import { nativeTools, setNativeHub } from './ai/desktop/nativeTools';
@@ -53,30 +54,23 @@ if (process.platform === 'linux') {
   app.commandLine.appendSwitch('password-store', resolvePasswordStore(process.env, app.isPackaged));
 }
 
-// Redirect userData to <exe-dir>/data if running as a portable executable (set by electron-builder)
-// or if a local 'data' folder exists next to the executable (e.g. portable ZIP distribution).
-// This ensures true portability (data travels with the exe) and avoids collision with any installed
-// sshs3 instance sharing the default %APPDATA%\sshs3 directory.
-if (process.env.PORTABLE_EXECUTABLE_DIR) {
-  app.setPath('userData', path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data'));
-} else if (process.platform === 'win32' && !process.env.VITE_DEV_SERVER_URL) {
-  const localDataDir = path.join(path.dirname(process.execPath), 'data');
-  if (fs.existsSync(localDataDir)) {
-    app.setPath('userData', localDataDir);
-  }
-}
-
-// Demo mode (decided once at launch from --demo or SSHS3_DEMO=1, see ./demo/demoMode) keeps everything in
-// its own data directory inside the normal one. Set before anything reads userData (the single-instance
-// lock, the log file, every store, the renderer's Chromium profile), so a demo instance never reads or
-// writes the real profile, and has its own lock: a demo and a normal instance can run side by side.
-if (isDemoMode()) {
-  const demoUserData = demoWorkspaceDir(app.getPath('userData'));
-  fs.mkdirSync(demoUserData, { recursive: true });
-  app.setPath('userData', demoUserData);
-  // macOS keeps app logs outside userData (~/Library/Logs/sshs3); keep the demo's with its own data.
-  app.setAppLogsPath(path.join(demoUserData, 'logs'));
-}
+// Where this process keeps its data: beside a portable executable, and in demo mode (decided once at
+// launch from --demo or SSHS3_DEMO=1, see ./demo/demoMode) in a folder of its own inside the normal one.
+// The decision is resolveUserDataDir's (./demo/dataDir), which says why. It is applied here, before
+// anything reads userData (the single-instance lock, the log file, every store, the renderer's Chromium
+// profile), so a demo instance never reads or writes the real profile, and has its own lock.
+const userDataDir = resolveUserDataDir({
+  demoMode: isDemoMode(),
+  defaultDir: app.getPath('userData'),
+  platform: process.platform,
+  portableDir: process.env.PORTABLE_EXECUTABLE_DIR,
+  execPath: process.execPath,
+  devServer: Boolean(process.env.VITE_DEV_SERVER_URL),
+  exists: fs.existsSync,
+});
+if (userDataDir.demo) fs.mkdirSync(userDataDir.dir, { recursive: true });
+if (userDataDir.dir !== app.getPath('userData')) app.setPath('userData', userDataDir.dir);
+if (userDataDir.logsDir) app.setAppLogsPath(userDataDir.logsDir);
 
 // Enforce single-instance lock: if an instance is already running with the same userData directory,
 // focus the existing window and immediately terminate the new instance.

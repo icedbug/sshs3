@@ -89,7 +89,6 @@ export const AREA_OF = {
   "sim-start": "simulation",
   "sim-reset": "simulation",
   "sim-replay": "simulation",
-  "sim-advance-time": "simulation",
   "chat-source-save": "chatAndAtlassian",
   "chat-source-test": "chatAndAtlassian",
   "chat-source-disconnect": "chatAndAtlassian",

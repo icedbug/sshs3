@@ -2605,7 +2605,6 @@ export type HubRequest =
   | { action: "sim-start"; scenarioId: string }
   | { action: "sim-reset" }
   | { action: "sim-replay"; mode: "careful" | "careless" }
-  | { action: "sim-advance-time"; minutes: number }
   | { action: "chat-source-save"; connection: ChatConnectionInput }
   | { action: "chat-source-test"; service: ChatServiceName }
   | { action: "chat-source-disconnect"; service: ChatServiceName; forget?: boolean }
@@ -2631,17 +2630,8 @@ export type HubRequest =
   | { action: "chat-answering-task"; taskId: string }
   /** An answer in the app to a change or plan of the chat agent's, by the same rules as from chat. */
   | { action: "chat-answering-answer"; taskId: string; id: string; kind: "change" | "plan"; approved: boolean; note?: string }
-  /** An administrator, in the demo or before a bot is connected: a message or card interaction in a simulated chat. */
-  | {
-      action: "chat-answering-try";
-      channel: string;
-      as: "me" | "guest";
-      text: string;
-      thread?: string;
-      interaction?:
-        | { kind: "click"; postId: string; action: "approve" | "deny" }
-        | { kind: "react"; postId: string; emoji: string };
-    }
+  /** An administrator, in the demo or before a bot is connected: a message to the agent bot in a simulated chat. */
+  | { action: "chat-answering-try"; channel: string; as: "me" | "guest"; text: string; thread?: string }
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }

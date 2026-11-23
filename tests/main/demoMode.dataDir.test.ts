@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { nativeHermesDataDirs, resolveUserDataDir } from '../../src/main/demo/dataDir';
 import { demoWorkspaceDir } from '../../src/main/demo/demoMode';
 
 /**
@@ -11,6 +12,11 @@ import { demoWorkspaceDir } from '../../src/main/demo/demoMode';
  * (demoWorkspaceDir in src/main/demo/demoMode.ts), so it never reads or writes the real profile: the
  * desktop app points Electron's userData there before anything reads it (index.ts, and desktopEntry.ts
  * for native Hermes), the web server uses it as its data dir (web/serverEntry.ts).
+ *
+ * Where the desktop app's folder is, is decided by two functions without Electron in them
+ * (src/main/demo/dataDir.ts), tested here as they are. The entry files apply what they return. That
+ * the entry files do so before the lock and the log file is not tested here: the started app is
+ * (`npm run test:smoke:demo`).
  */
 
 // serverEntry starts the web server when it is imported; these stand in for the server and the shim.
@@ -31,13 +37,6 @@ vi.mock('../../src/main/web/WebServer', () => ({
     async stop(): Promise<void> {}
   },
 }));
-
-const SRC_MAIN = path.join(__dirname, '../../src/main');
-
-/** A main-process source file, with LF line endings whatever the checkout uses. */
-function mainSource(file: string): string {
-  return fs.readFileSync(path.join(SRC_MAIN, file), 'utf8').replace(/\r\n/g, '\n');
-}
 
 describe('demoWorkspaceDir', () => {
   it('is demo-workspace inside the normal data dir: Electron userData, a portable data dir, the web data dir', () => {
@@ -65,52 +64,90 @@ describe('demoWorkspaceDir', () => {
   });
 });
 
-describe('the desktop app (index.ts)', () => {
-  /** Offsets in index.ts where the demo data dir is derived from userData and where userData is set to it. */
-  function demoRedirect(index: string): { derived: number; applied: number } {
-    const derived = index.indexOf("demoWorkspaceDir(app.getPath('userData'))");
-    expect(derived, "index.ts derives the demo data dir from app.getPath('userData')").toBeGreaterThan(-1);
-    const applied = index.indexOf("app.setPath('userData'", derived);
-    expect(applied, 'index.ts points userData at the demo data dir').toBeGreaterThan(derived);
-    return { derived, applied };
-  }
+describe('the data folder of the desktop app (resolveUserDataDir, applied by index.ts)', () => {
+  const home = path.join(os.homedir(), '.config', 'sshs3');
+  const base = { demoMode: false, defaultDir: home, platform: 'linux' as NodeJS.Platform, execPath: '/opt/sshs3/sshs3', devServer: false, exists: () => false };
 
-  it('moves userData into the demo workspace before the lock, the log file and the stores read it', () => {
-    const index = mainSource('index.ts');
-    const { derived, applied } = demoRedirect(index);
-    // The portable redirects come first, so the demo workspace is inside them; nothing re-points userData later.
-    expect(index.lastIndexOf("app.setPath('userData'"), 'the demo redirect is the last userData change').toBe(applied);
-    for (const reader of ['app.requestSingleInstanceLock()', 'configureLogging(', "'.gpu-crash-detected'", 'new IpcBridge(']) {
-      const at = index.indexOf(reader);
-      expect(at, `${reader} is in index.ts`).toBeGreaterThan(-1);
-      expect(at, `${reader} comes after the demo redirect`).toBeGreaterThan(applied);
-    }
-    for (const read of index.matchAll(/\bgetPath\('(?:userData|logs)'\)/g)) {
-      const at = read.index ?? -1;
-      if (at > derived && at < applied) continue; // the redirect's own read
-      expect(at, `${read[0]} at offset ${at} comes after the demo redirect`).toBeGreaterThan(applied);
+  it('is Electron\'s own folder for a normal start, and nothing is moved', () => {
+    expect(resolveUserDataDir(base)).toEqual({ dir: home, demo: false });
+  });
+
+  it('is demo-workspace inside it in demo mode, with the logs kept there too', () => {
+    const demo = resolveUserDataDir({ ...base, demoMode: true });
+    expect(demo).toEqual({ dir: path.join(home, 'demo-workspace'), demo: true, logsDir: path.join(home, 'demo-workspace', 'logs') });
+    // Never the real profile's folder, and not outside it: a demo reads and writes below it only.
+    const normal = resolveUserDataDir(base);
+    expect(demo.dir).not.toBe(normal.dir);
+    expect(path.relative(normal.dir, demo.dir)).toBe('demo-workspace');
+    expect(path.relative(demo.dir, demo.logsDir!)).toBe('logs');
+  });
+
+  it('gives a demo and a normal instance different folders in every kind of start, so each has its own lock', () => {
+    // The single-instance lock is taken per data folder: two folders are two locks, and a demo runs beside the app.
+    const starts = [base, { ...base, portableDir: '/media/stick/sshs3' }, { ...base, platform: 'win32' as NodeJS.Platform, exists: () => true }, { ...base, platform: 'darwin' as NodeJS.Platform }];
+    for (const start of starts) {
+      const normal = resolveUserDataDir(start);
+      const demo = resolveUserDataDir({ ...start, demoMode: true });
+      expect(demo.dir, JSON.stringify(start)).toBe(path.join(normal.dir, 'demo-workspace'));
+      expect(normal.demo).toBe(false);
+      expect(normal.logsDir).toBeUndefined();
     }
   });
 
-  it('takes the single-instance lock in demo mode too, so the lock is per data dir', () => {
-    const index = mainSource('index.ts');
-    const { applied } = demoRedirect(index);
-    const redirectEnd = index.indexOf('\n}\n', applied);
-    const lock = index.indexOf('app.requestSingleInstanceLock()');
-    expect(redirectEnd).toBeGreaterThan(applied);
-    expect(lock).toBeGreaterThan(redirectEnd);
-    // Nothing between the redirect and the lock looks at demo mode, so a demo instance is not exempt.
-    expect(index.slice(redirectEnd, lock)).not.toMatch(/isDemoMode|demoMode|SSHS3_DEMO|--demo/);
+  it('keeps a portable executable\'s data beside it, and its demo inside that', () => {
+    const portable = { ...base, portableDir: '/media/stick/sshs3' };
+    expect(resolveUserDataDir(portable).dir).toBe(path.join('/media/stick/sshs3', 'data'));
+    expect(resolveUserDataDir({ ...portable, demoMode: true }).dir).toBe(path.join('/media/stick/sshs3', 'data', 'demo-workspace'));
+    // The portable folder wins over a data folder beside the executable.
+    expect(resolveUserDataDir({ ...portable, platform: 'win32', exists: () => true }).dir).toBe(path.join('/media/stick/sshs3', 'data'));
   });
 
-  it('applies the same redirect in the native Hermes entry before Hermes gets its directories', () => {
-    const entry = mainSource('desktopEntry.ts');
-    const derived = entry.indexOf('demoWorkspaceDir(');
-    expect(derived, 'desktopEntry.ts derives the demo data dir').toBeGreaterThan(-1);
-    for (const use of ["app.setPath('userData'", 'HERMES_DESKTOP_USER_DATA_DIR', 'HERMES_HOME']) {
-      const at = entry.indexOf(use);
-      expect(at, `${use} is in desktopEntry.ts`).toBeGreaterThan(-1);
-      expect(at, `${use} comes after the demo redirect`).toBeGreaterThan(derived);
+  it('uses a data folder beside the executable on Windows when there is one, on a real disk', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sshs3-zip-'));
+    try {
+      const windows = { ...base, platform: 'win32' as NodeJS.Platform, execPath: path.join(dir, 'sshs3.exe'), exists: fs.existsSync };
+      // No folder yet: Electron's own.
+      expect(resolveUserDataDir(windows).dir).toBe(home);
+      await fsp.mkdir(path.join(dir, 'data'));
+      expect(resolveUserDataDir(windows).dir).toBe(path.join(dir, 'data'));
+      expect(resolveUserDataDir({ ...windows, demoMode: true }).dir).toBe(path.join(dir, 'data', 'demo-workspace'));
+      // Started against the dev server the executable is Electron's own: its folder is not looked at.
+      expect(resolveUserDataDir({ ...windows, devServer: true }).dir).toBe(home);
+      // And on no other system.
+      expect(resolveUserDataDir({ ...windows, platform: 'linux' }).dir).toBe(home);
+      expect(resolveUserDataDir({ ...windows, platform: 'darwin' }).dir).toBe(home);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the data folder of the native Hermes window (nativeHermesDataDirs, applied by desktopEntry.ts)', () => {
+  const appData = path.join(os.homedir(), '.config');
+
+  it('is sshs3 inside the application data, a portable executable\'s data, or the folder somebody chose', () => {
+    expect(nativeHermesDataDirs({ demoMode: false, appData })).toEqual({ userData: path.join(appData, 'sshs3'), hermesHome: path.join(appData, 'sshs3', 'hermes-native') });
+    expect(nativeHermesDataDirs({ demoMode: false, appData, portableDir: '/media/stick/sshs3' }).userData).toBe(path.join('/media/stick/sshs3', 'data'));
+    expect(nativeHermesDataDirs({ demoMode: false, appData, portableDir: '/media/stick/sshs3', userDataOverride: '/srv/sshs3-data' }).userData).toBe('/srv/sshs3-data');
+  });
+
+  it('keeps a demo\'s data, Hermes\' included, in demo-workspace inside it', () => {
+    for (const input of [{ appData }, { appData, portableDir: '/media/stick/sshs3' }, { appData, userDataOverride: '/srv/sshs3-data' }]) {
+      const normal = nativeHermesDataDirs({ ...input, demoMode: false });
+      const demo = nativeHermesDataDirs({ ...input, demoMode: true });
+      expect(demo.userData).toBe(path.join(normal.userData, 'demo-workspace'));
+      // Hermes' own folder is inside the demo's, never inside the real profile's.
+      expect(demo.hermesHome).toBe(path.join(demo.userData, 'hermes-native'));
+      expect(demo.hermesHome.startsWith(normal.hermesHome)).toBe(false);
+    }
+  });
+
+  it('is left as it is by the regular window\'s decision, which runs after it', () => {
+    // desktopEntry.ts sets the folder, then index.ts decides again from what is set: no second level.
+    for (const demoMode of [true, false]) {
+      const first = nativeHermesDataDirs({ demoMode, appData });
+      const second = resolveUserDataDir({ demoMode, defaultDir: first.userData, platform: 'linux', execPath: '/opt/sshs3/sshs3', devServer: false, exists: () => false });
+      expect(second.dir).toBe(first.userData);
     }
   });
 });

@@ -268,7 +268,10 @@ export function NotificationsCard({
           ? ""
           : result.ok
             ? "Arrived. Check the channel."
-            : `Not delivered: ${result.error ?? `answer ${result.status}`}`,
+            : hub.demoMode
+              ? // The demo lab sends nothing and says so itself: that is not a failed delivery.
+                (result.error ?? "Demo: nothing is sent from the demo lab.")
+              : `Not delivered: ${result.error ?? `answer ${result.status}`}`,
       }));
     });
   };

@@ -6,7 +6,7 @@ import { setDemoModeForTesting } from "../../src/main/demo/demoMode";
 import { HubService, type HubHost } from "../../src/main/ai/hub/HubService";
 import { ChatBridge } from "../../src/main/ai/hub/ChatBridge";
 import { parseFacts } from "../../src/main/ai/hub/ServerFacts";
-import { getDemoActivityLog, getDemoServers } from "../../src/main/ai/hub/demoWorkspace";
+import { getDemoActivityLog, getDemoMcpServers, getDemoServers, mcpCatalog } from "../../src/main/ai/hub/demoWorkspace";
 import { buildBaseFleet } from "../../src/main/sim/baseFleet";
 import { simFactsOutput } from "../../src/main/sim/facts";
 import { emptyLab, scenarioById, startScenario, stopScenario } from "../../src/main/sim/lab";
@@ -137,27 +137,50 @@ describe("M1 Core Simulation Engine Upgrades", () => {
     expect(sh.unsupported).toEqual([]);
   });
 
-  it("derives live SimMcpBridge responses from SimWorld hosts and running scenario", () => {
+  it("answers the tools the demo's own MCP servers list from the lab's servers and the running incident", () => {
+    setDemoModeForTesting(true);
     startScenario(scenarioById("k8s-pvc-mount-cascade")!);
-    const prom = JSON.parse(querySimMcpTool("query_metrics", { query: "up" }, "demo-mcp-prometheus")!);
-    expect(prom.simulated).toBe(true);
+    // The servers a demo workspace really has: the two it comes with and the ones its catalog offers.
+    const offered = [
+      ...getDemoMcpServers().map((s) => ({ id: s.id, tools: (s.discoveredTools ?? []).map((t) => t.name) })),
+      ...mcpCatalog().map((p) => ({ id: p.id, tools: p.defaultTools.map((t) => t.name) })),
+    ];
+    const ask = (tool: string, args: Record<string, unknown> = {}) => {
+      const server = offered.find((s) => s.tools.includes(tool));
+      expect(server, `no demo MCP server lists ${tool}`).toBeDefined();
+      const answer = querySimMcpTool(tool, args, server!.id);
+      expect(answer, `${tool} has no answer from the lab`).toBeDefined();
+      const parsed = JSON.parse(answer!);
+      expect(parsed).toMatchObject({ simulated: true, server: server!.id, tool });
+      return parsed;
+    };
+
+    const prom = ask("prometheus_query_range", { query: "up" });
+    expect(prom.server).toBe("demo-mcp-prometheus");
     expect(prom.hosts.some((h: { host: string }) => h.host === "k8s-worker-01")).toBe(true);
 
-    const netbox = JSON.parse(querySimMcpTool("list_devices", {}, "demo-mcp-netbox")!);
-    expect(netbox.simulated).toBe(true);
+    // The same server lists the alert tool: it answers with alerts, not with the metrics.
+    const am = ask("alertmanager_list_firing_alerts");
+    expect(am.server).toBe("demo-mcp-prometheus");
+    expect(am.alerts.find((a: { alertname: string }) => a.alertname === "KubePodVolumeMountFailed")).toMatchObject({ status: "firing" });
+
+    const netbox = ask("netbox_get_device_cables");
+    expect(netbox.server).toBe("demo-mcp-netbox-ipam");
     expect(netbox.devices.some((d: { name: string }) => d.name === "netapp-prod-cl01")).toBe(true);
 
-    const am = JSON.parse(querySimMcpTool("list_alerts", {}, "demo-mcp-alertmanager")!);
-    expect(am.simulated).toBe(true);
-    expect(am.alerts.some((a: { alertname: string }) => a.alertname === "KubePodVolumeMountFailed")).toBe(true);
-
-    const graf = JSON.parse(querySimMcpTool("get_dashboard", {}, "demo-mcp-grafana")!);
-    expect(graf.simulated).toBe(true);
+    const graf = ask("grafana_get_dashboard_summary");
+    expect(graf.server).toBe("demo-mcp-grafana-loki");
     expect(graf.scenario).toBe("k8s-pvc-mount-cascade");
+    expect(Array.isArray(ask("loki_query_logs").lines)).toBe(true);
 
-    const pd = JSON.parse(querySimMcpTool("list_incidents", {}, "demo-mcp-pagerduty")!);
-    expect(pd.simulated).toBe(true);
-    expect(pd.incidents[0].status).toBe("triggered");
+    const pods = ask("k8s_list_pods_and_events");
+    expect(pods.server).toBe("demo-mcp-kubernetes-helm");
+    expect(pods.pods.length).toBeGreaterThan(0);
+    expect(ask("trident_inspect_pvc_mapping").pvcs.length).toBeGreaterThan(0);
+    expect(ask("ontap_get_volume_metrics").volumes.length).toBeGreaterThan(0);
+
+    // A tool nobody lists has no answer from the lab, whatever server id is given with it.
+    expect(querySimMcpTool("list_incidents", {}, "demo-mcp-prometheus")).toBeUndefined();
   });
 
   it("allows storage aggregate show on netapp-prod-cl01 during k8s-pvc-mount-cascade", () => {
@@ -335,7 +358,7 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
     expect(await pendingCall).toEqual({ rejected: true });
   });
 
-  it("BUG-3 & interactive actions: sim-replay, sim-advance-time, and sim-reset clean up sim-* activity", async () => {
+  it("BUG-3 & interactive actions: sim-replay, and sim-reset cleans up sim-* activity", async () => {
     const { hub } = await createDemoHub();
     const started = await hub.request({ action: "sim-start", scenarioId: "k8s-pvc-mount-cascade" });
     expect(started.simulation?.running?.id).toBe("k8s-pvc-mount-cascade");
@@ -343,11 +366,8 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
     expect(started.simulation?.running?.servers?.length).toBe(2);
     expect(getDemoActivityLog().some((e) => e.id.startsWith("sim-k8s-pvc-mount-cascade-"))).toBe(true);
 
-    // Advance simulated time
-    const beforeNow = simWorld().now();
-    const adv = await hub.request({ action: "sim-advance-time", minutes: 30 });
-    expect(simWorld().now()).toBeGreaterThanOrEqual(beforeNow + 30 * 60_000);
-    expect(adv.reply?.notes?.[0]).toContain("30 minutes");
+    // The lab's clock is not a request: nothing in the app asked for it, so the hub does not know it.
+    await expect(hub.request({ action: "sim-advance-time", minutes: 30 } as never)).rejects.toThrow("Unknown AI request: sim-advance-time");
 
     // Scripted careful walkthrough via sim-replay
     const replay = await hub.request({ action: "sim-replay", mode: "careful" });
@@ -380,7 +400,7 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
     expect(views[0].simulated).toBe(true);
   });
 
-  it("seeds demo proposals, eval cases, daily report, runbooks, simulates notify-channel-test, and records isolated demo audit log", async () => {
+  it("seeds demo proposals, eval cases, daily report, runbooks, sends nothing on notify-channel-test, and records isolated demo audit log", async () => {
     const { hub, dir } = await createDemoHub();
     const snap = await hub.snapshot();
     expect(snap.memoryProposals?.length ?? 0).toBeGreaterThanOrEqual(2);
@@ -388,7 +408,7 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
     expect(snap.dailyReport?.text).toBeTruthy();
     expect(snap.runbooks?.length ?? 0).toBeGreaterThanOrEqual(2);
 
-    // Simulated notify-channel-test in demo mode makes no network call
+    // notify-channel-test in demo mode sends nothing
     const saved = await hub.request({
       action: "notify-channel-save",
       channel: {
@@ -402,11 +422,25 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
     });
     const channelId = saved.notifications?.channels[0]?.id;
     expect(channelId).toBeTruthy();
+    // A delivery an earlier version made up for this channel is on it.
+    hub.notifyStore.data.channels[0].last = { at: Date.now() - 60_000, ok: true, status: 200 };
     const tested = await hub.request({ action: "notify-channel-test", id: channelId! });
-    expect(tested.reply?.notifyTest?.ok).toBe(true);
-    expect(tested.reply?.notifyTest?.error).toContain("Demo lab (simulated)");
+    // Nothing was sent, and the answer says so: it is not a delivery, and none is kept on the channel.
+    expect(tested.reply?.notifyTest).toEqual({ ok: false, error: "Demo: nothing is sent from the demo lab." });
+    expect(tested.notifications?.channels[0]?.last).toBeUndefined();
+    expect(hub.notifyStore.data.channels[0].last).toBeUndefined();
 
-    // Isolated demo audit log writes finished changes to demo dir
+    // The demo's audit notice says what is not recorded (AuditLogView): an incident that is started, a command
+    // somebody types, a scripted walkthrough and a change of the safety rules leave the log empty.
+    await hub.request({ action: "sim-start", scenarioId: "pg-wal-full" });
+    simWorld().shell(simWorld().host("pg-prod-db01")!).run("df -h");
+    await hub.request({ action: "sim-replay", mode: "careful" });
+    await hub.request({ action: "safety-policy-save", policy: { clusterPolicies: { "Postgres-Prod": { maxMode: "assisted" } } } } as never);
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await hub.request({ action: "audit-read", limit: 20 })).reply?.audit?.entries).toEqual([]);
+    await hub.request({ action: "sim-reset" });
+
+    // And what is: what an agent's run did. The log is kept in the demo's own folder.
     hub.store.data.tasks.push({
       id: "task-demo-audit-1",
       title: "Demo audit check",

@@ -24,6 +24,114 @@ interface VirtualFileNode {
   permissions: string;
 }
 
+/**
+ * The sample files of a showcase server, by its name. The scripted servers show them in the file
+ * manager, and the base fleet's simulated servers hold the same ones (sim/baseFleet.ts), so a server
+ * has the same files whichever of the two answers for it.
+ */
+export function demoServerFiles(hint: string): Array<{ path: string; content: string; permissions?: string }> {
+  const h = hint.toLowerCase();
+  const files: Array<{ path: string; content: string; permissions?: string }> = [];
+  const add = (path: string, content: string, permissions?: string): void => {
+    files.push({ path, content, ...(permissions ? { permissions } : {}) });
+  };
+  const isWorker = h.includes('worker');
+  add(
+    '/etc/multipath.conf',
+    [
+      '# /etc/multipath.conf — NetApp ONTAP SAN LUN Configuration',
+      'defaults {',
+      '    user_friendly_names yes',
+      '    find_multipaths yes',
+      '}',
+      'devices {',
+      '    device {',
+      '        vendor "NETAPP"',
+      '        product "LUN.*"',
+      `        path_grouping_policy ${isWorker ? 'multibus' : 'group_by_prio'}`,
+      '        path_checker tur',
+      '        features "2 pg_init_retries 50"',
+      '        hardware_handler "1 alua"',
+      '        prio alua',
+      '        failback immediate',
+      '        rr_min_io_rq 1',
+      '    }',
+      '}',
+    ].join('\n')
+  );
+
+  add(
+    '/etc/ceph/ceph.conf',
+    [
+      '[global]',
+      'fsid = 9b4e7c12-84d0-4f19-a910-55b019283746',
+      'mon_initial_members = ceph-mon-mgr-01, ceph-mon-02, ceph-mon-03',
+      'mon_host = 10.30.40.10,10.30.40.11,10.30.40.12',
+      'public_network = 10.30.40.0/24',
+      'cluster_network = 10.30.140.0/24',
+      'osd_pool_default_size = 3',
+      'osd_pool_default_min_size = 2',
+      'osd_max_backfills = 2',
+    ].join('\n')
+  );
+
+  add(
+    '/etc/trident/backend-ontap-nas-flexgroup.json',
+    JSON.stringify(
+      {
+        version: 1,
+        storageDriverName: 'ontap-nas-flexgroup',
+        backendName: 'tbc-ontap-nas-flexgroup-ai',
+        managementLIF: '10.30.10.11',
+        dataLIF: '10.30.10.55',
+        svm: 'svm-prod-nfs',
+        autoExportPolicy: true,
+        autoExportCIDRs: ['10.30.50.0/24'],
+      },
+      null,
+      2
+    )
+  );
+
+  add(
+    '/etc/trident/storageclass-ontap-flexgroup-ai.yaml',
+    [
+      'apiVersion: storage.k8s.io/v1',
+      'kind: StorageClass',
+      'metadata:',
+      '  name: ontap-flexgroup-ai',
+      'provisioner: csi.trident.netapp.io',
+      'parameters:',
+      '  backendType: "ontap-nas-flexgroup"',
+      'mountOptions:',
+      '  - nfsvers=4.1',
+      '  - nconnect=8',
+      '  - noatime',
+    ].join('\n')
+  );
+
+  add(
+    '/var/log/syslog',
+    [
+      'Oct 31 17:15:02 node kernel: [14210.412] multipathd: 3600a0980383146525a2b516a4b38724d: path_grouping_policy active',
+      'Oct 31 17:20:19 node trident_acp[2190]: time="2026-10-31T17:20:19Z" level=info msg="ONTAP backend tbc-ontap-nas-premium online"',
+      'Oct 31 17:24:41 node systemd[1]: Started NetApp Harvest Telemetry Exporter.',
+    ].join('\n')
+  );
+
+  add(
+    '/root/runbooks/ontap-latency-remediation.sh',
+    [
+      '#!/usr/bin/env bash',
+      '# Diagnose and throttle noisy neighbor volumes on NetApp AFF A800',
+      'ssh admin@10.30.10.12 "qos statistics volume latency show -iterations 3"',
+      'ssh admin@10.30.10.12 "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling"',
+    ].join('\n'),
+    '-rwxr-xr-x'
+  );
+  return files;
+}
+
 export class DemoStorageProvider implements IStorageProvider {
   public readonly id: string;
   public readonly name: string;
@@ -121,100 +229,7 @@ export class DemoStorageProvider implements IStorageProvider {
       return;
     }
 
-    const isWorker = h.includes('worker');
-    this.addFile(
-      '/etc/multipath.conf',
-      [
-        '# /etc/multipath.conf — NetApp ONTAP SAN LUN Configuration',
-        'defaults {',
-        '    user_friendly_names yes',
-        '    find_multipaths yes',
-        '}',
-        'devices {',
-        '    device {',
-        '        vendor "NETAPP"',
-        '        product "LUN.*"',
-        `        path_grouping_policy ${isWorker ? 'multibus' : 'group_by_prio'}`,
-        '        path_checker tur',
-        '        features "2 pg_init_retries 50"',
-        '        hardware_handler "1 alua"',
-        '        prio alua',
-        '        failback immediate',
-        '        rr_min_io_rq 1',
-        '    }',
-        '}',
-      ].join('\n')
-    );
-
-    this.addFile(
-      '/etc/ceph/ceph.conf',
-      [
-        '[global]',
-        'fsid = 9b4e7c12-84d0-4f19-a910-55b019283746',
-        'mon_initial_members = ceph-mon-mgr-01, ceph-mon-02, ceph-mon-03',
-        'mon_host = 10.30.40.10,10.30.40.11,10.30.40.12',
-        'public_network = 10.30.40.0/24',
-        'cluster_network = 10.30.140.0/24',
-        'osd_pool_default_size = 3',
-        'osd_pool_default_min_size = 2',
-        'osd_max_backfills = 2',
-      ].join('\n')
-    );
-
-    this.addFile(
-      '/etc/trident/backend-ontap-nas-flexgroup.json',
-      JSON.stringify(
-        {
-          version: 1,
-          storageDriverName: 'ontap-nas-flexgroup',
-          backendName: 'tbc-ontap-nas-flexgroup-ai',
-          managementLIF: '10.30.10.11',
-          dataLIF: '10.30.10.55',
-          svm: 'svm-prod-nfs',
-          autoExportPolicy: true,
-          autoExportCIDRs: ['10.30.50.0/24'],
-        },
-        null,
-        2
-      )
-    );
-
-    this.addFile(
-      '/etc/trident/storageclass-ontap-flexgroup-ai.yaml',
-      [
-        'apiVersion: storage.k8s.io/v1',
-        'kind: StorageClass',
-        'metadata:',
-        '  name: ontap-flexgroup-ai',
-        'provisioner: csi.trident.netapp.io',
-        'parameters:',
-        '  backendType: "ontap-nas-flexgroup"',
-        'mountOptions:',
-        '  - nfsvers=4.1',
-        '  - nconnect=8',
-        '  - noatime',
-      ].join('\n')
-    );
-
-    this.addFile(
-      '/var/log/syslog',
-      [
-        'Oct 31 17:15:02 node kernel: [14210.412] multipathd: 3600a0980383146525a2b516a4b38724d: path_grouping_policy active',
-        'Oct 31 17:20:19 node trident_acp[2190]: time="2026-10-31T17:20:19Z" level=info msg="ONTAP backend tbc-ontap-nas-premium online"',
-        'Oct 31 17:24:41 node systemd[1]: Started NetApp Harvest Telemetry Exporter.',
-      ].join('\n')
-    );
-
-    this.addFile(
-      '/root/runbooks/ontap-latency-remediation.sh',
-      [
-        '#!/usr/bin/env bash',
-        '# Diagnose and throttle noisy neighbor volumes on NetApp AFF A800',
-        'ssh admin@10.30.10.12 "qos statistics volume latency show -iterations 3"',
-        'ssh admin@10.30.10.12 "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling"',
-      ].join('\n'),
-      '-rwxr-xr-x'
-    );
+    for (const file of demoServerFiles(h)) this.addFile(file.path, file.content, file.permissions);
   }
 
   private toEntry(node: VirtualFileNode): FileEntry {

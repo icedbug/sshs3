@@ -12,7 +12,8 @@ export const SCRIPTED_DEMO_NOTE =
 
 /**
  * The note, when the server these names belong to is a scripted example. Nothing for a real server,
- * and nothing for a server of a running scenario: that one holds state, and what it prints is true of it.
+ * and nothing for a simulated one (a server of a running scenario, or of the base fleet): that one
+ * holds state, and what it prints is true of it.
  */
 export function scriptedDemoNote(...refs: Array<string | undefined>): string | undefined {
   const named = refs.filter((r): r is string => Boolean(r));

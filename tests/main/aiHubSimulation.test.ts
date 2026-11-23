@@ -185,6 +185,42 @@ describe("the demo lab's scenarios", () => {
     expect(getDemoServers().filter((s) => SCENARIOS.some((x) => x.servers.some((y) => y.id === s.id)))).toEqual([]);
   });
 
+  it("pass the report check only on a report that was written: the scripted walkthrough writes one, at the end of its transcript", async () => {
+    const hub = await demoHub();
+    for (const scenario of SCENARIOS) {
+      const started = await hub.request({ action: "sim-start", scenarioId: scenario.id });
+      const reportCheck = (view: typeof started): { pass: boolean; why: string } => view.simulation!.running!.checks.find((c) => c.kind === "report")!;
+      expect(reportCheck(started), scenario.id).toMatchObject({ pass: false, why: "There is no report to read." });
+
+      // The careless way first: it writes a report too, and that one does not name the cause.
+      const careless = await hub.request({ action: "sim-replay", mode: "careless" });
+      const carelessReport = "Report: Scripted walkthrough, no AI model. Applied a quick workaround.";
+      expect(careless.reply!.simReplay!.transcript.at(-1), scenario.id).toBe(carelessReport);
+      expect(careless.simulation!.running!.lastReplay!.lines.at(-1), scenario.id).toBe(carelessReport);
+      expect(reportCheck(careless).pass, scenario.id).toBe(false);
+      expect(reportCheck(careless).why, scenario.id).toMatch(/^The report does not mention /);
+
+      // A fresh start, and the careful way: solved, with the report that was read as the last line a person sees.
+      await hub.request({ action: "sim-start", scenarioId: scenario.id });
+      const careful = await hub.request({ action: "sim-replay", mode: "careful" });
+      const running = careful.simulation!.running!;
+      const written = `Report: Scripted walkthrough, no AI model. ${scenario.story}`;
+      expect(running.lastReplay!.lines.at(-1), scenario.id).toBe(written);
+      expect(running.lastReplay!.lines.length, scenario.id).toBeLessThanOrEqual(21);
+      expect(careful.reply!.simReplay!.transcript.at(-1), scenario.id).toBe(written);
+      expect(reportCheck(careful), scenario.id).toMatchObject({ pass: true });
+      expect(running.passed, scenario.id).toBe(running.total);
+      // What the reply says and what the view says are the same score.
+      expect(careful.reply!.simReplay!.score.passed, scenario.id).toBe(running.passed);
+
+      // A new start of the same incident has no report again: the last walkthrough's is not carried over.
+      const again = await hub.request({ action: "sim-start", scenarioId: scenario.id });
+      expect(again.simulation!.running!.lastReplay, scenario.id).toBeUndefined();
+      expect(reportCheck(again), scenario.id).toMatchObject({ pass: false, why: "There is no report to read." });
+    }
+    await hub.request({ action: "sim-reset" });
+  });
+
   it("have the team's page for that kind of trouble in the knowledge base while they run, and it does not give the answer away", async () => {
     const hub = await demoHub();
     for (const scenario of SCENARIOS) {
