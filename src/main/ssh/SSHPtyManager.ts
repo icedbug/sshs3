@@ -66,7 +66,7 @@ import { listAgentPublicKeys } from './PublicKeyDiscovery';
 import type { AskpassPromptRetryContext } from '../smartcard/AskpassServer';
 import { createLogger } from '../log';
 import { createMuxControlPath } from './muxControlPath';
-import { clientTerminalEnv, isWebServerProcess, sshClientFileArgs } from '../web/tenantBoundary';
+import { clientTerminalEnv, isWebServerProcess, serverEnvForAccountChild, sshClientFileArgs } from '../web/tenantBoundary';
 const sshLog = createLogger('ssh');
 
 export const CONPTY_WRITE_CHUNK_BYTES = 512;
@@ -885,7 +885,7 @@ export class SSHPtyManager extends EventEmitter {
   private sshChildEnv(config: SSHConnectionConfig, askpassEnv: Record<string, string>, clientEnv?: Record<string, string>): Record<string, string> {
     const account = Boolean(this.confineConfig) || isWebServerProcess();
     const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...(account ? serverEnvForAccountChild(process.env) : (process.env as Record<string, string>)),
       TERM: 'xterm-256color',
       ...(account ? clientTerminalEnv(clientEnv) : clientEnv || {}),
       ...askpassEnv,
@@ -894,10 +894,6 @@ export class SSHPtyManager extends EventEmitter {
     // The native agent's host capability is never an environment credential for a PTY.
     delete env.SSHS3_NATIVE_TOOL_KEY;
     delete env.SSHS3_NATIVE_TOOL_URL;
-    if (account) {
-      delete env.SSH_AUTH_SOCK;
-      delete env.SSHS3_MASTER_KEY;
-    }
     return env;
   }
 

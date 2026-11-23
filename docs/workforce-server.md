@@ -33,6 +33,7 @@ visits.
 | `SSHS3_ADMIN_USER`, `SSHS3_ADMIN_PASSWORD` | Create the first user at start instead of in the browser. |
 | `SSHS3_MASTER_KEY` | A passphrase that encrypts stored credentials. Unset, a key is generated in the data directory. See [The credential key](#the-credential-key). |
 | `SSHS3_WEB_PORT`, `SSHS3_WEB_HOST` | Where it listens. |
+| `SSHS3_ALLOW_PRIVATE_ADDRESSES=1` | On a server with more than one account: let the addresses accounts type (a Kubernetes cluster, a notification channel, a model, a chat server) be on the server's own network. Unset, such addresses are refused there. |
 | `SSHS3_PUBLIC_URL` | The address people reach the server at, for links in notifications and in chat. It also counts as the server's own page when a request is checked (see [Behind a reverse proxy](#behind-a-reverse-proxy)). See [Notifications](#notifications-and-answering-from-a-phone) and [The team's chat](#the-teams-chat). |
 | `SSHS3_ALLOWED_ORIGINS` | More addresses the page may be opened from, separated by commas, each with its scheme (`https://sshs3.example.com`). |
 | `SSHS3_MATTERMOST_ACTION_FROM` | The IP addresses Mattermost's server posts button presses from, exactly as this server sees them, separated by commas. Host names and ranges are not matched. See [The team's chat](#the-teams-chat). |
@@ -292,11 +293,20 @@ other accounts' files are on the same disk. What a signed-in person can reach:
   has to be in the account's own folder; a profile that names another file is
   refused when it connects. From the browser only the terminal type and the
   language settings (`TERM`, `COLORTERM`, `LANG`, `LC_*`) reach the ssh
-  process.
+  process. From the server's own environment the process gets what a program
+  needs to run (`PATH`, the locale, library paths) and nothing that holds a
+  secret: no `SSHS3_*` variable, not the server's ssh agent, and no variable
+  whose name says token, secret, password or key.
 - **Their own Kubernetes sign-ins.** Each account has its own kubeconfig
   (`users/<account>/.kube/config`). The server's `KUBECONFIG` and
   `~/.kube/config` are never read, and an entry that signs in by running a
-  program is left out.
+  program is left out. A cluster's address is one an account types, so on a
+  server with more than one account it is held to the rule for every address
+  an account names: an address on the server's own network (private or
+  loopback) is not called, at sign-in or later, unless the administrator sets
+  `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`. A team whose clusters are on the same
+  network as the server sets it. Link-local and cloud metadata addresses are
+  never called.
 
 After an update from a version before this one:
 

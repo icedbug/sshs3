@@ -82,6 +82,28 @@ export function sshClientFilesOf(config: object | undefined | null): SshClientFi
   return config ? (config as Record<symbol, SshClientFiles | undefined>)[SSH_CLIENT_FILES] : undefined;
 }
 
+/** Names that say a variable holds a secret, whatever program it belongs to. */
+const SECRET_NAME = /TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SESSION_?KEY/i;
+
+/**
+ * The part of the server's own environment a child started for an account gets. The server's
+ * environment is the deployment's: its administrator password, its credential key, cloud keys and
+ * tokens of whatever else runs beside it. None of that is the account's. What is left is what a
+ * program needs to run at all (PATH, locale, library paths and the like).
+ *
+ * Left out: every variable of sshs3's own (`SSHS3_*`; the app adds the ones a child needs afterwards),
+ * the server's ssh agent, and every name that says it holds a secret.
+ */
+export function serverEnvForAccountChild(env: NodeJS.ProcessEnv): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (/^SSHS3_/i.test(name) || name === 'SSH_AUTH_SOCK' || name === 'SSH_AGENT_PID' || SECRET_NAME.test(name)) continue;
+    kept[name] = value;
+  }
+  return kept;
+}
+
 /**
  * The arguments that make an ssh child read the account's files. On the desktop: none, ssh reads the
  * person's own `~/.ssh`. On a web server a config without the account's files is refused.

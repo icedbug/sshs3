@@ -8,6 +8,7 @@ import { XServerManager } from '../x11/XServerManager';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { IpcBridge } from '../IpcBridge';
 import { elevatedShellExecutable, elevatedStartCommand, isUacDeclined } from './elevatedShell';
+import { isWebServerProcess } from '../web/tenantBoundary';
 
 /** The part of IpcBridge this handler group may use. */
 export type GeneralHost = Pick<IpcBridge, 'getUpdateService' | 'registerHandler' | 'profileStore' | 'localFilesDir'>;
@@ -46,7 +47,8 @@ export function registerGeneralHandlers(bridge: GeneralHost): void {
   });
 
   bridge.registerHandler(IPC_CHANNELS.APP_GET_HOSTNAME, async () => {
-    return os.hostname();
+    // On a web server the machine is the server, not the person's: its name inside the network is not theirs to learn.
+    return isWebServerProcess() ? 'sshs3-server' : os.hostname();
   });
 
   bridge.registerHandler(IPC_CHANNELS.APP_GET_SECURITY_STATUS, async () => {

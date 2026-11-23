@@ -158,6 +158,35 @@ describe('web server: ssh for an account uses the account\'s own files', () => {
     expect(child.cwd).not.toBe(kit.dataDir);
   });
 
+  it('does not hand the server\'s own secrets to an account\'s ssh process', async () => {
+    const before = { ...process.env };
+    // What a deployment has in its environment: the first administrator's password, the credential key,
+    // keys of other things that run beside the server.
+    Object.assign(process.env, {
+      SSHS3_ADMIN_PASSWORD: 'the-first-admins-password', // pragma: allowlist secret
+      SSHS3_MASTER_KEY: 'the-credential-key-passphrase', // pragma: allowlist secret
+      SSHS3_PUBLIC_URL: 'https://sshs3.example.test',
+      AWS_SECRET_ACCESS_KEY: 'a-cloud-key', // pragma: allowlist secret
+      GITHUB_TOKEN: 'a-token', // pragma: allowlist secret
+      DB_PASSWORD: 'a-database-password', // pragma: allowlist secret
+      SSH_AUTH_SOCK: '/tmp/the-servers-agent.sock',
+      SOME_PLAIN_SETTING: 'kept',
+    });
+    try {
+      await omar.invoke('terminal:create', { config: server(), ptyOptions: { cols: 100, rows: 30 } });
+      const child = spawned[0]!;
+      for (const name of ['SSHS3_ADMIN_PASSWORD', 'SSHS3_MASTER_KEY', 'SSHS3_PUBLIC_URL', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'DB_PASSWORD', 'SSH_AUTH_SOCK'])
+        expect(child.env[name], name).toBeUndefined();
+      expect(JSON.stringify(child.env)).not.toMatch(/the-first-admins-password|the-credential-key-passphrase|a-cloud-key|a-token|a-database-password/);
+      // What a program needs to run at all is still there, and so is the app's own askpass helper.
+      expect(child.env.PATH).toBe(process.env.PATH);
+      expect(child.env.SOME_PLAIN_SETTING).toBe('kept');
+      expect(child.env.SSH_ASKPASS).toBeTruthy();
+    } finally {
+      process.env = before;
+    }
+  });
+
   it('refuses a key file that is not the account\'s own', async () => {
     const others = [
       path.join(mariaDir, '.ssh', 'id_ed25519'), // another account's key

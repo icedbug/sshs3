@@ -5,6 +5,7 @@ import https from 'node:https';
 import http from 'node:http';
 import { URL } from 'node:url';
 import { loadK8sClient } from './k8sClient';
+import { assertClusterAddressAllowed } from './k8sKubeConfig';
 import { isWebServerProcess } from '../web/tenantBoundary';
 import type { K8sLoginOptions, K8sLoginResult } from '../../shared/types/kubernetes';
 
@@ -39,23 +40,45 @@ interface ClusterApiResponse {
   headers: http.IncomingHttpHeaders;
 }
 
+/** What a cluster answered, cut short: an error message must not carry a whole page from somewhere else. */
+const shortBody = (body: unknown): string => {
+  const text = typeof body === 'string' ? body : JSON.stringify(body) ?? '';
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+};
+
 /**
  * Performs an HTTPS/HTTP request to the cluster API using Node built-in networking.
+ *
+ * On a web server the address is checked first (`assertClusterAddressAllowed`) and the request goes to
+ * exactly the address that was checked.
  */
-export function requestClusterApi(
+export async function requestClusterApi(
   serverUrl: string,
   requestPath: string,
   token: string,
   insecureSkipTlsVerify: boolean = false
 ): Promise<ClusterApiResponse> {
-  return new Promise((resolve, reject) => {
-    let fullUrl: URL;
-    try {
-      fullUrl = new URL(requestPath, serverUrl);
-    } catch {
-      return reject(new Error(`Invalid cluster URL: ${serverUrl}`));
-    }
+  let fullUrl: URL;
+  try {
+    fullUrl = new URL(requestPath, serverUrl);
+  } catch {
+    throw new Error(`Invalid cluster URL: ${serverUrl}`);
+  }
+  const checked = await assertClusterAddressAllowed(fullUrl.origin, true);
+  const lookup: http.RequestOptions['lookup'] | undefined = checked
+    ? (_host, opts, cb) => {
+        const callback = typeof opts === 'function' ? opts : cb;
+        if (typeof opts === 'object' && opts !== null && opts.all) {
+          (callback as (err: NodeJS.ErrnoException | null, addresses: Array<{ address: string; family: number }>) => void)(null, [
+            { address: checked.address, family: checked.family },
+          ]);
+        } else {
+          (callback as (err: NodeJS.ErrnoException | null, address: string, family: number) => void)(null, checked.address, checked.family);
+        }
+      }
+    : undefined;
 
+  return new Promise((resolve, reject) => {
     const isHttps = fullUrl.protocol === 'https:';
     const client = isHttps ? https : http;
 
@@ -70,6 +93,7 @@ export function requestClusterApi(
         },
         rejectUnauthorized: !insecureSkipTlsVerify,
         timeout: 10000,
+        ...(lookup ? { lookup } : {}),
       },
       (res) => {
         let raw = '';
@@ -133,6 +157,16 @@ export async function validateClusterAndToken(options: {
   let isOpenShift = false;
   const projects: string[] = [];
 
+  // An address this server may not call is said at once, before the first try below can swallow it.
+  // (A server text that is no URL at all is reported by the first request.)
+  let origin: string | undefined;
+  try {
+    origin = new URL(server).origin;
+  } catch {
+    origin = undefined;
+  }
+  if (origin) await assertClusterAddressAllowed(origin, true);
+
   // 1. Try OpenShift user API
   try {
     const userRes = await requestClusterApi(
@@ -165,7 +199,7 @@ export async function validateClusterAndToken(options: {
         throw new Error(`Authentication failed (HTTP ${apiRes.statusCode}): Token was rejected by the cluster.`);
       }
       if (apiRes.statusCode !== 200) {
-        throw new Error(`Cluster API returned HTTP ${apiRes.statusCode}: ${typeof apiRes.body === 'string' ? apiRes.body : JSON.stringify(apiRes.body)}`);
+        throw new Error(`Cluster API returned HTTP ${apiRes.statusCode}: ${shortBody(apiRes.body)}`);
       }
       if (!username) {
         username = 'token-user';

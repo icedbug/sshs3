@@ -2,6 +2,7 @@ import type * as k8s from '@kubernetes/client-node';
 import fs from 'node:fs';
 import { loadK8sClient } from './k8sClient';
 import { isWebServerProcess } from '../web/tenantBoundary';
+import { effectivePolicy, resolveAndValidateTarget, SsrfBlockedError, type GuardedHttpTarget } from '../oauth/requestJson';
 
 /**
  * Names of kubeconfig users configured with an `exec:` credential plugin —
@@ -25,6 +26,48 @@ export function getExecAuthUserNames(kc: k8s.KubeConfig): Set<string> {
   return names;
 }
 
+/** How long an address that was allowed is not looked up again. A cluster is called many times a minute. */
+const ALLOWED_FOR_MS = 60_000;
+const allowedUntil = new Map<string, number>();
+
+/**
+ * A cluster's address is one an account typed. On a web server several accounts share, it must not
+ * make the server call its own network: the same rule as for the other endpoints an account names
+ * (`userEndpointPolicy`). Private and loopback addresses are refused there unless the administrator
+ * allows them, and link-local and cloud metadata addresses are refused on every web server.
+ * On the desktop the network is the person's own and nothing is checked here.
+ *
+ * Returns the address that was checked, for a caller that connects by itself and wants to connect to
+ * exactly that one (a name could answer with another address a moment later).
+ */
+export async function assertClusterAddressAllowed(serverUrl: string, fresh = false): Promise<GuardedHttpTarget | undefined> {
+  if (!isWebServerProcess()) return undefined;
+  const now = Date.now();
+  if (!fresh && (allowedUntil.get(serverUrl) ?? 0) > now) return undefined;
+  let target: GuardedHttpTarget;
+  try {
+    target = await resolveAndValidateTarget(serverUrl, effectivePolicy({ allowHttp: true }));
+  } catch (error) {
+    allowedUntil.delete(serverUrl);
+    // A name that cannot be looked up reaches nothing. The call itself then says so, as it always did.
+    if (!(error instanceof SsrfBlockedError) && typeof (error as NodeJS.ErrnoException).code === 'string') return undefined;
+    if (!(error instanceof SsrfBlockedError) && /^Could not resolve /.test(error instanceof Error ? error.message : '')) return undefined;
+    const why = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `This cluster's address is not reached from this server (${why}). On a server that several accounts share, an administrator allows addresses on the server's own network with SSHS3_ALLOW_PRIVATE_ADDRESSES=1.`,
+      { cause: error },
+    );
+  }
+  if (allowedUntil.size > 500) allowedUntil.clear();
+  allowedUntil.set(serverUrl, now + ALLOWED_FOR_MS);
+  return target;
+}
+
+/** For tests: forget which addresses were allowed. */
+export function forgetAllowedClusterAddressesForTesting(): void {
+  allowedUntil.clear();
+}
+
 /**
  * Builds a KubeConfig pinned to a single context, reconstructed from the base
  * kubeconfig's already-parsed clusters/users/contexts. Shared by every k8s
@@ -43,6 +86,11 @@ export async function loadKubeConfigForContext(contextName: string, kubeConfigPa
     users: base.getUsers(),
     currentContext: contextName,
   });
+  // Every call against a cluster starts here, so here is where its address is checked on a web server.
+  if (isWebServerProcess()) {
+    const server = kc.getCurrentCluster()?.server;
+    if (server) await assertClusterAddressAllowed(server);
+  }
   return kc;
 }
 
