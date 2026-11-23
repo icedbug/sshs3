@@ -2,11 +2,10 @@ import crypto from "node:crypto";
 import type { FactChange, FactProblem, ServerFacts } from "../../../shared/types/aiHub";
 
 /**
- * What is read from a server, without a model: every command only looks.
- * `aiHubServerFacts.test.ts` holds each of them to the app's own classifier
- * (`analyzeCommandSafety`): a command that is not read-only there fails the
- * build. `only` names the program a section needs, so the script skips it
- * quietly where that program does not exist.
+ * What is read from a server, without a model. Every command here is written
+ * to only look, and whoever adds one keeps it so: nothing in the app checks it.
+ * `only` names the program a section needs, so the script skips it quietly
+ * where that program does not exist.
  */
 export const FACT_COMMANDS: { section: string; command: string; only?: string }[] = [
   { section: "os", command: "cat /etc/os-release" },

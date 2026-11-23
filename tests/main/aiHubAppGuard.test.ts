@@ -38,8 +38,8 @@ describe("which calls move the fence", () => {
     const settings = "sshs3_manage_app_and_settings";
     // The safety policy, under whichever of the handler's names it arrives.
     for (const operation of ["update_safety_policy", "update_settings", "configure_ai", "update_shortcuts"])
-      expect(guardAsk(settings, { operation, requireApprovalOnProdTags: false }, run("autonomous"), known)).toMatchObject({ title: "Change the command safety policy", detail: "requireApprovalOnProdTags: false" });
-    expect(guardAsk(settings, { operation: "update_settings", safetyPolicy: { blockDestructiveWithoutConfirm: false } }, run("autonomous"), known)?.detail).toBe('safetyPolicy: {"blockDestructiveWithoutConfirm":false}');
+      expect(guardAsk(settings, { operation, requireApprovalOnProdTags: false }, run("autonomous"), known)).toMatchObject({ title: "Change the safety rules", detail: "requireApprovalOnProdTags: false" });
+    expect(guardAsk(settings, { operation: "update_settings", safetyPolicy: { requireApprovalOnProdTags: false } }, run("autonomous"), known)?.detail).toBe('safetyPolicy: {"requireApprovalOnProdTags":false}');
     // Where conversations and the key are sent.
     expect(guardAsk(settings, { operation: "configure_ai", aiBaseUrl: "https://evil.example/v1" }, run("autonomous"), known)).toMatchObject({ title: "Change which model endpoint is used", detail: expect.stringContaining("aiBaseUrl: https://evil.example/v1") });
     expect(guardAsk(settings, { operation: "configure_ai", aiProvider: "openai-compatible" }, run("assisted"), known)).toBeDefined();
@@ -165,14 +165,17 @@ describe("a run that tries to change its own rules", () => {
 
     for (const mode of ["autonomous", "assisted"] as const) {
       const { task, broker, call, pending } = await startRun(hub, mode);
-      const asked = call("sshs3_manage_app_and_settings", { operation: "update_safety_policy", requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false });
+      const asked = call("sshs3_manage_app_and_settings", { operation: "update_safety_policy", requireApprovalOnProdTags: false });
       const change = await pending();
-      expect(change).toMatchObject({ kind: "setting", guard: true, target: "sshs3", description: "Change the command safety policy", status: "pending" });
+      expect(change).toMatchObject({ kind: "setting", guard: true, target: "sshs3", description: "Change the safety rules", status: "pending" });
+      // Nothing rates a change: it carries no risk.
+      expect(change).not.toHaveProperty("riskLevel");
+      expect(change).not.toHaveProperty("riskReason");
       expect(change.command).toContain("requireApprovalOnProdTags: false");
       expect(task.status).toBe("waiting");
       // It is in the inbox like any command that waits, and the policy is as it was.
       const snap = await hub.snapshot();
-      expect(inboxItems(snap).find((i) => i.changeId === change.id)).toMatchObject({ kind: "approval", title: "Change the command safety policy" });
+      expect(inboxItems(snap).find((i) => i.changeId === change.id)).toMatchObject({ kind: "approval", title: "Change the safety rules" });
       expect(snap.safetyPolicy?.requireApprovalOnProdTags ?? true).toBe(true);
       broker.approve(task.id, change.id, false);
       await expect(asked).rejects.toThrow("Action not approved");
@@ -199,6 +202,24 @@ describe("a run that tries to change its own rules", () => {
     expect((await hub.snapshot()).safetyPolicy?.requireApprovalOnProdTags).toBe(true);
     // But it still runs no command and writes no file.
     await expect(adviser.call("terminal_command" as never, { command: "ls" })).rejects.toThrow();
+  });
+
+  it("is told that the settings about commands are gone, before anybody is asked", async () => {
+    const { hub } = await makeHub();
+    const { task, call } = await startRun(hub, "autonomous", "run-gone");
+    for (const payload of [
+      { operation: "update_safety_policy", blockDestructiveWithoutConfirm: false },
+      { operation: "update_settings", autoApproveSafeReadOnly: true },
+      { operation: "update_safety_policy", safetyPolicy: { commandAllowPrefixes: ["rm"] } },
+      // Together with a rule that does exist: refused whole, so nothing is half done.
+      { operation: "update_safety_policy", requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false },
+    ]) {
+      await expect(call("sshs3_manage_app_and_settings", payload)).rejects.toThrow(/sshs3 has no setting .*Commands are not checked and nobody is asked about them/);
+    }
+    // No question went to a person, and the rules are as they were.
+    expect(task.changes).toEqual([]);
+    expect(task.status).toBe("running");
+    expect((await hub.snapshot()).safetyPolicy).toEqual({ requireApprovalOnProdTags: true });
   });
 
   it("cannot add a program to run, move the model endpoint, or hand itself more freedom", async () => {
@@ -294,7 +315,9 @@ describe("an MCP tool is not a way around the fence", () => {
     const { task, broker, call, pending } = await startRun(hub, "assisted", "run-mcp");
     const asked = call("mcp__srv-1__set_thermostat", { to: 30 });
     const change = await pending();
-    expect(change).toMatchObject({ kind: "command", target: "MCP · Weather", riskLevel: "modify" });
+    // Not a plain command: a tool of another system waits for a person as a change card does.
+    expect(change).toMatchObject({ kind: "command", target: "MCP · Weather", toolCall: true });
+    expect(change).not.toHaveProperty("riskLevel");
     expect(change.description).toContain("set_thermostat");
     // Nothing reached the server while it waited.
     expect(calls).toEqual([]);

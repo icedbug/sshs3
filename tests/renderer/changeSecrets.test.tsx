@@ -35,8 +35,6 @@ const connect: AgentChange = {
   description: "Connect the agent bot, which answers people in chat",
   command: "service: slack",
   status: "pending",
-  riskLevel: "modify",
-  riskReason: "Changes the rules agents run under. Only a person can approve it.",
   secretFields: [
     { key: "token", label: "the agent bot's token", optional: true },
     { key: "appToken", label: "the Slack app-level token (xapp-)", optional: true },

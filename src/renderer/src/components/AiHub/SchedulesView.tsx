@@ -31,9 +31,9 @@ interface Draft {
 
 export const SCHEDULE_MODES: Record<AgentMode, string> = {
   advice: "Reports only: runs no commands",
-  plan: "Plans first: proposes steps before running",
-  assisted: "Asks before each command (waits for you)",
-  autonomous: "Runs commands on its own",
+  plan: "Plans first: proposes a plan before a change",
+  assisted: "Runs commands. A change card or a file write waits for you",
+  autonomous: "Runs commands and change cards on its own",
 };
 
 export const QUIET_SENTINEL_PRESET = {
@@ -616,11 +616,11 @@ export function Schedules({
             {hub.config.model || "the model set in Settings"}, and runs until it
             is done or somebody stops it.
             {draft.mode === "autonomous" &&
-              " On its own it still stops for destructive commands and, by default, for changes on production."}
+              " Commands and change cards run without asking. By default a change card or a file write on production still waits for a person."}
             {draft.mode === "assisted" &&
-              " A command that needs approval waits for a person."}
+              " Commands run without asking. A change card or a file write waits for a person."}
             {draft.mode === "plan" &&
-              " Proposes an executable plan and waits for review before changing anything."}
+              " It looks around, then proposes a plan. Change cards and file writes wait until the plan is approved."}
           </p>
           <div className="ai-card-actions">
             <button

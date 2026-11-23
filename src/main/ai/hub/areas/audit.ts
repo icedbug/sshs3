@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { HubReply } from "../../../../shared/types/aiHub";
+import { isPlainCommand } from "../../../../shared/types/aiHub";
 import { isDemoMode } from "../demoWorkspace";
 import { AuditLog, AuditShipper, type AuditShipperOptions } from "../AuditLog";
 import { SessionRecorder } from "../SessionRecorder";
@@ -93,13 +94,15 @@ export class AuditPart {
             exitCode: change.exitCode,
             approvedBy: change.decidedBy
               ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})`
-              : change.decidedHow && change.decidedHow !== "person"
-                ? DECIDED_HOW[change.decidedHow]
-                : undefined,
+              : change.decidedHow === "policy" && change.status !== "denied" && isPlainCommand(change)
+                ? // No rule let it through: a plain command is never asked about.
+                  "nobody: a command runs without asking"
+                : change.decidedHow && change.decidedHow !== "person"
+                  ? DECIDED_HOW[change.decidedHow]
+                  : undefined,
             taskId: task.id,
             changeId: change.id,
             detail: [
-              change.riskLevel ? `risk: ${change.riskLevel}` : "",
               change.check
                 ? `check ${change.check.after === true ? (change.check.before ? "passed (it already passed before)" : "passed") : change.check.after === false ? "failed" : `not looked at (${change.check.skipped ?? "unknown"})`}: ${change.check.command}`
                 : "",

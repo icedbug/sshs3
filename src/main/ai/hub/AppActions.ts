@@ -28,11 +28,7 @@ import {
   safeError,
 } from "./privacy";
 import { unverifiedNote } from "./KbCheck";
-import {
-  analyzeCommandSafety,
-  DEFAULT_SAFETY_POLICY,
-  isProdTag,
-} from "./CommandSafetyService";
+import { DEFAULT_SAFETY_POLICY, isProdTag } from "./safetyPolicy";
 import {
   isDemoMode,
   mcpCatalog,
@@ -573,6 +569,22 @@ function pageForAgent(page: KbPage): Record<string, unknown> {
   };
 }
 
+/**
+ * Settings about commands that an older sshs3 had and this one does not. A call that carries one is
+ * refused before anybody is asked: a person is not put a question about a rule that does not exist,
+ * and the agent does not report it as set.
+ */
+function refuseRemovedSafetySettings(p: Record<string, unknown>): void {
+  const nested = p.safetyPolicy && typeof p.safetyPolicy === "object" && !Array.isArray(p.safetyPolicy) ? (p.safetyPolicy as Record<string, unknown>) : {};
+  const gone = ["autoApproveSafeReadOnly", "blockDestructiveWithoutConfirm", "commandAllowPrefixes"].filter(
+    (key) => p[key] !== undefined || nested[key] !== undefined,
+  );
+  if (gone.length)
+    throw new Error(
+      `sshs3 has no setting ${gone.join(" or ")}. Nothing was changed. Commands are not checked and nobody is asked about them. Change cards, file writes and plans wait for approval. The rule that can be set here is requireApprovalOnProdTags.`,
+    );
+}
+
 export async function handleAppAction(
     hub: AppActionHost,
     task: AgentTask,
@@ -598,6 +610,8 @@ export async function handleAppAction(
             .map((t) => t.trim())
             .filter(Boolean)
         : undefined;
+
+    if (request.action === "sshs3_manage_app_and_settings") refuseRemovedSafetySettings(p);
 
     if (request.action.startsWith("mcp__")) {
       // The servers this run was given, by the agent it runs as. A name outside that does not resolve.
@@ -645,14 +659,9 @@ export async function handleAppAction(
             target: `MCP · ${resolved.server.name}`,
             description: clip(`Call ${resolved.toolName} on the MCP server “${resolved.server.name}”`, 300),
             command: clip(`${resolved.toolName} ${JSON.stringify(p)}`, 4000),
+            // A tool of another system, not a plain command: it waits for a person as a change card does.
+            toolCall: true,
             status: "pending",
-            riskLevel: "modify",
-            riskReason:
-              toolPolicy === "ask"
-                ? `Server tool policy requires confirmation for “${resolved.toolName}”.`
-                : resolved.tool.readOnly && !trustReadOnly
-                  ? `Server “${resolved.server.name}” does not trust readOnlyHint annotations.`
-                  : "A tool on another system, which did not say that it only looks.",
             at: Date.now(),
           };
           task.changes.push(change);
@@ -719,8 +728,6 @@ export async function handleAppAction(
         command: boundedContext(ask.detail, 3000),
         ...(ask.secrets?.length ? { secretFields: ask.secrets } : {}),
         status: "pending",
-        riskLevel: "modify",
-        riskReason: "Changes the rules agents run under. Only a person can approve it.",
         at: Date.now(),
       };
       task.changes.push(guarded);
@@ -1464,33 +1471,13 @@ export async function handleAppAction(
             !Array.isArray(p.safetyPolicy)
               ? (p.safetyPolicy as Record<string, unknown>)
               : undefined;
-          const nextAutoApprove = rawPolicy
-            ? optBool(rawPolicy, "autoApproveSafeReadOnly")
-            : optBool(p, "autoApproveSafeReadOnly");
           const nextRequireProd = rawPolicy
             ? optBool(rawPolicy, "requireApprovalOnProdTags")
             : optBool(p, "requireApprovalOnProdTags");
-          const nextBlockDestructive = rawPolicy
-            ? optBool(rawPolicy, "blockDestructiveWithoutConfirm")
-            : optBool(p, "blockDestructiveWithoutConfirm");
-          if (
-            nextAutoApprove !== undefined ||
-            nextRequireProd !== undefined ||
-            nextBlockDestructive !== undefined
-          ) {
-            const currentPolicy =
-              hub.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+          if (nextRequireProd !== undefined) {
             await hub.request({
               action: "safety-policy-save",
-              policy: {
-                autoApproveSafeReadOnly:
-                  nextAutoApprove ?? currentPolicy.autoApproveSafeReadOnly,
-                requireApprovalOnProdTags:
-                  nextRequireProd ?? currentPolicy.requireApprovalOnProdTags,
-                blockDestructiveWithoutConfirm:
-                  nextBlockDestructive ??
-                  currentPolicy.blockDestructiveWithoutConfirm,
-              },
+              policy: { requireApprovalOnProdTags: nextRequireProd },
             });
           }
 
@@ -2098,8 +2085,7 @@ export async function handleAppAction(
           ? `Cluster ${clusterName} (${matchedServers.map((s) => s.name).join(", ")})`
           : matchedServers.map((s) => s.name).join(", ");
 
-        const safety = analyzeCommandSafety(command);
-        // Shown in full for approval or refused: target node roles & count are reported before execution.
+        // A plain command, as in one terminal: it runs on every node and nobody is asked. Shown in full or refused.
         const shown = forApproval(command, 8000, "command");
         const change: AgentChange = {
           id: crypto.randomUUID(),
@@ -2117,9 +2103,6 @@ export async function handleAppAction(
           ref: nextRef(task),
           ...(fence ? { targetProfiles: matchedServers.map((srv) => srv.id) } : {}),
           status: "pending",
-          riskLevel: safety.riskLevel,
-          riskReason: safety.riskReason,
-          parsedSubcommands: safety.parsedSubcommands,
           at: Date.now(),
         };
         task.changes.push(change);

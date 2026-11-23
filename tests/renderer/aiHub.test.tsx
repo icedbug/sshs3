@@ -512,8 +512,11 @@ describe("the agent's plan", () => {
     expect(screen.getByTestId("plan-review")).toHaveTextContent("Review: problems found");
     expect(screen.getByTestId("plan-review")).toHaveTextContent("Step 2 does not go through haproxy");
     expect(card).toHaveTextContent("Not checked: haproxy has no shorter timeout");
-    // One of the two steps lists a command: that is what runs without asking again.
-    expect(card).toHaveTextContent("The command listed above runs without asking you again");
+    // One of the two steps lists a command: made as a change card, that is what runs without asking again.
+    expect(card).toHaveTextContent("A change card that matches the step listed above runs without asking you again. Any other change card or file write still asks. Commands run without asking.");
+    // Nothing says that a destructive command still asks: nothing rates a command.
+    expect(card).not.toHaveTextContent("destructive");
+    expect(screen.getByTestId("plan-ask-each").closest("label")).toHaveTextContent("Ask me before each change card");
   });
 
   it("opens Edit Plan to send a revision note or reject the plan, and approves directly", async () => {
@@ -560,7 +563,7 @@ describe("the agent's plan", () => {
 
     fireEvent.click(box);
     expect(box).toBeChecked();
-    expect(screen.getByTestId("plan-card")).toHaveTextContent("Every command that changes something asks you before it runs, also the 1 listed above");
+    expect(screen.getByTestId("plan-card")).toHaveTextContent("Every change card asks you before it runs, also the 1 listed above. Commands run without asking.");
     fireEvent.click(screen.getByTestId("plan-approve-btn"));
     expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: true, note: "ask before each change", askEach: true });
 
@@ -576,7 +579,7 @@ describe("the agent's plan", () => {
     expect(screen.getByTestId("plan-card")).toHaveTextContent("(the plan says so)");
 
     rerender(<PlanCard taskId="t1" plan={{ ...plan, status: "approved", askEach: "note" }} busy={false} act={act} />);
-    expect(screen.getAllByTestId("plan-covers").at(-1)).toHaveTextContent("Approved with every changing command asking first");
+    expect(screen.getAllByTestId("plan-covers").at(-1)).toHaveTextContent("Approved with every change card asking first, also the ones listed.");
   });
 
   it("cannot be decided while the agent is working, and offers no decision once it is made", async () => {

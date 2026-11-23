@@ -48,8 +48,6 @@ export interface RunView {
     description: string;
     command?: string;
     hiddenValues?: boolean;
-    riskLevel?: AgentChange["riskLevel"];
-    riskReason?: string;
     check?: { command: string; expected: string };
     rollback?: string;
     diff?: string;
@@ -309,8 +307,6 @@ export class ChatRunsPart {
         description: c.description,
         ...(c.command !== undefined ? { command: c.command } : {}),
         ...(c.hiddenValues ? { hiddenValues: true } : {}),
-        ...(c.riskLevel ? { riskLevel: c.riskLevel } : {}),
-        ...(c.riskReason ? { riskReason: c.riskReason } : {}),
         ...(c.check ? { check: { command: c.check.command, expected: c.check.expected } } : {}),
         ...(c.rollback ? { rollback: c.rollback.command } : {}),
         ...(c.diff ? { diff: c.diff } : {}),

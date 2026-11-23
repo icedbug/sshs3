@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCheck, Clock, HelpCircle, Search } from "lucide-react";
+import { Clock, HelpCircle, Search } from "lucide-react";
 import {
   filterInboxItems,
   inboxItems,
@@ -137,9 +137,7 @@ export function InboxView({
   const [selectedId, setSelectedId] = useState<string | null>(focusItemId ?? null);
   const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [armedDestructiveId, setArmedDestructiveId] = useState<string | null>(null);
   const [armedDoneId, setArmedDoneId] = useState<string | null>(null);
-  const [batchBusy, setBatchBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   const focused = useRef<HTMLElement | null>(null);
@@ -209,20 +207,6 @@ export function InboxView({
       snoozed: snoozedAll.length,
     };
   }, [allItems, now]);
-
-  const safeLowRiskApprovals = useMemo(
-    () =>
-      activeItems.filter((item) => {
-        if (item.kind !== "approval" || item.risk !== "safe" || !item.taskId || !item.changeId) {
-          return false;
-        }
-        const change = hub.tasks
-          .find((t) => t.id === item.taskId)
-          ?.changes.find((c) => c.id === item.changeId);
-        return !change?.guard;
-      }),
-    [activeItems, hub.tasks],
-  );
 
   const focusPresent = Boolean(focusItemId && allItems.some((i) => i.id === focusItemId));
 
@@ -326,21 +310,6 @@ export function InboxView({
     [dispatch],
   );
 
-  const approveLowRiskBatch = useCallback((): void => {
-    if (safeLowRiskApprovals.length === 0) return;
-    setBatchBusy(true);
-    void Promise.all(
-      safeLowRiskApprovals.map((item) =>
-        dispatch({
-          action: "approve",
-          taskId: item.taskId!,
-          changeId: item.changeId!,
-          approved: true,
-        }),
-      ),
-    ).finally(() => setBatchBusy(false));
-  }, [dispatch, safeLowRiskApprovals]);
-
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -353,11 +322,10 @@ export function InboxView({
       }
 
       if (event.key === "Escape") {
-        if (showShortcuts || snoozeMenuId || armedDestructiveId || armedDoneId) {
+        if (showShortcuts || snoozeMenuId || armedDoneId) {
           event.preventDefault();
           setShowShortcuts(false);
           setSnoozeMenuId(null);
-          setArmedDestructiveId(null);
           setArmedDoneId(null);
         }
         return;
@@ -373,7 +341,6 @@ export function InboxView({
         const next = visibleItems[nextIdx];
         if (next) {
           setSelectedId(next.id);
-          setArmedDestructiveId(null);
           setArmedDoneId(null);
           itemRefs.current[next.id]?.scrollIntoView?.({ block: "nearest" });
         }
@@ -386,7 +353,6 @@ export function InboxView({
         const prev = visibleItems[prevIdx];
         if (prev) {
           setSelectedId(prev.id);
-          setArmedDestructiveId(null);
           setArmedDoneId(null);
           itemRefs.current[prev.id]?.scrollIntoView?.({ block: "nearest" });
         }
@@ -435,12 +401,6 @@ export function InboxView({
           event.preventDefault();
           // A setting that takes a token is answered on its own card: the key does what the button does not offer.
           if (takesSecrets(hub.tasks.find((t) => t.id === active.taskId)?.changes.find((c) => c.id === active.changeId))) return;
-          const destructive = active.risk === "destructive" || active.risk === "critical";
-          if (destructive && armedDestructiveId !== active.id) {
-            setArmedDestructiveId(active.id);
-            return;
-          }
-          setArmedDestructiveId(null);
           void dispatch({
             action: "approve",
             taskId: active.taskId,
@@ -457,7 +417,6 @@ export function InboxView({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    armedDestructiveId,
     armedDoneId,
     dispatch,
     hub.tasks,
@@ -830,40 +789,12 @@ export function InboxView({
             </div>
           </div>
 
-          {safeLowRiskApprovals.length > 0 && (
-            <div
-              className="ai-card ai-inbox-batch"
-              data-testid="inbox-batch-bar"
-              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 12px" }}
-            >
-              <span>
-                <strong className={TABULAR_NUMS_CLASS} style={TABULAR_NUMS_STYLE}>
-                  {safeLowRiskApprovals.length}
-                </strong>{" "}
-                low-risk read-only {safeLowRiskApprovals.length === 1 ? "approval" : "approvals"} ready
-              </span>
-              <button
-                type="button"
-                className="ai-btn-emerald"
-                data-testid="inbox-approve-low-risk"
-                disabled={batchBusy}
-                onClick={approveLowRiskBatch}
-              >
-                <CheckCheck size={13} aria-hidden="true" /> Approve all low-risk
-              </button>
-            </div>
-          )}
         </div>
       )}
 
       {focusItemId && !focusPresent && (
         <p className="ai-note" role="status" data-testid="inbox-handled">
           What that notification was about no longer waits: it has been answered, or the agent stopped waiting.
-        </p>
-      )}
-      {armedDestructiveId && (
-        <p className="ai-note" role="status" data-testid="inbox-destructive-arm">
-          Destructive change selected: press <kbd>a</kbd> again to confirm approval, or <kbd>Esc</kbd> to cancel.
         </p>
       )}
       {armedDoneId && (
@@ -953,11 +884,10 @@ export function InboxView({
                             Acknowledged
                           </span>
                         )}
+                        {/* An alert's or a health finding's severity. An approval carries no rating. */}
                         {item.risk && (
-                          <span
-                            className={`ai-badge ${item.risk === "destructive" || item.risk === "critical" ? "ai-badge-danger" : item.risk === "safe" ? "ai-badge-success" : "ai-badge-mode"}`}
-                          >
-                            {item.risk === "safe" ? "read-only" : item.risk === "modify" ? "changes state" : item.risk}
+                          <span className={`ai-badge ${item.risk === "critical" ? "ai-badge-danger" : "ai-badge-mode"}`}>
+                            {item.risk}
                           </span>
                         )}
                       </div>

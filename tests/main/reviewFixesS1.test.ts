@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { analyzeCommandSafety } from "../../src/main/ai/hub/CommandSafetyService";
+import { isSensitivePath } from "../../src/main/ai/hub/sensitivePaths";
 import { maskContext, maskSecrets } from "../../src/main/ai/hub/privacy";
 import { FileTools } from "../../src/main/ai/hub/FileTools";
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
@@ -22,8 +22,6 @@ afterEach(() => {
   delete process.env.SSHS3_ALLOW_PRIVATE_ADDRESSES;
   vi.restoreAllMocks();
 });
-
-const level = (command: string) => analyzeCommandSafety(command).riskLevel;
 
 describe("requestJson: the person's own CA, IdP and cluster on the internal network", () => {
   const privateLookup = async () => [{ address: "10.255.255.1", family: 4 }];
@@ -61,91 +59,33 @@ describe("requestJson: the person's own CA, IdP and cluster on the internal netw
   });
 });
 
-describe("database clients: only the connection and output options are read-only", () => {
-  it("takes any other option of mysql or mariadb as a change", () => {
-    for (const cmd of [
-      `mysql -e "select 1" --pager="sh -c id"`,
-      `mysql -e "select 1" --init-command="drop table t"`,
-      `mysql -e "select 1" --tee=/tmp/out`,
-      `mysql --local-infile=1 -e "select 1"`,
-      `mysql --defaults-file=/tmp/my.cnf -e "select 1"`,
-      `mariadb --pager=less -e "select 1"`,
-      `mysqladmin status shutdown`,
-      `mysqladmin --defaults-extra-file=/tmp/x status`,
-      `clickhouse-client --queries-file /tmp/q.sql -q "select 1"`,
-      `cqlsh -f /tmp/x.cql -e "select * from t"`,
-      `sqlite3 -init /tmp/x.sql app.db "select 1"`,
-      `sqlite3 app.db ".shell id"`,
-    ])
-      expect([cmd, level(cmd)]).toEqual([cmd, "modify"]);
-  });
-
-  it("keeps the read-only forms read-only", () => {
-    for (const cmd of [
-      `mysql -h db01 -P 3306 -u app -e "select count(*) from users"`,
-      `mysql -uapp -psecret --batch --skip-column-names -e "show tables" app`,
-      `mysqladmin -h db01 -u root status`,
-      `mysqladmin ping`,
-      `sqlite3 -readonly app.db "select * from t"`,
-      `clickhouse-client -h ch01 --query "select 1"`,
-      `cqlsh -u app -k ks -e "select * from t"`,
-    ])
-      expect([cmd, level(cmd)]).toEqual([cmd, "safe"]);
-  });
-
-  it("finds a destructive statement in any of them", () => {
-    for (const cmd of [
-      `sqlite3 x "delete from t"`,
-      `sqlite3 app.db "drop table users"`,
-      `mysql --pager=less -e "drop database prod"`,
-      `mariadb -e "truncate table t"`,
-      `clickhouse-client -q "drop table t"`,
-      `cqlsh -e "drop keyspace prod"`,
-    ])
-      expect([cmd, level(cmd)]).toEqual([cmd, "destructive"]);
-  });
-});
-
-describe("reading a secret is noticed however it is spelled", () => {
+describe("a path that may hold a secret is known however it is spelled", () => {
   it("normalises paths and matches globs", () => {
-    for (const cmd of [
-      "cat /etc/shad*",
-      "cat /etc//shadow",
-      "cat /etc/../etc/shadow",
-      "cat /etc/./shadow",
-      "head /etc/sh?dow",
-      "cat /proc/self/environ",
-      "cat /proc/1/environ",
-      "cat /etc/kubernetes/admin.conf",
-      "cat ~/.ssh/id_*",
-    ]) {
-      const a = analyzeCommandSafety(cmd);
-      expect([cmd, a.sensitiveRead]).toEqual([cmd, true]);
-      expect(a.riskLevel).not.toBe("safe");
-    }
+    for (const file of [
+      "/etc/shad*",
+      "/etc//shadow",
+      "/etc/../etc/shadow",
+      "/etc/./shadow",
+      "/etc/sh?dow",
+      "/proc/self/environ",
+      "/proc/1/environ",
+      "/etc/kubernetes/admin.conf",
+      "~/.ssh/id_*",
+      "/home/app/.env",
+      "C:\\Users\\app\\.aws\\credentials",
+    ])
+      expect([file, isSensitivePath(file)]).toEqual([file, true]);
   });
 
-  it("knows the commands that print secrets", () => {
-    for (const cmd of [
-      "printenv",
-      "env",
-      "kubectl get secret db -o yaml",
-      "kubectl -n prod get secrets -ojson",
-      "kubectl get secret/db --output=jsonpath={.data}",
-      "aws secretsmanager get-secret-value --secret-id prod/db",
-      "aws --region eu-north-1 ssm get-parameter --name /db --with-decryption",
-      "terraform state pull",
-    ]) {
-      const a = analyzeCommandSafety(cmd);
-      expect([cmd, a.sensitiveRead]).toEqual([cmd, true]);
-      expect(a.riskLevel).not.toBe("safe");
-    }
+  it("leaves ordinary paths alone", () => {
+    for (const file of ["/etc/hosts", "*", "*.log", "/var/log/syslog", "/home/app/.ssh/id_ed25519.pub", ""])
+      expect([file, isSensitivePath(file)]).toEqual([file, false]);
   });
 
-  it("leaves ordinary reads alone", () => {
-    for (const cmd of ["cat /etc/hosts", "grep foo *", "cat *.log", "kubectl get secrets", "kubectl get pods -o yaml", "env FOO=1 ls", "terraform state list"]) {
-      expect([cmd, analyzeCommandSafety(cmd).sensitiveRead ?? false]).toEqual([cmd, false]);
-    }
+  it("looks at a path only: a command is not read", () => {
+    // The text is taken as one path. Nothing in it is split, unwrapped or read as a shell would.
+    expect(isSensitivePath("cat /etc/shadow")).toBe(false);
+    expect(isSensitivePath("printenv")).toBe(false);
   });
 });
 

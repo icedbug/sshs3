@@ -11,7 +11,6 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
-import { analyzeCommandSafety } from "./CommandSafetyService";
 import type { KnowledgeBaseService } from "./KnowledgeBaseService";
 import { deduplicateOrMergeMemory } from "./memory/mergeMemory";
 import { tokenize } from "./searchTokens";
@@ -285,9 +284,8 @@ export function buildFailureCritique(
     .trim()
     .slice(0, 72);
 
-  const nextChecks = [diagnosticForSignature(errorSignature, primaryCmd)].filter(
-    (cmd) => analyzeCommandSafety(cmd).riskLevel === "safe",
-  );
+  // One of sshs3's own built-in diagnostics for this kind of error. They are written to only look.
+  const nextChecks = [diagnosticForSignature(errorSignature, primaryCmd)];
 
   const parts: string[] = [];
   if (task.status === "failed") {
@@ -523,11 +521,10 @@ export class SelfLearningService {
     const commandTemplate = parameterizeCommandTemplate(
       params.commandTemplate ?? cleanFix,
     );
-    const safeVerify =
-      params.verifyCommand &&
-      analyzeCommandSafety(maskContext(params.verifyCommand)).riskLevel === "safe"
-        ? parameterizeCommandTemplate(params.verifyCommand)
-        : undefined;
+    // Kept as it was given, masked and with its names made into placeholders. Nothing looks at what it does.
+    const safeVerify = params.verifyCommand
+      ? parameterizeCommandTemplate(params.verifyCommand)
+      : undefined;
     const sourceTrust: MemorySourceTrust =
       params.sourceTrust ?? (proven ? "trusted" : "untrusted");
 
@@ -1324,7 +1321,7 @@ export class SelfLearningService {
       if (quarantine.quarantined) continue;
 
       const title = `Check after a failure (${failure.label}): ${sig.replace(/^err:/, "").replace(/_/g, " ")}`;
-      const text = `When \`${cleanFailCmd}\` fails (${cleanFailSnippet.slice(0, 120)}): a read-only check to narrow it down is \`${recommendedFix}\`. A suggestion from the kind of error, not something that was tried.`;
+      const text = `When \`${cleanFailCmd}\` fails (${cleanFailSnippet.slice(0, 120)}): a check that may narrow it down is \`${recommendedFix}\`. A suggestion from the kind of error, not something that was tried.`;
       const scope = `server:${failure.label}`;
       const commandTemplate = parameterizeCommandTemplate(recommendedFix);
       const diagProposal = buildGovernedProposal(
@@ -1338,10 +1335,7 @@ export class SelfLearningService {
           confidence: 0.5,
           sourceCommand: recommendedFix,
           commandTemplate,
-          verifyCommand:
-            analyzeCommandSafety(recommendedFix).riskLevel === "safe"
-              ? commandTemplate
-              : undefined,
+          // A suggested check is not the proof of itself: this skill carries no verify command.
           errorSignature: `guess|${sig}`,
           cluster: params.targetCluster,
           sourceTrust: "untrusted",

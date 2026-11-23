@@ -3,7 +3,6 @@ import type {
   ChatServiceName,
   AgentMode,
   SafetyPolicyConfig,
-  AgentChange,
   AgentChangeApproval,
   AgentPlan,
   ClusterSafetyPolicy,
@@ -17,7 +16,7 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceRule,
 } from "../../../../shared/types/aiHub";
-import { DEFAULT_SAFETY_POLICY, isProdTag } from "../CommandSafetyService";
+import { DEFAULT_SAFETY_POLICY, isProdTag } from "../safetyPolicy";
 import { lowerMode } from "../AppGuard";
 import {
   getBuiltinAgents,
@@ -528,7 +527,6 @@ export class SafetyPart {
     description: string;
     command?: string;
     target?: string;
-    risk?: AgentChange["riskLevel"];
     /** The tags of the server it is about: whether it is production decides who may be the second person. */
     targetTags: string[];
     requiredApprovals: number;
@@ -576,7 +574,6 @@ export class SafetyPart {
           description: c.description,
           ...(c.command ? { command: c.command } : {}),
           ...(c.target ? { target: c.target } : {}),
-          ...(c.riskLevel ? { risk: c.riskLevel } : {}),
           targetTags: this.resolveSafetyContext(task, c.target).targetTags ?? [],
           requiredApprovals: c.requiredApprovals ?? 1,
           approvedBy: (c.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor),
@@ -607,7 +604,7 @@ export class SafetyPart {
     const peer = Boolean(this.teamRules()?.requirePeerApprovalOnProd || (stored.requirePeerApprovalOnProd && this.peerApprovalPossible()));
     const own = peer === Boolean(stored.requirePeerApprovalOnProd) ? stored : { ...stored, requirePeerApprovalOnProd: peer };
     if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
-    return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
+    return { ...own, requireApprovalOnProdTags: true };
   }
   /** The rules the server's administrator set for everyone. None on the desktop, and none in the demo lab. */
   teamRules(this: HubService): TeamSafetyRules | undefined {
@@ -817,26 +814,20 @@ export class SafetyPart {
         for (const key of Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
           if (asked[key] !== undefined && typeof asked[key] !== "boolean")
             throw new Error(`"${BOOLEAN_POLICY_NAMES[key]}" is either on (true) or off (false).`);
-        if (asked.commandAllowPrefixes !== undefined && !Array.isArray(asked.commandAllowPrefixes))
-          throw new Error("Command allowlist prefixes must be an array of strings.");
         if (
           asked.clusterPolicies !== undefined &&
           (typeof asked.clusterPolicies !== "object" || asked.clusterPolicies === null || Array.isArray(asked.clusterPolicies))
         )
           throw new Error("Cluster policies must be a map of cluster names to policy settings.");
         if (this.sharedServer() && !this.host.teamAdmin?.()) {
-          // These two hold for every member whatever is stored. The two-person rule is a member's own to
+          // This one holds for every member whatever is stored. The two-person rule is a member's own to
           // switch: the one for everyone is the administrator's (team-rules-save) and holds either way.
-          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"] as const)
-            if (asked[key] === false)
-              throw new Error(`Only an administrator of this server switches off "${BOOLEAN_POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
+          if (asked.requireApprovalOnProdTags === false)
+            throw new Error(`Only an administrator of this server switches off "${BOOLEAN_POLICY_NAMES.requireApprovalOnProdTags}": on a shared server it is the team's rule.`);
           // What is sent back unchanged is not a change: a member is not refused for what they did not touch.
           const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-          if (
-            (asked.clusterPolicies !== undefined && !same(asked.clusterPolicies, stored.clusterPolicies ?? {})) ||
-            (asked.commandAllowPrefixes !== undefined && !same(asked.commandAllowPrefixes, stored.commandAllowPrefixes ?? []))
-          )
-            throw new Error("Only an administrator of this server changes cluster policies or command allowlists on a shared server.");
+          if (asked.clusterPolicies !== undefined && !same(asked.clusterPolicies, stored.clusterPolicies ?? {}))
+            throw new Error("Only an administrator of this server changes cluster policies on a shared server.");
         }
         if (!this.peerApprovalPossible()) {
           const twoPeople =
@@ -855,21 +846,10 @@ export class SafetyPart {
             );
         }
         const current: SafetyPolicyConfig = {
-          autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
           requireApprovalOnProdTags: Boolean(stored.requireApprovalOnProdTags),
-          blockDestructiveWithoutConfirm: Boolean(stored.blockDestructiveWithoutConfirm),
           ...(stored.requirePeerApprovalOnProd !== undefined ? { requirePeerApprovalOnProd: Boolean(stored.requirePeerApprovalOnProd) } : {}),
-          ...(stored.commandAllowPrefixes ? { commandAllowPrefixes: [...stored.commandAllowPrefixes] } : {}),
           ...(stored.clusterPolicies ? { clusterPolicies: { ...stored.clusterPolicies } } : {}),
         };
-        const nextPrefixes =
-          asked.commandAllowPrefixes !== undefined
-            ? (asked.commandAllowPrefixes as unknown[])
-                .filter((x): x is string => typeof x === "string")
-                .map((x) => x.trim())
-                .filter(Boolean)
-                .slice(0, 100)
-            : current.commandAllowPrefixes;
         let nextClusterPolicies = current.clusterPolicies;
         if (asked.clusterPolicies !== undefined) {
           const sanitized: Record<string, ClusterSafetyPolicy> = {};
@@ -895,28 +875,19 @@ export class SafetyPart {
           nextClusterPolicies = sanitized;
         }
         const next: SafetyPolicyConfig = {
-          autoApproveSafeReadOnly:
-            (asked.autoApproveSafeReadOnly as boolean | undefined) ?? current.autoApproveSafeReadOnly,
           requireApprovalOnProdTags:
             (asked.requireApprovalOnProdTags as boolean | undefined) ?? current.requireApprovalOnProdTags,
-          blockDestructiveWithoutConfirm:
-            (asked.blockDestructiveWithoutConfirm as boolean | undefined) ??
-            current.blockDestructiveWithoutConfirm,
           ...(asked.requirePeerApprovalOnProd !== undefined || current.requirePeerApprovalOnProd !== undefined
             ? {
                 requirePeerApprovalOnProd:
                   (asked.requirePeerApprovalOnProd as boolean | undefined) ?? current.requirePeerApprovalOnProd,
               }
             : {}),
-          ...(nextPrefixes ? { commandAllowPrefixes: nextPrefixes } : {}),
           ...(nextClusterPolicies ? { clusterPolicies: nextClusterPolicies } : {}),
         };
         const moved = (Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
           .filter((k) => Boolean(next[k]) !== Boolean(current[k]))
           .map((k) => `${BOOLEAN_POLICY_NAMES[k]}: ${current[k] ? "on" : "off"} → ${next[k] ? "on" : "off"}`);
-        if (JSON.stringify(next.commandAllowPrefixes ?? []) !== JSON.stringify(current.commandAllowPrefixes ?? [])) {
-          moved.push(`commandAllowPrefixes updated (${(next.commandAllowPrefixes ?? []).length} entries)`);
-        }
         if (JSON.stringify(next.clusterPolicies ?? {}) !== JSON.stringify(current.clusterPolicies ?? {})) {
           const was = current.clusterPolicies ?? {};
           const now = next.clusterPolicies ?? {};
@@ -928,12 +899,12 @@ export class SafetyPart {
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
         }
         if (moved.length && !isDemoMode()) await this.audit().append({
-          kind: "setting", actor: await this.resolveActorName(), target: "Command safety", what: moved.join("; "), outcome: "intent",
+          kind: "setting", actor: await this.resolveActorName(), target: "Safety rules", what: moved.join("; "), outcome: "intent",
         });
         this.store.data.safetyPolicy = next;
         if (moved.length) {
           // Who changed the rules is the team's business as well as the log's.
-          const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor: await this.resolveActorName(), targetLabel: "Command safety", kind: "note", summary: clip(`Changed the safety rules: ${moved.join("; ")}`, 400) };
+          const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor: await this.resolveActorName(), targetLabel: "Safety rules", kind: "note", summary: clip(`Changed the safety rules: ${moved.join("; ")}`, 400) };
           this.appendActivityEvent(event);
           await this.host.recordWorkspaceActivity?.(event).catch(() => {});
         }
@@ -965,7 +936,7 @@ export class SafetyPart {
           if (request.requirePeerApprovalOnProd && !peer && this.host.soleUser?.())
             throw new Error("This server has one account, so there is no second person to ask. Invite somebody first, then switch this on.");
           if (request.requirePeerApprovalOnProd !== peer) {
-            moved.push(`two people on a change to production: ${peer ? "on" : "off"} → ${request.requirePeerApprovalOnProd ? "on" : "off"}`);
+            moved.push(`two people on a change card or a file write on production: ${peer ? "on" : "off"} → ${request.requirePeerApprovalOnProd ? "on" : "off"}`);
             peer = request.requirePeerApprovalOnProd;
           }
         }

@@ -93,7 +93,7 @@ describe('ChatAnsweringStore', () => {
     await expect(store.save({ limits: { personMessagesPerHour: 0 } }, 'maria')).rejects.toThrow('from 1 to 500');
     await expect(store.save({ approvalWaitMinutes: 5000 }, 'maria')).rejects.toThrow('from 1 to 1440');
     await expect(store.save({ monthlyTokenBudget: 10 }, 'maria')).rejects.toThrow('monthly token budget');
-    await expect(store.save({ dms: { unlinked: 'write' as never } }, 'maria')).rejects.toThrow('read only or off');
+    await expect(store.save({ dms: { unlinked: 'write' as never } }, 'maria')).rejects.toThrow('commands only or off');
     await expect(store.save({ enabled: false, limits: { concurrentRuns: 0 } }, 'maria')).rejects.toThrow();
     // Nothing of the failed saves stuck, not even the part that was fine.
     expect(store.view().enabled).toBe(true);

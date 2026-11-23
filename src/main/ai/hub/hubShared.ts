@@ -12,7 +12,6 @@ import type {
 } from "../../../shared/types/aiHub";
 import { messageForView } from "./answerSourceRead";
 import { SNAPSHOT_TAIL_CHARS, SNAPSHOT_TAIL_MESSAGES } from "../../../shared/types/aiHub";
-import { analyzeCommandSafety } from "./CommandSafetyService";
 import { lowerMode } from "./AppGuard";
 import { boundedContext, clip } from "./privacy";
 import { createLogger } from "../../log";
@@ -158,25 +157,16 @@ export function incomingAgent(remote: MissionAgent, local: MissionAgent | undefi
 }
 
 /** The safety policy's boolean switches as the screen names them. */
-export const BOOLEAN_POLICY_NAMES: Record<
-  | "autoApproveSafeReadOnly"
-  | "requireApprovalOnProdTags"
-  | "blockDestructiveWithoutConfirm"
-  | "requirePeerApprovalOnProd",
-  string
-> = {
-  autoApproveSafeReadOnly: "run read-only commands without asking",
-  requireApprovalOnProdTags: "always ask before a change on production",
-  blockDestructiveWithoutConfirm: "stop destructive commands until a person says yes",
-  requirePeerApprovalOnProd: "require peer approval for changes on production",
+export const BOOLEAN_POLICY_NAMES: Record<"requireApprovalOnProdTags" | "requirePeerApprovalOnProd", string> = {
+  requireApprovalOnProdTags: "always ask before a change card or a file write on production",
+  requirePeerApprovalOnProd: "require a second person for change cards and file writes on production",
 };
 /**
  * A suggested command made fit to put in a terminal. Text from a model is not
  * trusted to be one command: control characters (an escape that ends a
- * bracketed paste early) are taken out, a second line is not run by
- * pressing Enter on the first, and the command is classified like any other.
- * Only a single-line command classified read-only may run with one key; the
- * rest is pasted for the person to read and press Enter themselves.
+ * bracketed paste early) are taken out, and more than one line is marked so
+ * that it is copied, not pasted. Nothing looks at what the command does: it
+ * is pasted for the person to read and press Enter themselves, never run for them.
  */
 export const checkedSuggestionForTesting = (s: InlineCommandSuggestion): InlineCommandSuggestion => checkedSuggestion(s);
 
@@ -184,14 +174,10 @@ export function checkedSuggestion(s: InlineCommandSuggestion): InlineCommandSugg
   // eslint-disable-next-line no-control-regex -- removing control characters is the point
   const cleaned = s.command.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u0080-\u009f]/g, "").replace(/\r\n?/g, "\n").trim().slice(0, 4000);
   const lines = cleaned.split("\n").filter((l) => l.trim());
-  const safety = analyzeCommandSafety(cleaned);
   return {
     ...s,
     command: lines.join("\n"),
-    riskLevel: safety.riskLevel,
-    riskReason: safety.riskReason,
     multiline: lines.length > 1 || undefined,
-    runnable: safety.riskLevel === "safe" && lines.length === 1,
   };
 }
 
@@ -251,12 +237,12 @@ export function investigatorPrompt(
   job: string,
 ): string {
   return [
-    "You are an investigator working for another agent on one question. Find the answer, read-only, and report it. You do not fix anything.",
+    "You are an investigator working for another agent on one question. You only look. Change nothing. Find the answer and report it. You do not fix anything.",
     `The job this is part of: ${boundedContext(job, 300)}`,
     `Your question: ${boundedContext(question, 2000)}`,
     ...(scope ? [`Where to look: ${boundedContext(scope, 500)}`] : []),
     "",
-    "Use `workspace_context` (team activity, servers, team memory), `sshs3_kb_search` (runbooks) and `sshs3_storage_ops` (list and read files and logs on the servers, diff a file between two servers). Whether you can also run read-only commands is said at the end.",
+    "Use `workspace_context` (team activity, servers, team memory), `sshs3_kb_search` (runbooks) and `sshs3_storage_ops` (list and read files and logs on the servers, diff a file between two servers). Whether you can also run commands is said at the end.",
     "Report: first the answer in one or two sentences; then the evidence, each item with its source (server and file with the relevant lines, activity entry with who and when, runbook title); then what you could not determine from here. Do not go beyond the evidence, and do not answer a different question.",
   ].join("\n");
 }

@@ -3,7 +3,7 @@ import type { AgentMode, AgentSchedule, ChangeSecretField, MissionAgent } from "
 /**
  * The rules an agent runs under are not the agent's to change. Most of what
  * the management tools do is ordinary work in the app (save a snippet, tag a
- * server); a few operations move the fence itself: the command safety policy,
+ * server); a few operations move the fence itself: the safety rules,
  * which model endpoint the conversation and the stored key go to, programs
  * and addresses that agents may call, an agent or a schedule that acts on its
  * own without asking, where the team's data is synced to, and pulling a folder
@@ -85,7 +85,7 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
   },
 };
 
-const SAFETY_FIELDS = ["safetyPolicy", "autoApproveSafeReadOnly", "requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"];
+const SAFETY_FIELDS = ["safetyPolicy", "requireApprovalOnProdTags"];
 const ENDPOINT_FIELDS = ["aiProvider", "aiBaseUrl", "aiEnabled"];
 const SERVER_HOST_PROXY_FIELDS = ["host", "port", "username", "proxyJump", "proxyJumpProfileId", "extraOptions", "privateKeyPath", "pkcs11LibPath", "forwardAgent"];
 /**
@@ -407,7 +407,7 @@ export function guardAsk(
   if (tool === "sshs3_manage_app_and_settings") {
     // The fields decide, not the operation's name: the same handler takes them under any of its names.
     if (SAFETY_FIELDS.some((k) => has(payload, k)))
-      return { title: "Change the command safety policy", detail: show(payload, SAFETY_FIELDS) };
+      return { title: "Change the safety rules", detail: show(payload, SAFETY_FIELDS) };
     if (ENDPOINT_FIELDS.some((k) => has(payload, k)))
       return {
         title: "Change which model endpoint is used",

@@ -10,44 +10,30 @@ import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { type Act, modes } from "./panelShared";
 import { TeamRulesSection } from "./TeamRulesSection";
 
-type BooleanSafetyKey =
-  | "autoApproveSafeReadOnly"
-  | "requireApprovalOnProdTags"
-  | "blockDestructiveWithoutConfirm"
-  | "requirePeerApprovalOnProd";
+type BooleanSafetyKey = "requireApprovalOnProdTags" | "requirePeerApprovalOnProd";
 
 const RULES: { key: BooleanSafetyKey; title: string; detail: string; testId?: string }[] = [
   {
-    key: "autoApproveSafeReadOnly",
-    title: "Run read-only commands without asking",
-    detail: "Commands that only look (ls, df, kubectl get …). Applies when the assistant asks before commands.",
-  },
-  {
     key: "requireApprovalOnProdTags",
-    title: "Always ask before a change on production",
+    title: "Always ask before a change card or a file write on production",
     detail:
-      "On a server tagged prod, critical or production: when the assistant asks before commands, a change is always asked about. In Auto mode a command that changes something is refused there when it comes alone: the agent has to send it together with a check that shows it worked and a way to undo it.",
-  },
-  {
-    key: "blockDestructiveWithoutConfirm",
-    title: "Stop destructive commands until reviewed",
-    detail:
-      "Commands that are hard to take back (rm -r, mkfs, dd onto a disk, DROP DATABASE, kubectl delete of a namespace, terraform destroy, piping a download into sh) never run without an explicit approval, in any mode.",
+      "On a server tagged prod, critical or production a change card or a file write waits for a person, in Auto mode too. Commands still run without asking.",
+    testId: "safety-prod-approval-toggle",
   },
   {
     key: "requirePeerApprovalOnProd",
-    title: "Two people must approve a change on production",
+    title: "Two people must approve a change card or a file write on production",
     detail:
-      "A change on a server tagged prod, critical or production runs only when you and one more person have approved it. The other person is asked in their inbox, and their answer counts as theirs.",
+      "A change card or a file write on a server tagged prod, critical or production runs only when you and one more person have approved it. The other person is asked in their inbox, and their answer counts as theirs. Commands are not covered.",
     testId: "safety-peer-approval-toggle",
   },
 ];
 
 const MODE_LABELS: Record<AgentMode, string> = {
-  advice: `${modes.advice} (read-only advice)`,
-  plan: `${modes.plan} (propose plan first)`,
-  assisted: `${modes.assisted} (ask before commands)`,
-  autonomous: `${modes.autonomous} (run on its own)`,
+  advice: `${modes.advice} (advice only, nothing runs)`,
+  plan: `${modes.plan} (a plan first)`,
+  assisted: `${modes.assisted} (change cards wait for you)`,
+  autonomous: `${modes.autonomous} (change cards run on their own)`,
 };
 
 interface OverrideDraft {
@@ -68,20 +54,16 @@ const emptyOverride: OverrideDraft = {
 };
 
 /**
- * Command safety policy controls: global safety switches, the two-person rule,
- * global allowed command prefixes, and per-cluster / per-tag safety overrides.
+ * The safety rules: when a change card or a file write waits for a person, the two-person rule,
+ * and per-cluster / per-tag overrides. Commands are covered by none of it, and the card says so.
  */
 export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
   const policy: SafetyPolicy = {
-    autoApproveSafeReadOnly: hub.safetyPolicy?.autoApproveSafeReadOnly ?? true,
     requireApprovalOnProdTags: hub.safetyPolicy?.requireApprovalOnProdTags ?? true,
-    blockDestructiveWithoutConfirm: hub.safetyPolicy?.blockDestructiveWithoutConfirm ?? true,
     requirePeerApprovalOnProd: hub.safetyPolicy?.requirePeerApprovalOnProd ?? false,
-    commandAllowPrefixes: hub.safetyPolicy?.commandAllowPrefixes ?? [],
     clusterPolicies: hub.safetyPolicy?.clusterPolicies ?? {},
   };
 
-  const [prefixInput, setPrefixInput] = useState("");
   const [overrideDraft, setOverrideDraft] = useState<OverrideDraft | undefined>();
 
   const savePolicy = (patch: Partial<SafetyPolicy>): void => {
@@ -91,16 +73,16 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
   };
 
   const clusterEntries = Object.entries(policy.clusterPolicies ?? {});
-  const allowPrefixes = policy.commandAllowPrefixes ?? [];
 
   return (
     <article className="ai-card" data-testid="safety-policy-card">
       <div className="ai-card-head">
         <div>
-          <strong>Command safety</strong>
-          <small>
-            Before a command runs, each part of it is classified as read-only, changing or destructive, including inside
-            pipes, chains, subshells, bash -c and find -exec. What is not known to be read-only counts as changing.
+          <strong>Safety rules</strong>
+          <small data-testid="safety-policy-not-a-lock">
+            Commands the agent runs are not checked and nobody is asked first. Change cards, file writes and plans wait
+            for approval. This is a working agreement, not a lock: the agent can run a command directly. What it can do
+            on a server is decided by the account it logs in with.
           </small>
           <small data-testid="safety-policy-whose">
             {isWebBrowserMode()
@@ -150,61 +132,16 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
         })}
       </div>
 
-      <div className="ai-set" data-testid="safety-allow-prefixes">
-        <strong>Allowed command prefixes</strong>
-        <small>
-          Normalized read-only or low-risk command prefixes allowed without prompting in assisted mode (never bypasses
-          production or destructive guards).
-        </small>
-        {allowPrefixes.length > 0 && (
-          <div className="ai-tags">
-            {allowPrefixes.map((prefix) => (
-              <span key={prefix} className="ai-tool-tag">
-                <code>{prefix}</code>{" "}
-                <button
-                  type="button"
-                  aria-label={`Remove allowed prefix ${prefix}`}
-                  onClick={() =>
-                    savePolicy({
-                      commandAllowPrefixes: allowPrefixes.filter((p) => p !== prefix),
-                    })
-                  }
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-        <div className="ai-inline-form">
-          <input
-            aria-label="New allowed command prefix"
-            placeholder="e.g. kubectl get, df -h"
-            value={prefixInput}
-            onChange={(e) => setPrefixInput(e.target.value)}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              const next = prefixInput.trim();
-              if (!next || allowPrefixes.includes(next)) return;
-              savePolicy({ commandAllowPrefixes: [...allowPrefixes, next] });
-              setPrefixInput("");
-            }}
-          >
-            Add prefix
-          </button>
-        </div>
-      </div>
-
       <div className="ai-set" data-testid="cluster-safety-policies">
         <div className="ai-section-head">
           <div>
             <strong>Per-cluster &amp; per-tag safety overrides</strong>
             <small>
               Override max autonomy mode, two-person approval, check/rollback requirement, or change freeze per cluster
-              or <code>tag:&lt;name&gt;</code>.
+              or <code>tag:&lt;name&gt;</code>. They hold for change cards and file writes. Only a max mode of Advice
+              also stops commands.
             </small>
+            <small data-testid="safety-freeze-note">A freeze stops change cards and file writes. Commands still run.</small>
             <small data-testid="safety-own-runs-note">
               A freeze or an override set here holds for your own runs only.
             </small>
@@ -291,7 +228,10 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
                   setOverrideDraft({ ...overrideDraft, requireCheckAndRollback: e.target.checked })
                 }
               />
-              <span>Require pre-change check and rollback command</span>
+              <span>
+                Every change needs a check and a rollback
+                <small>A file write is refused there. Commands still run.</small>
+              </span>
             </label>
             <div className="ai-card-actions">
               <button

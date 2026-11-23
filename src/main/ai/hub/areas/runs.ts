@@ -2,11 +2,12 @@ import crypto from "node:crypto";
 import { appendSourceCalls } from "../../../../shared/answerSources";
 import path from "node:path";
 import type { AgentChange, AgentSchedule, AgentTask, ChatOrigin, MissionAgent, StartAgentTask } from "../../../../shared/types/aiHub";
+import { isPlainCommand } from "../../../../shared/types/aiHub";
 import { acpWorkspaceAllowlist } from "../../../../shared/acpWorkspaceTools";
 import { DEFAULT_AI_MODELS } from "../../../../shared/types/ai";
 import { CodexAuthProvider } from "../../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../../HermesManager";
-import { analyzeCommandSafety, isProdTag, shouldRequireCommandApproval } from "../CommandSafetyService";
+import { isProdTag } from "../safetyPolicy";
 import { AcpRuntime } from "../AcpRuntime";
 import { lowerMode } from "../AppGuard";
 import { CHAT_NOT_EXTERNAL, reachMode } from "../chatFence";
@@ -886,15 +887,9 @@ export class RunsPart {
         this.changed();
       },
       ask: async (question) => {
-        const analysis = question.command
-          ? analyzeCommandSafety(question.command)
-          : {
-              // What the agent calls its action is its own word, not a check: without a command to
-              // read, nothing is taken to be read-only.
-              riskLevel: (question.kind === "delete" ? "destructive" : "modify") as AgentChange["riskLevel"] & string,
-              riskReason: `The agent asked to ${question.kind ?? "act"}, and gave no command that could be checked`,
-              parsedSubcommands: [],
-            };
+        // A command the agent asks to run is a plain command, as any agent's is: it runs in every mode
+        // that runs commands and nobody is asked. An action it gave no command for (an edit, a delete,
+        // a move) is not one: it waits for a person as a file write does.
         const change: AgentChange = {
           id: crypto.randomUUID(),
           kind: "command",
@@ -903,11 +898,11 @@ export class RunsPart {
           // The command, or else everything the agent said it would do: a person is not asked about a title alone.
           command: question.command ? maskContext(question.command) : question.rawInput ? maskContext(question.rawInput) : undefined,
           ...(question.command && maskContext(question.command) !== question.command ? { hiddenValues: true } : {}),
+          ...(question.command ? {} : { toolCall: true }),
           status: "pending",
-          riskLevel: analysis.riskLevel,
-          riskReason: analysis.riskReason,
           at: Date.now(),
         };
+        const plain = isPlainCommand(change);
         if (question.toolCallId) changeOfCall.set(question.toolCallId, change);
         const safetyCtx = this.resolveSafetyContext(task, change.target);
         this.broker.rememberPolicy(task, change);
@@ -922,13 +917,13 @@ export class RunsPart {
           return false;
         }
         if (
+          !plain &&
           safetyCtx.clusterPolicy?.frozenUntil &&
-          safetyCtx.clusterPolicy.frozenUntil > Date.now() &&
-          analysis.riskLevel !== "safe"
+          safetyCtx.clusterPolicy.frozenUntil > Date.now()
         ) {
           change.status = "denied";
           change.decidedHow = "policy";
-          change.output = `A change freeze holds here until ${new Date(safetyCtx.clusterPolicy.frozenUntil).toISOString()}. Nothing that changes this target is run until it ends.`;
+          change.output = `A change freeze holds here until ${new Date(safetyCtx.clusterPolicy.frozenUntil).toISOString()}. No change card or file write is run here until it ends.`;
           task.changes.push(change);
           this.changed();
           return false;
@@ -946,9 +941,10 @@ export class RunsPart {
           return false;
         }
         task.commandsUsed = actions;
-        let requiredApprovals = Math.max(1, safetyCtx.clusterPolicy?.requiredApprovals ?? 1);
+        // How many people it needs. A plain command needs nobody.
+        let requiredApprovals = plain ? 1 : Math.max(1, safetyCtx.clusterPolicy?.requiredApprovals ?? 1);
         const isProd = (safetyCtx.targetTags ?? []).some(isProdTag);
-        if (safetyCtx.policy.requirePeerApprovalOnProd && isProd && analysis.riskLevel !== "safe") {
+        if (!plain && safetyCtx.policy.requirePeerApprovalOnProd && isProd) {
           requiredApprovals = Math.max(requiredApprovals, 2);
         }
         if (requiredApprovals > 1) change.requiredApprovals = requiredApprovals;
@@ -964,15 +960,13 @@ export class RunsPart {
           return false;
         }
         const needsApproval =
-          requiredApprovals > 1 ||
-          // Without a command to read, a change to files or a deletion is always put to a person.
-          (!question.command && ["edit", "delete", "execute", "move"].includes(question.kind ?? "execute")) ||
-          shouldRequireCommandApproval({
-            analysis,
-            mode: effectiveMode,
-            targetTags: safetyCtx.targetTags,
-            policy: safetyCtx.policy,
-          });
+          !plain &&
+          (requiredApprovals > 1 ||
+            // Without a command, a change to files or a deletion is always put to a person.
+            ["edit", "delete", "execute", "move"].includes(question.kind ?? "execute") ||
+            // Anything else it gave no command for: asked about, except in Auto off production.
+            effectiveMode !== "autonomous" ||
+            (isProd && safetyCtx.policy.requireApprovalOnProdTags));
         if (!needsApproval) {
           change.status = "approved";
           change.decidedHow = "policy";

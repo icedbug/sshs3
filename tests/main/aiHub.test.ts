@@ -191,6 +191,12 @@ describe("tool authority", () => {
     const capability = await broker.issue(t);
     return { broker, t, capability, writes, terminals };
   }
+  /**
+   * A change card: what a person is asked about. A plain command runs at once, with nobody asked.
+   * The terminal of these tests prints "ok" for everything, so that is what the check expects.
+   */
+  const card = (command: string) => ({ action: "change", command, check: { command: "test -e marker", expected: "ok" }, rollback: "true" });
+
   it("refuses a missing explicit target before any terminal write", async () => {
     const {broker, capability, writes} = await setup("autonomous");
     const count = writes.length;
@@ -200,8 +206,11 @@ describe("tool authority", () => {
   it("leaves the terminal alone when the audit intent cannot be saved", async () => {
     const {broker, capability, writes} = await setup("autonomous", {recordIntent: async () => {throw new Error("Audit disk full");}});
     const count = writes.length;
-    await expect(broker.invoke(capability.key, {action:"command", command:"touch marker"})).rejects.toThrow(/Audit disk full/);
+    await expect(broker.invoke(capability.key, card("touch marker"))).rejects.toThrow(/Audit disk full/);
     expect(writes).toHaveLength(count);
+    // A plain command has no intent record to save before it runs: it is written down once it has ended.
+    await expect(broker.invoke(capability.key, {action:"command", command:"touch marker"})).resolves.toMatchObject({ exitCode: 0 });
+    expect(writes).toHaveLength(count + 1);
   });
   it("rejects a peer vote if that person's role changed before execution", async () => {
     let eligible = true;
@@ -211,26 +220,35 @@ describe("tool authority", () => {
       recordIntent: async () => { eligible = false; },
     });
     const count = writes.length;
-    const pending = broker.invoke(capability.key, { action: "command", command: "touch marker" });
+    const pending = broker.invoke(capability.key, card("touch marker"));
     const id = t.changes[0].id;
     broker.approve(t.id, id, true, undefined, { actor: "Owner", actorId: "user:owner" });
     broker.approve(t.id, id, true, undefined, { actor: "Peer", actorId: "user:peer", peer: true });
     await expect(pending).rejects.toThrow(/no longer has permission/);
     expect(writes).toHaveLength(count);
   });
-  it("requires approval for the exact task and executes once", async () => {
+  it("requires approval of a change card for the exact task and executes once", async () => {
     const { broker, t, capability, writes } = await setup();
-    const pending = broker.invoke(capability.key, {
-      action: "command",
-      command: "echo hi",
-    });
+    const pending = broker.invoke(capability.key, card("echo hi"));
     expect(t.status).toBe("waiting");
+    // Nothing of the card was typed before the answer: not its check either.
     expect(writes).toHaveLength(1);
     expect(() => broker.approve("different", t.changes[0].id, true)).toThrow();
     broker.approve(t.id, t.changes[0].id, true);
-    expect(await pending).toMatchObject({ exitCode: 0 });
-    expect(writes).toHaveLength(2);
+    expect(await pending).toMatchObject({ exitCode: 0, checkPassed: true });
+    // The check before, the change once, the check after.
+    expect(writes).toHaveLength(4);
     expect(t.changes[0].status).toBe("completed");
+    expect(t.changes[0]).not.toHaveProperty("riskLevel");
+  });
+  it("runs a plain command at once in Ask first, and asks nobody", async () => {
+    const { broker, t, capability, writes } = await setup();
+    expect(await broker.invoke(capability.key, { action: "command", command: "rm -rf /tmp/x" })).toMatchObject({ exitCode: 0 });
+    expect(t.status).toBe("running");
+    expect(writes).toHaveLength(2);
+    expect(t.changes[0]).toMatchObject({ status: "completed", decidedHow: "policy" });
+    expect(t.changes[0].decidedBy).toBeUndefined();
+    expect(t.changes[0]).not.toHaveProperty("riskLevel");
   });
   it("runs a change with its check, and rolls it back by itself when the check fails", async () => {
     const { broker, t, capability, terminals } = await setup("autonomous");
@@ -293,10 +311,16 @@ describe("tool authority", () => {
     expect(worse).toMatchObject({ checkPassed: false, rolledBack: false, checkPassesAfterRollback: false });
     expect(String(worse.next)).toContain("Stop making changes");
 
-    // A change without a check or a way back is not a change this tool makes, and the check may only look.
+    // A change without a check or a way back is not a change this tool makes.
     await expect(broker.invoke(capability.key, { action: "change", command: "systemctl restart x", rollback: "true" })).rejects.toThrow(/needs a check/);
     await expect(broker.invoke(capability.key, { action: "change", command: "systemctl restart x", check: { command: "systemctl is-active x", expected: "active" } })).rejects.toThrow(/needs a rollback/);
-    await expect(broker.invoke(capability.key, { action: "change", command: "true", check: { command: "systemctl restart x", expected: "x" }, rollback: "true" })).rejects.toThrow(/must only look/);
+    // Nothing looks at what a check does: it is run as given, before and after. The card showed it whole.
+    run.mockClear();
+    answer("x");
+    answer("");
+    answer("x");
+    await expect(broker.invoke(capability.key, { action: "change", command: "true", check: { command: "systemctl restart x", expected: "x" }, rollback: "true" })).resolves.toMatchObject({ checkPassed: true });
+    expect(run.mock.calls.map((c) => c[3])).toEqual(["systemctl restart x", "true", "systemctl restart x"]);
     run.mockRestore();
   });
 
@@ -321,64 +345,88 @@ describe("tool authority", () => {
     run.mockRestore();
   });
 
-  it("lets an investigator run read-only commands without asking, and refuses everything else without asking", async () => {
+  it("lets an investigator run commands without asking, whatever they do, and refuses it a change card and a file write", async () => {
     const { broker, t, capability, writes } = await setup("advice");
     t.investigator = true;
     t.maxCommands = 10;
     const before = writes.length;
-    // Looking is allowed, and nobody is asked.
-    const looked = await broker.invoke(capability.key, { action: "command", command: "df -h" });
-    expect(looked).toMatchObject({ exitCode: 0 });
-    expect(t.status).toBe("running");
-    expect(writes.length).toBe(before + 1);
-    // Changing is refused, the command never reaches the terminal, and the person is not bothered.
-    for (const command of ["systemctl restart nginx", "rm -rf /var/tmp/x", "df -h && echo x > /etc/motd"]) {
-      await expect(broker.invoke(capability.key, { action: "command", command })).rejects.toThrow(/only runs read-only commands/);
+    // A command runs, and nobody is asked. Nothing checks what it does: an investigator is told to only look.
+    const commands = ["df -h", "systemctl restart nginx", "rm -rf /var/tmp/x"];
+    for (const command of commands) {
+      expect(await broker.invoke(capability.key, { action: "command", command })).toMatchObject({ exitCode: 0 });
       expect(t.status).toBe("running");
     }
-    expect(writes.length).toBe(before + 1);
-    expect(t.changes.map((c) => c.status)).toEqual(["completed", "denied", "denied", "denied"]);
+    expect(writes.length).toBe(before + commands.length);
+    // A change card is refused, nothing of it reaches the terminal, and the person is not bothered.
+    const refused = broker.invoke(capability.key, card("systemctl restart nginx"));
+    await expect(refused).rejects.toMatchObject({ code: "investigator_read_only" });
+    await expect(refused).rejects.toThrow(/An investigator only looks\. It makes no change card/);
+    // The refusal does not say that anything was rated.
+    await expect(refused).rejects.not.toThrow(/classified|read-only/);
+    expect(t.status).toBe("running");
+    expect(writes.length).toBe(before + commands.length);
+    expect(t.changes.map((c) => c.status)).toEqual(["completed", "completed", "completed", "denied"]);
     // Writing a file is not a command at all.
     await expect(broker.invoke(capability.key, { action: "file-write", path: "/etc/x", content: "y" } as never)).rejects.toThrow(/does not change files/);
   });
-  it("runs a command an approved plan lists without asking again, once; anything else is still asked about", async () => {
+  it("runs a change card an approved plan lists without asking again, once; any other card is still asked about", async () => {
     const { broker, t, capability } = await setup();
-    t.maxCommands = 10;
+    t.maxCommands = 20;
+    // The step is a change card: its command, its check, what the check should show, and its rollback.
+    const listed = { action: "change", command: "echo hi", check: { command: "echo check", expected: "ok" }, rollback: "echo undo" };
     t.plan = {
       id: "p",
       goal: "say hi",
-      steps: [{ action: "Say hi", command: "echo hi", commandHash: exactHash("echo hi"), risk: "low", check: "prints hi" }],
+      steps: [{ action: "Say hi", command: "echo hi", commandHash: exactHash("echo hi"), risk: "low", check: "echo check", checkExpected: "ok", rollback: "echo undo" }],
       status: "proposed",
       revision: 1,
       review: { verdict: "approve", findings: [] },
       createdAt: 1,
     };
     // A plan that is only proposed covers nothing.
-    const early = broker.invoke(capability.key, { action: "command", command: "echo hi" });
+    const early = broker.invoke(capability.key, listed);
     expect(t.status).toBe("waiting");
     broker.approve(t.id, t.changes[0].id, true);
     await early;
 
     t.plan.status = "approved";
     t.plan.steps[0].approvedTarget = JSON.stringify([t.target!.sessionId, t.target!.generation]);
-    expect(await broker.invoke(capability.key, { action: "command", command: "echo hi" })).toMatchObject({ exitCode: 0 });
+    expect(await broker.invoke(capability.key, listed)).toMatchObject({ exitCode: 0, checkPassed: true });
+    expect(t.changes.at(-1)).toMatchObject({ decidedHow: "plan", status: "completed" });
     expect(t.plan.steps[0].ranAt).toBeTypeOf("number");
-    // The step has run: the same command a second time is not covered, nor is a different one.
-    const again = broker.invoke(capability.key, { action: "command", command: "echo hi" });
+    // The step has run: the same card a second time is not covered, nor is a different one.
+    const again = broker.invoke(capability.key, listed);
     expect(t.status).toBe("waiting");
     broker.approve(t.id, t.changes.at(-1)!.id, true);
     await again;
-    const other = broker.invoke(capability.key, { action: "command", command: "echo bye" });
+    const other = broker.invoke(capability.key, { ...listed, command: "echo bye" });
     expect(t.status).toBe("waiting");
     broker.approve(t.id, t.changes.at(-1)!.id, true);
     await other;
+    // A plain command is no matter for the plan: it runs unasked, listed or not.
+    expect(await broker.invoke(capability.key, { action: "command", command: "echo bye" })).toMatchObject({ exitCode: 0 });
+    expect(t.status).toBe("running");
+  });
+  it("ticks the step of an approved plan that a plain command runs, and asks nobody about it", async () => {
+    const { broker, t, capability } = await setup();
+    t.plan = {
+      id: "p",
+      goal: "look",
+      steps: [{ action: "Look", command: "df -h", commandHash: exactHash("df -h"), risk: "low", check: "prints the disks", approvedTarget: JSON.stringify([t.target!.sessionId, t.target!.generation]) }],
+      status: "approved",
+      revision: 1,
+      review: { verdict: "approve", findings: [] },
+      createdAt: 1,
+    };
+    expect(await broker.invoke(capability.key, { action: "command", command: "df -h" })).toMatchObject({ exitCode: 0 });
+    expect(t.plan.steps[0].ranAt).toBeTypeOf("number");
+    // The plan decided nothing about it: no rule was needed for a command to run.
+    expect(t.changes[0]).toMatchObject({ decidedHow: "policy", status: "completed" });
   });
   it("revokes pending approvals before any further command can be written", async () => {
     const { broker, t, capability, writes } = await setup();
-    const pending = broker.invoke(capability.key, {
-      action: "command",
-      command: "echo hi",
-    });
+    const pending = broker.invoke(capability.key, card("echo hi"));
+    expect(t.status).toBe("waiting");
     broker.revoke(t.id);
     await expect(pending).rejects.toThrow();
     expect(writes).toHaveLength(1);
@@ -396,12 +444,9 @@ describe("tool authority", () => {
     ).rejects.toThrow("Advice");
     expect(writes).toHaveLength(1);
   });
-  it("rejects a queued command when the terminal instance changed", async () => {
+  it("rejects a queued change card when the terminal instance changed", async () => {
     const { broker, t, capability, terminals, writes } = await setup();
-    const pending = broker.invoke(capability.key, {
-      action: "command",
-      command: "echo hi",
-    });
+    const pending = broker.invoke(capability.key, card("echo hi"));
     terminals.takeover("one");
     broker.approve(t.id, t.changes[0].id, true);
     await expect(pending).rejects.toThrow();

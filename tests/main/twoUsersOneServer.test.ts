@@ -150,7 +150,7 @@ describe('two accounts on one web server, without a bucket', () => {
   it('keeps what is a person\'s own with that person: the model and its key, the safety rules, the conversations', async () => {
     const { maria, omar } = await twoAccounts();
     await maria.hub({ action: 'configure', config: { enabled: true, provider: 'openai-compatible', model: 'marias-model', baseUrl: 'https://93.184.216.34/v1', apiKey: 'marias-own-key' } });
-    await maria.hub({ action: 'safety-policy-save', policy: { autoApproveSafeReadOnly: false, commandAllowPrefixes: ['df -h'] } });
+    await maria.hub({ action: 'safety-policy-save', policy: { clusterPolicies: { 'marias-cluster': { maxMode: 'plan' } } } });
     // Something on the board, so that Omar's hub has synced after all of the above.
     await maria.hub({ action: 'ticket-save', ticket: { title: 'A marker' } });
     await seenBy(omar, (snap) => snap.workTickets?.find((t) => t.title === 'A marker'));
@@ -159,8 +159,8 @@ describe('two accounts on one web server, without a bucket', () => {
     expect(his.config.model).not.toBe('marias-model');
     expect(his.config.hasApiKey).toBe(false);
     expect(JSON.stringify(his)).not.toContain('marias-own-key');
-    expect(his.safetyPolicy?.commandAllowPrefixes ?? []).not.toContain('df -h');
-    expect(his.safetyPolicy?.autoApproveSafeReadOnly).not.toBe(false);
+    expect(his.safetyPolicy?.clusterPolicies ?? {}).not.toHaveProperty('marias-cluster');
+    expect(JSON.stringify(his.safetyPolicy)).not.toContain('marias-cluster');
     // Her conversations are hers: none of them is in what he is sent.
     const hers = await maria.hub({ action: 'snapshot' });
     expect(hers.config.model).toBe('marias-model');

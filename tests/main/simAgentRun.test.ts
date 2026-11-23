@@ -8,8 +8,9 @@ import { fakeOpenAi, type FakeModelStep } from "../helpers/fakeOpenAi";
 /**
  * A model working one of the lab's incidents through the real hub: the model's side is scripted
  * (tests/helpers/fakeOpenAi), everything else is what a run in the app goes through. The ticket is
- * started, the agent gets a terminal on the simulated server, its commands run there, a person is
- * asked before a change, the report lands on the ticket, and the scenario's checks read the outcome.
+ * started, the agent gets a terminal on the simulated server, its commands run there without anybody
+ * being asked, a person is asked about a change card, the report lands on the ticket, and the
+ * scenario's checks read the outcome.
  */
 
 const disposals: Array<() => Promise<unknown> | unknown> = [];
@@ -30,19 +31,39 @@ async function lab() {
   return { dir, runAgentOnScenario };
 }
 
-/** A solution said by a model: one command a turn, then the report. */
-function asModel(lines: string[], report: string): FakeModelStep[] {
+type Card = { check: { command: string; expected: string }; rollback: string };
+
+/**
+ * A solution said by a model: one command a turn, then the report. A line that holds one of the keys
+ * of `cards` is made as a change card with that check and rollback, as an agent is told to make a
+ * change; every other line is a plain command.
+ */
+function asModel(lines: string[], report: string, cards: Record<string, Card> = {}): FakeModelStep[] {
   return [
-    ...lines.map((line) => ({ tool: "terminal_command", args: { command: line.replace(/^[\w.-]+:\s/, ""), description: "Scripted step" } })),
+    ...lines.map((line) => {
+      const command = line.replace(/^[\w.-]+:\s/, "");
+      const card = Object.entries(cards).find(([part]) => command.includes(part))?.[1];
+      return card
+        ? { tool: "sshs3_change", args: { command, description: "Scripted change", ...card } }
+        : { tool: "terminal_command", args: { command, description: "Scripted step" } };
+    }),
     { text: report },
   ];
 }
+
+/** The one change of the nginx incident's careful solution, as a change card: the edit of the site's file. */
+const NGINX_FIX: Record<string, Card> = {
+  "sed -i": {
+    check: { command: "sudo nginx -t", expected: "syntax is ok" },
+    rollback: "sudo sed -i 's/limit_req zone=api_limit /limit_req zone=api /' /etc/nginx/conf.d/shop.conf",
+  },
+};
 
 describe("an agent run by a model on a scenario", () => {
   it("solves it through the real hub: terminal, approvals, report and score", async () => {
     const { dir, runAgentOnScenario } = await lab();
     const scenario = scenarioById("nginx-bad-config")!;
-    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story));
+    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story, NGINX_FIX));
     disposals.push(() => model.close());
 
     const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fake-1", apiKey: "not-a-real-key", dir, pollMs: 20 });
@@ -54,11 +75,14 @@ describe("an agent run by a model on a scenario", () => {
     const ran = result.events.filter((e) => e.kind === "command").map((e) => (e.kind === "command" ? e.command : ""));
     expect(ran).toEqual(scenario.solutions.careful.map((l) => l.replace(/^[\w.-]+:\s/, "")));
     expect(result.events.find((e) => e.kind === "started")).toMatchObject({ target: scenario.target });
-    // The changes were asked about, the reads were not.
-    const asked = result.events.filter((e) => e.kind === "approval").map((e) => (e.kind === "approval" ? e.ask.command : ""));
-    expect(asked.some((c) => c.includes("sed -i"))).toBe(true);
-    expect(asked.some((c) => c.startsWith("systemctl status"))).toBe(false);
-    expect(result.approvals).toEqual({ asked: asked.length, allowed: asked.length });
+    // The change card was asked about, with its check and its rollback. No plain command was: not the
+    // look at the service, and not the start of it either. Nothing looks at what a command does.
+    const asks = result.events.filter((e) => e.kind === "approval").map((e) => (e.kind === "approval" ? e.ask : undefined));
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.command).toContain("sed -i");
+    expect(asks[0]).toMatchObject({ check: NGINX_FIX["sed -i"].check.command, rollback: NGINX_FIX["sed -i"].rollback });
+    expect(asks[0]).not.toHaveProperty("risk");
+    expect(result.approvals).toEqual({ asked: 1, allowed: 1 });
     // The scenario's own checks, read off the lab and the report.
     expect(result.score.checks.filter((c) => !c.pass)).toEqual([]);
     expect(result.score.passed).toBe(result.score.total);
@@ -139,7 +163,7 @@ describe("an agent run by a model on a scenario", () => {
   it("runs the full scenario through a stateless Responses endpoint", async () => {
     const { dir, runAgentOnScenario } = await lab();
     const scenario = scenarioById("nginx-bad-config")!;
-    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story), { responses: true });
+    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story, NGINX_FIX), { responses: true });
     disposals.push(() => model.close());
     const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fixture", apiProtocol: "responses", dir, pollMs: 20 });
     expect(result.error).toBeUndefined();
@@ -262,7 +286,7 @@ describe("an agent run by a model on a scenario", () => {
   it("leaves the incident unsolved when nobody lets the change through", async () => {
     const { dir, runAgentOnScenario } = await lab();
     const scenario = scenarioById("nginx-bad-config")!;
-    const model = await fakeOpenAi(asModel(scenario.solutions.careful, "I could not change anything: the change was refused."));
+    const model = await fakeOpenAi(asModel(scenario.solutions.careful, "I could not change anything: the change was refused.", NGINX_FIX));
     disposals.push(() => model.close());
 
     const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fake-1", dir, approve: "none", pollMs: 20 });

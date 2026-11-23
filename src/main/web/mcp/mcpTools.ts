@@ -209,7 +209,7 @@ const RUN_TOOLS: McpToolDef[] = [
     name: 'change_with_check',
     title: 'Ask to make a change that proves itself',
     description:
-      'Like run_command, but for a change: it carries the read-only check that shows the change worked and the command that takes it back. If the check does not pass afterwards, the change is taken back by itself. A person still approves it first. Prefer this to run_command for anything that changes a system.',
+      'Like run_command, but for a change: it carries the check that shows the change worked and the command that takes it back. If the check does not pass afterwards, the change is taken back by itself. A person still approves it first. Prefer this to run_command for anything that changes a system.',
     scope: 'run',
     readOnly: false,
     inputSchema: {
@@ -217,7 +217,7 @@ const RUN_TOOLS: McpToolDef[] = [
       properties: {
         command: { type: 'string', description: 'The change.' },
         why: { type: 'string', description: 'What it is for, in one line.' },
-        check: { type: 'string', description: 'A read-only command that shows whether it worked.' },
+        check: { type: 'string', description: 'A command that only looks and shows whether it worked.' },
         expected: { type: 'string', description: "What the check's output has to contain for the change to count as having worked." },
         rollback: { type: 'string', description: 'The command that takes the change back.' },
       },

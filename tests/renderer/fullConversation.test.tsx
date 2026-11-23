@@ -215,7 +215,7 @@ describe("showing a conversation whole", () => {
 describe("the Changes view and a change's long parts", () => {
   it("fetches them when the row is opened, not for every row of the list", async () => {
     const long = "restarted nginx\n".repeat(200);
-    const whole = { id: "c1", kind: "command", target: "web-01", description: "Restart nginx", command: "systemctl restart nginx", status: "completed", exitCode: 0, riskLevel: "modify", output: long, at: Date.now() } as AgentChange;
+    const whole = { id: "c1", kind: "command", target: "web-01", description: "Restart nginx", command: "systemctl restart nginx", status: "completed", exitCode: 0, output: long, at: Date.now() } as AgentChange;
     const api = hubApi(() => ({ messages: [], changes: [whole] }));
     const listed = { ...whole, output: long.slice(0, 120), partial: true } as AgentChange;
     const hub = {

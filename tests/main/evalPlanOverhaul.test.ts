@@ -40,7 +40,7 @@ import {
   getDefaultSkillsAndMemories,
   getDefaultSnippets,
 } from "../../src/main/ai/hub/builtins";
-import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/CommandSafetyService";
+import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/safetyPolicy";
 import type {
   AgentPlan,
   AgentTask,
@@ -358,10 +358,12 @@ describe("PlanMode first-class plan mode, askPerStep, collisions & peer approval
       messages: [{ id: "m1", role: "user", text: "Fix nginx timeouts without slash command", at: 1 }],
     });
     expect(planPending(planModeTask)).toBe(true);
-    expect(planGate(planModeTask, "terminal_command", { command: "systemctl restart nginx" })).toContain(
-      "Plan mode",
-    );
+    // A change card and a file write are held. A command is not: nothing looks at what a command does.
+    expect(planGate(planModeTask, "sshs3_change", { command: "systemctl restart nginx" })).toContain("Plan mode");
+    expect(planGate(planModeTask, "file_write", { path: "/etc/nginx/nginx.conf" })).toContain("Commands still run; make no change.");
+    expect(planGate(planModeTask, "terminal_command", { command: "systemctl restart nginx" })).toBeUndefined();
     expect(planGate(planModeTask, "terminal_command", { command: "cat /etc/nginx/nginx.conf" })).toBeUndefined();
+    expect(planGate(planModeTask, "sshs3_cluster_exec", { command: "systemctl restart nginx" })).toBeUndefined();
 
     const approvedTask = makeTask({
       mode: "plan",
@@ -369,7 +371,7 @@ describe("PlanMode first-class plan mode, askPerStep, collisions & peer approval
       messages: [{ id: "m1", role: "user", text: "Fix nginx timeouts", at: 1 }],
     });
     expect(planPending(approvedTask)).toBe(false);
-    expect(planGate(approvedTask, "terminal_command", { command: "systemctl restart nginx" })).toBeUndefined();
+    expect(planGate(approvedTask, "sshs3_change", { command: "systemctl restart nginx" })).toBeUndefined();
   });
 
   it("never silently flips askEach to true when typing a note, and exposes explicit askPerStep choice", () => {

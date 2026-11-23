@@ -1,5 +1,6 @@
 import { expireTerminalSources } from "../../../shared/answerSources";
 import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
+import { dropCommandRating } from "./olderStores";
 import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -190,9 +191,7 @@ export const defaultHubData = (): HubData => ({
   infraEdges: [],
   workforceRuns: [],
   safetyPolicy: {
-    autoApproveSafeReadOnly: true,
     requireApprovalOnProdTags: true,
-    blockDestructiveWithoutConfirm: true,
   },
   selfLearningState: {
     recentEvents: [],
@@ -235,6 +234,8 @@ export class HubStore {
         ...value,
         preferences: { ...defaultHubData().preferences, ...value.preferences },
       };
+      // What an older version stored about a rating of commands that no longer exists.
+      dropCommandRating(this.data);
       this.data.mcpServers = mapMcpSecrets(
         this.data.mcpServers,
         decryptSecretValue,

@@ -14,7 +14,7 @@ import type {
   WorkspaceRule,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
-import { isProdTag } from "./CommandSafetyService";
+import { isProdTag } from "./safetyPolicy";
 import { memoryInFence } from "./chatFence";
 import { pageIndex } from "./KbCompile";
 import type { HubStore } from "./HubStore";

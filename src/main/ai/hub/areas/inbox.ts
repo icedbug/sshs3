@@ -154,7 +154,6 @@ export class InboxPart {
       from: item.kind === "approval" ? task?.agentName || "Assistant" : item.from,
       target: item.target,
       risk: item.risk,
-      reason: change?.riskReason,
       // A teammate's change is not in this member's own conversations: the item carries its command.
       command: change?.command ?? (item.kind === "peer" ? (item.detail ?? item.title) : undefined),
       check: change?.check?.command,

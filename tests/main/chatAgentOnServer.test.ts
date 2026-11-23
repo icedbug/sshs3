@@ -49,33 +49,45 @@ const PLAN = {
       target: 'web-prod-01',
       command: 'sudo systemctl restart nginx',
       risk: 'medium',
-      check: 'systemctl is-active nginx prints active',
-      rollback: 'sudo systemctl start nginx',
+      // The step is a change card: its check, what the check should show, and its rollback.
+      check: 'systemctl is-active nginx',
+      checkExpected: 'ok',
+      rollback: 'sudo systemctl stop nginx',
     },
   ],
 };
 
+/** A plain command: it runs at once, and nobody is asked. */
 const run = (command: string, description: string): FakeModelStep => ({ tool: 'terminal_command', args: { command, description } });
+/**
+ * A change card: what a person is asked about. The terminals of these tests print "ok on <server>"
+ * for everything, so that is what the check expects.
+ */
+const card = (command: string, description: string, unit = 'nginx'): FakeModelStep => ({
+  tool: 'sshs3_change',
+  args: { command, description, check: { command: `systemctl is-active ${unit}`, expected: 'ok' }, rollback: `sudo systemctl stop ${unit}` },
+});
 
 /**
  * What the model does, by the words of the latest message it was given that one of these knows. The
  * step is the number of tool results after that message, so a request sent again is answered the same.
  */
 const SCRIPT: Array<{ when: RegExp; steps: FakeModelStep[] }> = [
-  // A plan approved: the agent goes on with the command the plan lists.
-  { when: /approved your plan/i, steps: [run('sudo systemctl restart nginx', 'Restart nginx as the plan says'), { text: 'Done: nginx was restarted as the plan said.' }] },
+  // A plan approved: the agent goes on with the change card the plan lists.
+  { when: /approved your plan/i, steps: [card('sudo systemctl restart nginx', 'Restart nginx as the plan says'), { text: 'Done: nginx was restarted as the plan said.' }] },
   {
     when: /restart the ledger job/i,
     steps: [
       run('tail -n 5 /var/log/ledger.log', 'Read the ledger log'),
-      run('sudo systemctl restart ledger', 'Restart the ledger job'),
+      card('sudo systemctl restart ledger', 'Restart the ledger job', 'ledger'),
       { text: 'Restarted the ledger job on db-1. The key in the log was AKIAIOSFODNN7EXAMPLE, rotate it.' },
     ],
   },
-  { when: /restart nginx on web-prod-01/i, steps: [run('sudo systemctl restart nginx', 'Restart the web server'), { text: 'Restarted nginx on web-prod-01.' }] },
-  { when: /restart the cache on db-1/i, steps: [run('sudo systemctl restart redis', 'Restart the cache'), { text: 'The restart was not made.' }] },
+  { when: /restart nginx on web-prod-01/i, steps: [card('sudo systemctl restart nginx', 'Restart the web server'), { text: 'Restarted nginx on web-prod-01.' }] },
+  { when: /restart the cache on db-1/i, steps: [card('sudo systemctl restart redis', 'Restart the cache', 'redis'), { text: 'The restart was not made.' }] },
   { when: /how full is the disk/i, steps: [run('df -h', 'Show disk use'), { text: 'The disk on db-1 is 41% full.' }] },
-  { when: /clean the tmp folder/i, steps: [run('sudo rm -rf /var/tmp/cache', 'Clean the cache folder'), { text: 'Cleaning is not allowed in this channel.' }] },
+  // A plain command, and one that deletes: nothing looks at what a command does.
+  { when: /clean the tmp folder/i, steps: [run('sudo rm -rf /var/tmp/cache', 'Clean the cache folder'), { text: 'Cleaned the cache folder on db-1.' }] },
   { when: /plan a restart of nginx/i, steps: [{ tool: 'sshs3_plan_propose', args: PLAN }, { text: 'I proposed a plan. It waits for two people.' }] },
   { when: /how much memory/i, steps: [run('free -m', 'Show memory use'), { text: 'db-1 uses 2 GB of memory.' }] },
   {
@@ -363,9 +375,14 @@ describe('the agent bot in chat, from end to end through the web server', () => 
 
     const card = await cardIn('CDB', root);
     expect(cardText(card.ts)).toContain('sudo systemctl restart ledger');
-    // The read ran at once; the change waits.
+    // The card shows the check and the rollback whole, and no rating of the command.
+    expect(cardText(card.ts)).toContain('systemctl is-active ledger');
+    expect(cardText(card.ts)).toContain('sudo systemctl stop ledger');
+    expect(cardText(card.ts)).not.toMatch(/Risk|Not rated|It changes something/);
+    // The command ran at once, with nobody asked; the change card waits, and nothing of it has run.
     expect(ranOn('db-1', 'tail -n 5 /var/log/ledger.log')).toBe(true);
     expect(ranOn('db-1', 'systemctl restart ledger')).toBe(false);
+    expect(ranOn('db-1', 'systemctl is-active ledger')).toBe(false);
 
     // Omar is not linked: a note only he sees, and the card is still there to answer.
     slack.click('CDB', card.ts, { user: 'U2OMAR', value: card.approve, thread: root });
@@ -432,21 +449,32 @@ describe('the agent bot in chat, from end to end through the web server', () => 
     for (const p of agentPosts('CDB', root)) expect(cardText(p.ts)).not.toMatch(/waiting for approval|"type":"actions"/);
   }, 60_000);
 
-  it('in a channel that may only look, runs a read and refuses a change, with no card', async () => {
+  it('in a channel set to commands only, runs a command unasked, whatever it does, and makes no change card', async () => {
     const { agent } = await team({ channels: { slack: [{ ...DB_CHANNEL, channelId: 'CREAD', channelName: 'ops-read', reach: 'read' }] } });
     const { ts: root } = slack.say('CREAD', 'how full is the disk on db-1', { user: 'U2OMAR' });
     await vi.waitFor(() => expect(said('CREAD', root)).toContain('The disk on db-1 is 41% full.'), { timeout: 20_000 });
     expect(ranOn('db-1', 'df -h')).toBe(true);
     await vi.waitFor(() => expect(statusOf('CREAD', root)).toMatch(/^Done\./), WAIT);
 
-    // Mentioned again in the thread: the same conversation goes on, and a change is refused.
+    // Mentioned again in the thread: the same conversation goes on. A command runs here without anybody
+    // being asked, also one that deletes: nothing checks what a command does.
     slack.say('CREAD', 'now clean the tmp folder', { user: 'U2OMAR', thread: root });
-    await vi.waitFor(() => expect(said('CREAD', root)).toContain('Cleaning is not allowed in this channel.'), { timeout: 20_000 });
-    expect(ranOn('db-1', 'rm -rf')).toBe(false);
+    await vi.waitFor(() => expect(said('CREAD', root)).toContain('Cleaned the cache folder on db-1.'), { timeout: 20_000 });
+    expect(ranOn('db-1', 'sudo rm -rf /var/tmp/cache')).toBe(true);
     const tasks = agent.store.data.tasks.filter((t) => t.chat?.channelId === 'CREAD');
     expect(tasks).toHaveLength(1);
     expect(tasks[0].chat?.fence.reach).toBe('read');
-    expect(tasks[0].changes.find((c) => c.command?.includes('rm -rf'))?.status).toBe('denied');
+    expect(tasks[0].changes.find((c) => c.command?.includes('rm -rf'))).toMatchObject({ status: 'completed', decidedHow: 'policy' });
+    // The agent was told what holds there, in words that claim no check.
+    expect(tasks[0].messages[0].text).toContain('You only look. Change nothing.');
+
+    // A change card is not offered in such a channel, and one the model asks for anyway is not made.
+    await vi.waitFor(() => expect(statusOf('CREAD', root)).toMatch(/^Done\./), WAIT);
+    slack.say('CREAD', 'now restart the cache on db-1', { user: 'U2OMAR', thread: root });
+    await vi.waitFor(() => expect(said('CREAD', root)).toContain('The restart was not made.'), { timeout: 20_000 });
+    expect(ranOn('db-1', 'systemctl restart redis')).toBe(false);
+    expect(ranOn('db-1', 'systemctl is-active redis')).toBe(false);
+    expect(tasks[0].changes.some((c) => c.status === 'pending')).toBe(false);
     for (const p of agentPosts('CREAD', root)) expect(cardText(p.ts)).not.toMatch(/waiting for approval|"type":"actions"/);
   }, 60_000);
 
@@ -481,7 +509,7 @@ describe('the agent bot in chat, from end to end through the web server', () => 
     expect(cardText(card.ts)).toContain('Approved by Maria Ek and Lina Berg in Slack.');
   }, 60_000);
 
-  it("runs a linked person's direct message in their own account, where it shows in their conversations; one not linked only looks, in the chat agent's", async () => {
+  it("runs a linked person's direct message in their own account, where it shows in their conversations; one not linked gets commands only, in the chat agent's", async () => {
     const { lina, agent } = await team({ dms: { enabled: true, unlinked: 'read', servers: ['db-1'], clusters: [] } });
     answeringTerminals(lina.hub, 'lina');
     await lina.ask({
@@ -499,10 +527,10 @@ describe('the agent bot in chat, from end to end through the web server', () => 
     expect(mine?.chat).toMatchObject({ service: 'slack', kind: 'dm', channelId: 'DLINA', askedBy: { chatUserId: 'U3LINA' } });
     expect(agent.store.data.tasks.some((t) => t.chat?.channelId === 'DLINA')).toBe(false);
 
-    // Omar is not linked: told so, and his question runs read only in the chat agent's hub.
+    // Omar is not linked: told so, and his question runs with commands only in the chat agent's hub.
     slack.say('DOMAR', 'how full is the disk on db-1', { user: 'U2OMAR', im: true });
     await vi.waitFor(() => expect(slack.posts.some((p) => p.channel === 'DOMAR' && p.text.includes('The disk on db-1 is 41% full.'))).toBe(true), { timeout: 20_000 });
-    expect(slack.posts.some((p) => p.channel === 'DOMAR' && p.text.includes('so here I can only look'))).toBe(true);
+    expect(slack.posts.some((p) => p.channel === 'DOMAR' && p.text.includes('so here I run commands and propose no change'))).toBe(true);
     expect(agent.store.data.tasks.find((t) => t.chat?.channelId === 'DOMAR')?.chat?.fence).toMatchObject({ servers: ['db-1'], reach: 'read' });
   }, 60_000);
 

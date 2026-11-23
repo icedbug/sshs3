@@ -51,8 +51,6 @@ const approval: NotifyItem = {
   command: "systemctl restart pgbouncer",
   from: "DBA",
   target: "pg-01",
-  risk: "modify",
-  reason: "restarts a service",
   check: "pg_isready",
   rollback: "systemctl start pgbouncer",
   waitsMinutes: 20,
@@ -97,7 +95,8 @@ describe("what a channel is sent", () => {
     expect(text).toContain("Restart &lt;!channel&gt; &amp; co");
     expect(text).not.toContain("<!channel>");
     expect(text).toContain("echo '''x''' &gt; /tmp/a");
-    expect(text).toContain("Risk: changes the system (restarts a service)");
+    // Nothing rates a command, so the notification names no risk.
+    expect(text).not.toMatch(/Risk:/);
     expect(text).toContain("Check: pg_isready");
     expect(text).toContain("Way back: systemctl start pgbouncer");
     expect(text).toContain("The agent waits 20 min for Jacob.");
@@ -272,7 +271,7 @@ const waiting = (id = "t1", at = Date.now()): AgentTask =>
   ({
     id, title: "Fix the pool", agentName: "DBA", mode: "assisted", status: "waiting", messages: [], sources: [], createdAt: at, updatedAt: at, maxCommands: 10, maxMinutes: 15, verification: "not-verified",
     target: { sessionId: "s", generation: "g", label: "pg-01" },
-    changes: [{ id: `${id}-c1`, kind: "command", target: "pg-01", description: "Restart pgbouncer", command: "systemctl restart pgbouncer", status: "pending", riskLevel: "modify", riskReason: "restarts a service", at }],
+    changes: [{ id: `${id}-c1`, kind: "command", target: "pg-01", description: "Restart pgbouncer", command: "systemctl restart pgbouncer", check: { command: "systemctl is-active pgbouncer", expected: "active" }, rollback: { command: "systemctl stop pgbouncer" }, status: "pending", at }],
   }) as unknown as AgentTask;
 const ALL = ["approval", "plan", "question", "blocked", "alert", "review", "report"] as const;
 

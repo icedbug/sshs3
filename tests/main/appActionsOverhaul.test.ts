@@ -61,7 +61,7 @@ vi.mock("../../src/main/services/k8sKubeConfig", () => ({
 }));
 
 import { handleAppAction } from "../../src/main/ai/hub/AppActions";
-import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/CommandSafetyService";
+import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/safetyPolicy";
 
 function makeTask(overrides: Partial<AgentTask> = {}): AgentTask {
   return {
@@ -833,7 +833,9 @@ describe("AppActions overhaul", () => {
         authorize,
       );
       expect(authorize).toHaveBeenCalledTimes(2);
-      expect(authorize.mock.calls[1][0].riskReason).toContain("does not trust readOnlyHint");
+      // Not a plain command: it is put to the broker as a tool of another system, which waits as a change card does.
+      expect(authorize.mock.calls[1][0]).toMatchObject({ kind: "command", toolCall: true });
+      expect(authorize.mock.calls[1][0]).not.toHaveProperty("riskLevel");
 
       // An allowed writing tool still goes through the workspace rules.
       await handleAppAction(hub, task, { action: "mcp__k8s__restart_pod", payload: {} }, authorize);

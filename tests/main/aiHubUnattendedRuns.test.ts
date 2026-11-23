@@ -241,7 +241,13 @@ describe("a run nobody sits at that needs an approval", () => {
       vi.fn(async (_u: unknown, init?: RequestInit) => {
         bodies.push(String(init?.body));
         return call++ === 0
-          ? callTool("terminal_command", { command: "sudo systemctl restart postgresql", description: "Restart the database" })
+          ? // A change card: what a person is asked about. A plain command would have run at once.
+            callTool("sshs3_change", {
+              command: "sudo systemctl restart postgresql",
+              description: "Restart the database",
+              check: { command: "systemctl is-active postgresql", expected: "active" },
+              rollback: "sudo systemctl stop postgresql",
+            })
           : say("Report: /var is full. The restart is still to do.");
       }),
     );

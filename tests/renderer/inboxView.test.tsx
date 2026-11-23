@@ -13,7 +13,7 @@ const hub = (extra: Partial<HubSnapshot> = {}): HubSnapshot =>
 
 const full = hub({
   tasks: [
-    { id: "t1", title: "Fix nginx", status: "waiting", agentName: "Operator", updatedAt: 5, messages: [], changes: [{ id: "c1", kind: "command", description: "Restart nginx", command: "systemctl restart nginx", target: "web-01", status: "pending", riskLevel: "modify", at: 50 }] },
+    { id: "t1", title: "Fix nginx", status: "waiting", agentName: "Operator", updatedAt: 5, messages: [], changes: [{ id: "c1", kind: "command", description: "Restart nginx", command: "systemctl restart nginx", target: "web-01", status: "pending", check: { command: "systemctl is-active nginx", expected: "active" }, rollback: { command: "systemctl stop nginx" }, at: 50 }] },
     { id: "t2", title: "Upgrade", status: "waiting", agentName: "Operator", updatedAt: 6, messages: [], changes: [], plan: { id: "p1", goal: "Upgrade postgres", steps: [{}, {}], status: "proposed", revision: 1, review: { verdict: "revise", findings: [] }, createdAt: 40 } },
     { id: "t3", title: "Which cluster?", status: "waiting", agentName: "Watch", updatedAt: 30, messages: [{ id: "m", role: "assistant", text: "Which cluster do you mean?", at: 1 }], changes: [] },
     { id: "t4", title: "Background", status: "running", workforceRunId: "x", messages: [], changes: [{ id: "c9", status: "pending", description: "hidden", target: "x", at: 1 }] },
@@ -37,7 +37,9 @@ describe("what is waiting for a person", () => {
     // An alert assigned to an agent that has not started on it still waits for a person (feature 6 review).
     expect(items.map((i) => i.kind)).toEqual(["approval", "plan", "question", "alert", "blocked", "alert", "review", "knowledge"]);
     expect(items.find((i) => i.id === "alert:k4")?.detail).toBe("With an agent, not started yet");
-    expect(items[0]).toMatchObject({ title: "Restart nginx", detail: "systemctl restart nginx", from: "Operator on web-01", risk: "modify" });
+    expect(items[0]).toMatchObject({ title: "Restart nginx", detail: "systemctl restart nginx", from: "Operator on web-01" });
+    // Nothing rates a change: an approval carries no risk. (An alert's `risk` is its severity.)
+    expect(items[0]).not.toHaveProperty("risk");
     expect(items[1].detail).toBe("2 steps · the reviewer has objections");
     expect(items[3].detail).toBe("Nobody has it · fired 3 times");
     expect(inboxItems(hub())).toEqual([]);
@@ -49,7 +51,7 @@ describe("what is waiting for a person", () => {
     render(<InboxView hub={full} act={act} onOpenTask={openTask} onOpenView={() => {}} />);
     const approval = screen.getByTestId("inbox-approval");
     expect(within(approval).getByText("systemctl restart nginx")).toBeVisible();
-    expect(within(approval).getByText("changes state")).toBeVisible();
+    expect(approval).not.toHaveTextContent(/changes state|read-only|destructive/);
     fireEvent.click(within(approval).getByRole("button", { name: "Approve" }));
     expect(act).toHaveBeenCalledWith({ action: "approve", taskId: "t1", changeId: "c1", approved: true });
     fireEvent.click(within(screen.getByTestId("inbox-plan")).getByRole("button", { name: "Approve the plan" }));
@@ -190,7 +192,6 @@ describe("a teammate's change that needs a second person", () => {
         description: "Restart the web server",
         command: "sudo systemctl restart nginx",
         target: "web-prod-01",
-        risk: "modify",
         requiredApprovals: 2,
         approvedBy: ["Omar Lind"],
         at: 40,
@@ -210,8 +211,8 @@ describe("a teammate's change that needs a second person", () => {
       ownerId: "u-omar",
       taskId: "run-1",
       changeId: "c7",
-      risk: "modify",
     });
+    expect(item).not.toHaveProperty("risk");
   });
 
   it("is answered there, and the answer goes to the teammate's run", () => {
@@ -241,7 +242,7 @@ describe("a change of one's own that needs two people", () => {
           agentName: "Linux SRE",
           updatedAt: 5,
           messages: [],
-          changes: [{ id: "c1", kind: "command", description: "Restart nginx", command: "systemctl restart nginx", target: "web-prod-01", status: "pending", riskLevel: "modify", requiredApprovals: 2, approvals, at: 4 }],
+          changes: [{ id: "c1", kind: "command", description: "Restart nginx", command: "systemctl restart nginx", target: "web-prod-01", status: "pending", check: { command: "systemctl is-active nginx", expected: "active" }, rollback: { command: "systemctl stop nginx" }, requiredApprovals: 2, approvals, at: 4 }],
         },
       ] as unknown as HubSnapshot["tasks"],
     });

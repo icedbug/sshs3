@@ -32,21 +32,27 @@ async function hub() {
 }
 
 describe("a suggestion in the terminal", () => {
-  it("is classified, and only a single read-only command may run with one key", async () => {
+  it("carries no rating, and is never marked as one to run for the person", async () => {
     const h = await hub();
     const ask = async (prompt: string) => (await h.request({ action: "inline-suggest", prompt, shell: "bash" })).reply!.inlineSuggestion!;
     const look = await ask("show disk usage");
-    expect(look.riskLevel).toBe("safe");
-    expect(look.runnable).toBe(true);
+    expect(look.command).toBeTruthy();
+    // Nothing looks at what the command does: it is pasted, and the person presses Enter.
+    expect(look).not.toHaveProperty("riskLevel");
+    expect(look).not.toHaveProperty("riskReason");
+    expect(look).not.toHaveProperty("runnable");
   });
 
   it("is cleaned of escape codes and never runs a second line by pressing Enter on the first", async () => {
     const { checkedSuggestionForTesting } = await import("../../src/main/ai/hub/HubService");
     const s = checkedSuggestionForTesting({ command: "ls -la\u001b[201~\nrm -rf ~/backups", explanation: "", createdAt: 1 });
     expect(s.command).not.toContain("\u001b");
+    expect(s.command).toBe("ls -la[201~\nrm -rf ~/backups");
     expect(s.multiline).toBe(true);
-    expect(s.runnable).toBe(false);
-    expect(s.riskLevel).toBe("destructive");
+    expect(s).not.toHaveProperty("runnable");
+    expect(s).not.toHaveProperty("riskLevel");
+    // One line is not marked as more than one.
+    expect(checkedSuggestionForTesting({ command: "df -h\n", explanation: "", createdAt: 1 }).multiline).toBeUndefined();
   });
 
   it("does not offer a command saved for another server on a one-word match", () => {

@@ -146,7 +146,8 @@ class FakeHub implements ChatHub {
           target: c.target,
           description: c.description,
           ...(c.command !== undefined ? { command: c.command } : {}),
-          ...(c.riskLevel ? { riskLevel: c.riskLevel } : {}),
+          ...(c.check ? { check: { command: c.check.command, expected: c.check.expected } } : {}),
+          ...(c.rollback ? { rollback: c.rollback.command } : {}),
           requiredApprovals: c.requiredApprovals ?? 1,
           approvals: (c.approvals ?? []).map((a) => ({ actor: a.actor, allowed: a.allowed, at: a.at })),
         })),
@@ -207,7 +208,9 @@ class FakeHub implements ChatHub {
       target: 'web-1',
       description: 'Restart nginx',
       command: 'sudo systemctl restart nginx',
-      riskLevel: 'modify',
+      // A change card: it carries its check and its rollback. A plain command is never asked about.
+      check: { command: 'systemctl is-active nginx', expected: 'active' },
+      rollback: { command: 'sudo systemctl stop nginx' },
       status: 'pending',
       at: Date.now(),
       ...change,
@@ -1568,7 +1571,8 @@ describe('ChatAgentService with a real hub', () => {
     const model = await fakeOpenAi((request) =>
       JSON.stringify(request.messages).includes('"role":"tool"')
         ? { text: 'Restarted nginx on web-1. The key in the log was AKIAIOSFODNN7EXAMPLE, rotate it.' }
-        : { tool: 'terminal_command', args: { command: 'sudo systemctl restart nginx', description: 'Restart the web server' } },
+        : // A change card: what a person is asked about. The terminal here prints "done" for everything.
+          { tool: 'sshs3_change', args: { command: 'sudo systemctl restart nginx', description: 'Restart the web server', check: { command: 'systemctl is-active nginx', expected: 'done' }, rollback: 'sudo systemctl stop nginx' } },
     );
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sshs3-chat-real-hub-'));
     const web1 = { id: 'srv-web-1', name: 'web-1', host: '10.0.0.11', port: 22, username: 'ops', shared: true };
@@ -1632,7 +1636,12 @@ describe('ChatAgentService with a real hub', () => {
     expect(task.chat?.fence).toMatchObject({ servers: ['web-1'], reach: 'ask', approvers: 'linked' });
     const card = cardOf(r, 'COPS', root)!;
     expect(JSON.stringify(card.blocks)).toContain('sudo systemctl restart nginx');
-    expect(typed.some((d) => d.includes('systemctl restart'))).toBe(false);
+    // The card shows the check and the rollback whole, and no rating of the command.
+    expect(JSON.stringify(card.blocks)).toContain('systemctl is-active nginx');
+    expect(JSON.stringify(card.blocks)).toContain('sudo systemctl stop nginx');
+    expect(JSON.stringify(card.blocks)).not.toMatch(/Risk|Not rated|It changes something/);
+    // Nothing of the card ran while it waited: not its check either.
+    expect(typed.some((d) => d.includes('systemctl'))).toBe(false);
 
     r.chat.click(card.id, 'approve', 'U2OMAR');
     await vi.waitFor(() => expect(r.chat.log.some((e) => e.op === 'ephemeral' && e.userId === 'U2OMAR')).toBe(true));

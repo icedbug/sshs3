@@ -459,9 +459,7 @@ describe("Wave 2 Hub integration overhaul", () => {
     ).rejects.toThrow(/second person/);
     // ...but one that arrives anyway (stored before, synced) is held to: such a change is refused, not waved through.
     hub.store.data.safetyPolicy = {
-      autoApproveSafeReadOnly: true,
       requireApprovalOnProdTags: true,
-      blockDestructiveWithoutConfirm: true,
       clusterPolicies: { "db-prod": { requiredApprovals: 2 } },
     };
 
@@ -579,9 +577,7 @@ describe("Wave 2 Hub integration overhaul", () => {
       hub.request({
         action: "safety-policy-save",
         policy: {
-          autoApproveSafeReadOnly: true,
           requireApprovalOnProdTags: true,
-          blockDestructiveWithoutConfirm: true,
           requirePeerApprovalOnProd: true,
         },
       }),

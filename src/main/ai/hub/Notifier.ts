@@ -35,8 +35,8 @@ export interface NotifyItem {
   detail?: string;
   from?: string;
   target?: string;
+  /** An alert's or a health finding's severity. */
   risk?: string;
-  reason?: string;
   command?: string;
   check?: string;
   rollback?: string;
@@ -258,7 +258,6 @@ const HEADLINE: Record<InboxKind, string> = {
   report: "Daily report",
   knowledge: "Knowledge base",
 };
-const RISK: Record<string, string> = { safe: "read-only", modify: "changes the system", destructive: "destructive" };
 
 const shorten = (text: string | undefined, max: number): string => clip((text ?? "").trim(), max);
 
@@ -276,7 +275,6 @@ function lines(item: NotifyItem, channel: Pick<NotifyChannel, "includeCommand">,
   if (item.title && item.title !== item.command) body.push(shorten(item.title, 200));
   else if (!command && item.command) body.push("A command (its text is not sent to this channel).");
   if (item.detail && item.detail !== item.command && item.kind !== "approval") body.push(shorten(item.detail, 300));
-  if (item.risk && item.kind === "approval") body.push(`Risk: ${RISK[item.risk] ?? item.risk}${item.reason ? ` (${shorten(item.reason, 140)})` : ""}`);
   if ((item.kind === "alert" || item.kind === "health") && item.risk) body.push(`Severity: ${item.risk}`);
   if (channel.includeCommand && item.check) body.push(`Check: ${shorten(item.check, 160)}`);
   if (channel.includeCommand && item.rollback) body.push(`Way back: ${shorten(item.rollback, 160)}`);

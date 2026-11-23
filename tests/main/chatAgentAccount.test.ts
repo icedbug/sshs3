@@ -137,7 +137,9 @@ describe('the chat agent account on a web server', () => {
     ran.length = 0;
     let outcome: { exitCode: number } | undefined;
     let refused: Error | undefined;
-    void (hub.broker.invoke(capability.key, { action: 'command', command: 'sudo systemctl restart nginx', description: 'Restart the web server' }) as Promise<{ exitCode: number }>).then(
+    // A change card: what a person is asked about. A plain command would run at once, with nobody asked.
+    // The terminal prints "done" for everything, so that is what the check expects.
+    void (hub.broker.invoke(capability.key, { action: 'change', command: 'sudo systemctl restart nginx', description: 'Restart the web server', check: { command: 'systemctl is-active nginx', expected: 'done' }, rollback: 'sudo systemctl stop nginx' }) as Promise<{ exitCode: number }>).then(
       (r) => (outcome = r),
       (e) => (refused = e as Error),
     );
@@ -336,7 +338,6 @@ describe('the chat agent account on a web server', () => {
     expect(agent.host.soleUser?.()).toBe(false);
     expect(agent.sharedServer()).toBe(true);
     expect(agent.safetyPolicy().requireApprovalOnProdTags).toBe(true);
-    expect(agent.safetyPolicy().blockDestructiveWithoutConfirm).toBe(true);
     expect(agent.outboundGuard().server).toBe(true);
   }, 30_000);
 
@@ -434,7 +435,7 @@ describe('the chat agent account on a web server', () => {
     expect(await answer(maria, run.change, { approvers: 'admins' })).toEqual({ outcome: 'approved', message: 'Maria Ek approved.' });
     await until(() => run.outcome(), 'the command runs');
     expect(run.refused()).toBeUndefined();
-    expect(run.ran).toHaveLength(1);
+    expect(run.ran).toHaveLength(3);
     expect(run.change.approvals).toEqual([expect.objectContaining({ actor: 'Maria Ek', actorId: `user:${maria.id}`, allowed: true, via: 'slack' })]);
     // Answered: a second press says so.
     expect(await answer(maria, run.change)).toMatchObject({ outcome: 'refused', message: expect.stringContaining('not waiting any more') });
@@ -487,7 +488,7 @@ describe('the chat agent account on a web server', () => {
     expect(run.ran).toEqual([]);
     expect(await answer(eva!, run.change)).toEqual({ outcome: 'approved', message: 'Eva Holm approved.' });
     await until(() => run.outcome(), 'the command runs');
-    expect(run.ran).toHaveLength(1);
+    expect(run.ran).toHaveLength(3);
     expect(run.change.approvals!.filter((a) => a.allowed).map((a) => a.actorId)).toEqual([`user:${maria.id}`, `user:${eva!.id}`]);
   }, 30_000);
 

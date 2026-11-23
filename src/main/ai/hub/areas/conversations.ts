@@ -12,7 +12,7 @@ import type {
 } from "../../../../shared/types/aiHub";
 import { CONTEXT_NOTE_PREFIX, SHELL_KINDS } from "../../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS, usesResponsesApi } from "../../../../shared/types/ai";
-import { analyzeCommandSafety, isProdTag } from "../CommandSafetyService";
+import { isProdTag } from "../safetyPolicy";
 import { hostOf } from "../Notifier";
 import { getBuiltinSkillsAndMemories, getDemoTasks, getDemoWorkforceRuns, isDemoMode } from "../demoWorkspace";
 import { type DetectedCommandActivity } from "../TerminalRegistry";
@@ -743,8 +743,8 @@ export class ConversationsPart {
         const command = change.rollback?.command?.trim();
         if (isFile && !this.host.restoreCheckpoint) throw new Error("Checkpoint restore is unavailable.");
         const check = change.check?.command?.trim();
-        if (!isFile && (!command || change.hiddenValues || analyzeCommandSafety(command, session.shell).riskLevel === "destructive" ||
-            (check && analyzeCommandSafety(check, session.shell).riskLevel !== "safe")))
+        // The rollback and the check are the ones the person read on the card. Nothing else looks at them.
+        if (!isFile && (!command || change.hiddenValues))
           throw new Error("Request a new checked change to review this rollback.");
         const owned = session.owner === task.id;
         let attempted = false;

@@ -11,15 +11,10 @@ import type {
   SafetyPolicyConfig,
   TerminalSession,
 } from "../../../shared/types/aiHub";
+import { isPlainCommand } from "../../../shared/types/aiHub";
 import { CHAT_APP_TOOLS, mayKeepNotes, sensitiveFile, type ChatFenceCheck } from "./chatFence";
 import type { TerminalRegistry } from "./TerminalRegistry";
-import {
-  analyzeCommandSafety,
-  getDryRunPreviewCommand,
-  isProdTag,
-  matchesCommandAllowPrefix,
-  shouldRequireCommandApproval,
-} from "./CommandSafetyService";
+import { isProdTag } from "./safetyPolicy";
 import { boundedContext, exactHash, observationHash, forApproval, maskStrings, safeError, clip } from "./privacy";
 import { scriptedDemoNote } from "../../sim/scripted";
 
@@ -143,7 +138,6 @@ export interface LifecycleHook {
   stage: LifecycleHookStage;
   when?: {
     actions?: string[];
-    riskLevels?: Array<NonNullable<AgentChange["riskLevel"]>>;
   };
   run: (
     ctx: LifecycleHookContext,
@@ -330,7 +324,7 @@ export interface ToolRequest {
   expectedHash?: string;
   edits?: Array<{ oldText: string; newText: string }>;
   structuredCheck?: AgentChangeStructuredCheck;
-  /** With `change`: the read-only command that shows the change worked, and what its output must contain. */
+  /** With `change`: the command that shows the change worked, and what its output must contain. */
   check?: {
     command?: string;
     expected?: string;
@@ -348,7 +342,6 @@ export interface ToolRequest {
   payload?: Record<string, unknown>;
   idempotencyKey?: string;
   nonInteractive?: boolean;
-  dryRun?: boolean;
   preflightCommand?: string;
 }
 /** Who an approval is from: the account id when there is one, the name otherwise. */
@@ -427,17 +420,16 @@ const outsideFence = (what: string): ToolBrokerError =>
     code: "outside_chat_fence",
   });
 
-/** Said to a chat run that reached for a file that may hold secrets with a tool that asks nobody. */
+/**
+ * Said to a chat run whose file tool reached for a file that may hold secrets. Only the file tools
+ * hold to this: what a command reads is not checked.
+ */
 export const sensitiveForChat = (fence: ChatFenceCheck): ToolBrokerError =>
-  fence.reach === "read"
-    ? new ToolBrokerError("auth_denied", "This chat may only look, and that file may hold secrets. It was not read. Say what you would look for, and that a person can read it in the app.", {
-        code: "chat_read_only",
-      })
-    : new ToolBrokerError(
-        "auth_denied",
-        "That file may hold secrets. It was not read. If it is needed, read it with terminal_command, which a person approves first.",
-        { code: "sensitive_file" },
-      );
+  new ToolBrokerError(
+    "auth_denied",
+    "That file may hold secrets, and the file tools do not read such a file for a chat. It was not read. Say what you would look for, and that a person can read it in the app.",
+    { code: fence.reach === "read" ? "chat_read_only" : "sensitive_file" },
+  );
 
 /** A random capability is issued to one run. Model-supplied IDs can never rebind its target. */
 export class ToolBroker {
@@ -499,16 +491,10 @@ export class ToolBroker {
   private matchingHooks(
     stage: LifecycleHookStage,
     request: ToolRequest,
-    change?: AgentChange,
   ): LifecycleHook[] {
     return [...(this.deps.hooks ?? []), ...this.hooks].filter((h) => {
       if (h.stage !== stage) return false;
       if (h.when?.actions?.length && !h.when.actions.includes(request.action))
-        return false;
-      if (
-        h.when?.riskLevels?.length &&
-        (!change?.riskLevel || !h.when.riskLevels.includes(change.riskLevel))
-      )
         return false;
       return true;
     });
@@ -667,6 +653,15 @@ export class ToolBroker {
       );
     }
 
+    // There is no dry run. A caller that still asks for one is told so and nothing runs: running the
+    // real command in its place would be the opposite of what it asked for.
+    if ((request as { dryRun?: unknown }).dryRun === true)
+      throw new ToolBrokerError(
+        "schema_validation",
+        "There is no dry run option. Nothing ran. Write the dry run command yourself, for example with --dry-run=server, terraform plan or rsync -n.",
+        { code: "dry_run_removed" },
+      );
+
     if (request.action === "verify") {
       const hasExpected =
         typeof request.expected === "string" && request.expected.trim().length > 0;
@@ -690,7 +685,7 @@ export class ToolBroker {
       if (!checkCommand || (!expected && !hasStructured)) {
         throw new ToolBrokerError(
           "schema_validation",
-          "A change needs a check: a read-only command that exits 0, and what its output must contain, when the change worked.",
+          "A change needs a check: a command that only looks and exits 0, and what its output must contain, when the change worked.",
           { code: "missing_check" },
         );
       }
@@ -1056,8 +1051,8 @@ export class ToolBroker {
             );
           if (fence && (!task.target || !fence.own(task.target.sessionId)))
             throw outsideFence("Files are read on a terminal this chat run opened on one of its servers, and it has none.");
-          // A file that may hold secrets is read only as a command that reads it would be: a person
-          // approves it first, and a chat that may only look does not read it. The file tools ask nobody.
+          // The file tools do not hand a chat a file that may hold secrets. This is the file tools' own
+          // rule, by path: what a command reads is not checked.
           if (fence && typeof request.path === "string" && sensitiveFile(request.path)) throw sensitiveForChat(fence);
           if (isMutatingFile) this.spend(grant, task);
           const fileRes = await this.deps.file(task, request, (change) => {
@@ -1176,81 +1171,10 @@ export class ToolBroker {
           }
         }
 
-        const shellKind = this.terminals.get(target.sessionId)?.shell;
-
-        if (request.preflightCommand?.trim()) {
-          const preSafety = analyzeCommandSafety(request.preflightCommand, shellKind);
-          if (preSafety.riskLevel !== "safe") {
-            throw new ToolBrokerError(
-              "precondition",
-              "Preflight snapshot command must be read-only",
-              { code: "unsafe_preflight" },
-            );
-          }
-        }
-
         if (request.action === "change") {
           return await this.runChange(key, task, target, request, (c) => {
             activeChange = c;
           });
-        }
-
-        if (request.action === "command" && request.dryRun === true) {
-          const preview = getDryRunPreviewCommand(request.command!, shellKind);
-          if (!preview || analyzeCommandSafety(preview.command, shellKind).riskLevel === "destructive") {
-            throw new ToolBrokerError(
-              "precondition",
-              "No safe dry-run preview command is available for this command",
-              { code: "dry_run_unsupported" },
-            );
-          }
-          const previewSafety = analyzeCommandSafety(preview.command, shellKind);
-          const shownPreview = forApproval(preview.command, 16_000, "command");
-          const dryChange: AgentChange = {
-            id: crypto.randomUUID(),
-            kind: "command",
-            target: target.label,
-            description: clip(request.description || preview.description, 400),
-            command: shownPreview.text,
-            ...(shownPreview.hidden ? { hiddenValues: true } : {}),
-            commandHash: exactHash(preview.command.trim()),
-            status: "pending",
-            riskLevel: previewSafety.riskLevel,
-            riskReason: preview.description,
-            parsedSubcommands: previewSafety.parsedSubcommands,
-            ref: nextRef(task),
-            at: Date.now(),
-          };
-          task.changes.push(dryChange);
-          activeChange = dryChange;
-          await this.authorize(key, task, dryChange, request, previewSafety.sensitiveRead);
-          dryChange.status = "running";
-          this.deps.changed();
-          const dryRes = await this.terminals.execute(
-            target.sessionId,
-            target.generation,
-            task.id,
-            preview.command,
-          );
-          dryChange.status = dryRes.exitCode === 0 ? "completed" : "failed";
-          dryChange.exitCode = dryRes.exitCode;
-          dryChange.output = dryRes.output;
-          dryChange.dryRunOutput = boundedContext(dryRes.output, 4000);
-          this.deps.activity?.(task, dryChange, target.sessionId);
-          this.deps.changed();
-          return {
-            dryRun: true,
-            previewCommand: preview.command,
-            previewDescription: preview.description,
-            exitCode: dryRes.exitCode,
-            output: dryRes.output,
-            dryRunOutput: dryChange.dryRunOutput,
-            ref: dryChange.ref,
-            commandId: dryChange.id,
-            source: `terminal:${target.sessionId}`,
-            sourceLabel: target.label,
-            observedAt: Date.now(),
-          };
         }
 
         // The same command with the same answer, three times running and just now: a fourth run would say
@@ -1266,7 +1190,6 @@ export class ToolBroker {
           );
         }
         grant.repeats = 0;
-        const safety = analyzeCommandSafety(request.command!, shellKind);
         const shown = forApproval(request.command!, 16_000, "command");
         const sc = request.structuredCheck ?? request.check?.structuredCheck;
         const change: AgentChange = {
@@ -1284,15 +1207,12 @@ export class ToolBroker {
           ...(sc ? { structuredCheck: sc } : {}),
           ...(idempotencyKey ? { idempotencyKey } : {}),
           status: "pending",
-          riskLevel: safety.riskLevel,
-          riskReason: safety.riskReason,
-          parsedSubcommands: safety.parsedSubcommands,
           ref: nextRef(task),
           at: Date.now(),
         };
         task.changes.push(change);
         activeChange = change;
-        await this.authorize(key, task, change, request, safety.sensitiveRead);
+        await this.authorize(key, task, change, request);
         change.status = "running";
         this.deps.changed();
         try {
@@ -1359,7 +1279,7 @@ export class ToolBroker {
         const result = await executeBody();
         const latestChange = activeChange ?? task.changes.slice(changesBefore).at(-1);
         if (latestChange) {
-          const postHooks = this.matchingHooks("post_change", request, latestChange);
+          const postHooks = this.matchingHooks("post_change", request);
           if (postHooks.length > 0) {
             await this.executeHooks("post_change", postHooks, {
               task,
@@ -1402,8 +1322,6 @@ export class ToolBroker {
             kind: c.kind,
             description: c.description,
             ...(c.command ? { command: c.command } : {}),
-            ...(c.riskLevel ? { riskLevel: c.riskLevel } : {}),
-            ...(c.riskReason ? { riskReason: c.riskReason } : {}),
             requiredApprovals: c.requiredApprovals ?? 1,
             approvalsCount: (c.approvals ?? []).filter((a) => a.allowed).length,
             ...(c.dryRunOutput ? { dryRunOutput: c.dryRunOutput } : {}),
@@ -1413,7 +1331,7 @@ export class ToolBroker {
 
         const latestChange = activeChange ?? task.changes.slice(changesBefore).at(-1);
         if (latestChange) {
-          const postHooks = this.matchingHooks("post_change", request, latestChange);
+          const postHooks = this.matchingHooks("post_change", request);
           if (postHooks.length > 0) {
             try {
               await this.executeHooks("post_change", postHooks, {
@@ -1458,6 +1376,9 @@ export class ToolBroker {
    * runs at once, once, and the agent is told what happened instead of being
    * left to notice.
    *
+   * Nothing here looks at what the command, the check or the rollback do. The
+   * card shows all three in full and the person approves what they read.
+   *
    * What it can prove is said as it is: a check that already passed before
    * the change does not show the change did anything, and a rollback that
    * exits 0 has only "taken it back" when the check reads as it did before.
@@ -1469,7 +1390,6 @@ export class ToolBroker {
     request: ToolRequest,
     trackChange?: (change: AgentChange) => void,
   ): Promise<unknown> {
-    const shellKind = this.terminals.get(target.sessionId)?.shell;
     const command = request.command!;
     const checkCommand = request.check?.command?.trim() ?? "";
     const expected = request.check?.expected?.trim() ?? "";
@@ -1478,7 +1398,7 @@ export class ToolBroker {
     if (!checkCommand || (!expected && !sc))
       throw new ToolBrokerError(
         "schema_validation",
-        "A change needs a check: a read-only command that exits 0, and what its output must contain, when the change worked.",
+        "A change needs a check: a command that only looks and exits 0, and what its output must contain, when the change worked.",
         { code: "missing_check" },
       );
     if (!rollback)
@@ -1486,12 +1406,6 @@ export class ToolBroker {
         "schema_validation",
         "A change needs a rollback: the command that takes it back.",
         { code: "missing_rollback" },
-      );
-    if (analyzeCommandSafety(checkCommand, shellKind).riskLevel !== "safe")
-      throw new ToolBrokerError(
-        "precondition",
-        "The check must only look: it is run before and after the change, and again after a rollback.",
-        { code: "unsafe_check" },
       );
     // Shown in full or refused: the person approves the change, its check and its rollback as one.
     const shown = {
@@ -1515,14 +1429,6 @@ export class ToolBroker {
             ? `The check exited with code ${r.exitCode} and its output did not contain the expected text.`
             : "The check exited 0, but its output did not contain the expected text.";
 
-    const safety = analyzeCommandSafety(command, shellKind);
-    const undo = analyzeCommandSafety(rollback, shellKind);
-    // Approved as one thing: the worse of the change and its way back decides how it is treated.
-    const worst = [safety, undo].sort(
-      (a, b) =>
-        ["safe", "modify", "destructive"].indexOf(b.riskLevel) -
-        ["safe", "modify", "destructive"].indexOf(a.riskLevel),
-    )[0];
     const change: AgentChange = {
       id: crypto.randomUUID(),
       kind: "command",
@@ -1535,9 +1441,6 @@ export class ToolBroker {
       ...(sc ? { structuredCheck: sc } : {}),
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
       status: "pending",
-      riskLevel: worst.riskLevel,
-      riskReason: worst.riskReason,
-      parsedSubcommands: safety.parsedSubcommands,
       check: { command: shown.check.text, expected: shown.expected.text },
       rollback: { command: shown.rollback.text },
       ref: nextRef(task),
@@ -1545,15 +1448,13 @@ export class ToolBroker {
     };
     task.changes.push(change);
     trackChange?.(change);
-    await this.authorize(
-      key,
-      task,
-      change,
-      request,
-      Boolean(safety.sensitiveRead || undo.sensitiveRead),
-    );
+    await this.authorize(key, task, change, request);
     change.status = "running";
     this.deps.changed();
+    // What the person said with their yes is for the agent to act on. A change card is what a person
+    // is asked about, so this is where a note arrives.
+    const personNote = (): { personNote?: string } =>
+      change.decisionNote ? { personNote: `Approved with a note from the person: ${change.decisionNote}` } : {};
 
     // Optional explicit preflight snapshot immediately prior to execution.
     if (request.preflightCommand?.trim()) {
@@ -1629,6 +1530,7 @@ export class ToolBroker {
           checkPassed: true,
           checkPassedBefore: before,
           observedSeconds: observeMs / 1000,
+          ...personNote(),
           ...(change.preflightSnapshot ? { preflightSnapshot: change.preflightSnapshot } : {}),
           ...(before
             ? {
@@ -1692,6 +1594,7 @@ export class ToolBroker {
       checkOutput: last?.output,
       ...(last ? { checkExitCode: last.exitCode } : {}),
       ...(whyNot(last) ? { checkFailedBecause: whyNot(last) } : {}),
+      ...personNote(),
       rolledBack: restored === true,
       rollbackAttempted: true,
       rollbackExitCode: undone.exitCode,
@@ -1737,7 +1640,8 @@ export class ToolBroker {
       throw new Error("A second approver no longer has permission for this target. Request approval again.");
     }
     const old = this.policyAtDecision.get(change);
-    const mutates = change.kind === "file" || change.riskLevel !== "safe";
+    // A plain command only runs: a freeze and the demand for a check and a rollback are about changes.
+    const mutates = !isPlainCommand(change);
     if (mutates && (ctx.clusterPolicy?.frozenUntil ?? 0) > Date.now()) throw new Error("A change freeze now holds on this target.");
     if (mutates && ctx.clusterPolicy?.requireCheckAndRollback && (!change.check || !change.rollback))
       throw new Error("This target requires a checked change with a rollback.");
@@ -1748,7 +1652,9 @@ export class ToolBroker {
   async beforeAction(task: AgentTask, change: AgentChange, rollback = false): Promise<void> {
     try {
       this.checkCurrentPolicy(task, change);
-      if (change.kind !== "command" || change.riskLevel !== "safe") {
+      // What is about to change something is written down before it runs. A plain command is
+      // written down once, when it has ended (see auditFinishedChanges).
+      if (!isPlainCommand(change)) {
         await this.deps.recordIntent?.(task, change, rollback);
         this.checkCurrentPolicy(task, change);
       }
@@ -1783,14 +1689,23 @@ export class ToolBroker {
     return sessionId && fence.own(sessionId) ? undefined : `${change.target} is not a terminal this chat run opened on its servers.`;
   }
 
+  /**
+   * Decides whether an action runs now, waits for a person, or is refused.
+   *
+   * A plain command (see isPlainCommand) runs at once: nothing looks at what it does and nobody is
+   * asked, in every mode that runs commands. What waits is a change card, a file write, a call to a
+   * tool of another system and a settings change, as the mode, the target's rules and a plan say.
+   * This is a working agreement with the agent, not a lock: it can run as a command what it was
+   * told to put on a card.
+   */
   private async authorize(
     key: string,
     task: AgentTask,
     change: AgentChange,
     request: ToolRequest,
-    sensitiveRead = false,
   ): Promise<void> {
     this.capabilityAtDecision.set(change, key);
+    const plain = isPlainCommand(change);
     const fence = this.deps.chatFence?.(task);
     if (fence) {
       const outside = this.outsideChatFence(task, change, fence);
@@ -1805,11 +1720,11 @@ export class ToolBroker {
     // A chat channel that may only look is held to the investigator's rule: advice would refuse even a look.
     const looksOnly = task.investigator || fence?.reach === "read";
     if (looksOnly) {
-      // An investigator looks and never changes: only what the classifier calls read-only, and nobody is asked.
-      const readOnly = change.kind === "command" && change.riskLevel === "safe" && !sensitiveRead;
+      // An investigator runs commands and nobody is asked. It is given no change card, no file write
+      // and no tool of another system. What its commands do is not checked.
       // A chat run is held to the target's own rules as any run is: a cluster that allows only advice
       // runs nothing from it, a look included.
-      if (readOnly && fence) {
+      if (plain && fence) {
         try {
           this.checkCurrentPolicy(task, change);
         } catch (error) {
@@ -1820,15 +1735,15 @@ export class ToolBroker {
           throw error;
         }
       }
-      change.status = readOnly ? "approved" : "denied";
+      change.status = plain ? "approved" : "denied";
       change.decidedHow = "policy";
       this.deps.changed();
-      if (!readOnly)
+      if (!plain)
         throw new ToolBrokerError(
           "auth_denied",
           task.investigator
-            ? `An investigator only runs read-only commands, and this one is classified as "${change.riskLevel ?? "changing"}"${change.riskReason ? ` (${change.riskReason})` : ""}. Find it out another way, or report that it needs a command you may not run.`
-            : `This chat may only look, and this command is classified as "${change.riskLevel ?? "changing"}"${change.riskReason ? ` (${change.riskReason})` : ""}. It was not run. Say what you would change, and that a person can do it in the app.`,
+            ? "An investigator only looks. It makes no change card, writes no file and calls no tool of another system. Nothing ran. Report what you found and what a change would need."
+            : "This chat may run commands and proposes no change: no change card, no file write, no tool of another system. Nothing ran. Say what you would change, and that a person can do it in the app.",
           { code: task.investigator ? "investigator_read_only" : "chat_read_only" },
         );
       const grant = this.grants.get(key);
@@ -1851,7 +1766,7 @@ export class ToolBroker {
       );
     }
 
-    const preHooks = this.matchingHooks("pre_change", request, change);
+    const preHooks = this.matchingHooks("pre_change", request);
     if (preHooks.length > 0) {
       const preHookOutcome = await this.executeHooks("pre_change", preHooks, {
         task,
@@ -1870,10 +1785,8 @@ export class ToolBroker {
       }
     }
 
-    const shellKind = task.target
-      ? this.terminals.get(task.target.sessionId)?.shell
-      : undefined;
-    let requiresApproval = task.mode === "assisted" || task.mode === "plan";
+    // A plain command is never asked about. Anything else is, in Ask first and in Plan.
+    let requiresApproval = !plain && (task.mode === "assisted" || task.mode === "plan");
     let isProd = false;
     let policy: SafetyPolicyConfig | undefined;
     let clusterPolicy: ClusterSafetyPolicy | undefined;
@@ -1894,20 +1807,21 @@ export class ToolBroker {
       this.rememberPolicy(task, change);
       isProd = (ctx.targetTags ?? []).some(isProdTag);
 
-      // A change freeze stops whatever changes the target, in every mode: it is not asked about and not run.
+      // A change freeze stops change cards and file writes, in every mode: not asked about and not run.
+      // Commands still run.
       if (
+        !plain &&
         clusterPolicy?.frozenUntil &&
-        clusterPolicy.frozenUntil > Date.now() &&
-        (change.kind === "file" || (change.riskLevel ?? "modify") !== "safe")
+        clusterPolicy.frozenUntil > Date.now()
       ) {
         const until = new Date(clusterPolicy.frozenUntil).toISOString();
         change.status = "denied";
         change.decidedHow = "policy";
-        change.output = `A change freeze holds here until ${until}. Nothing that changes this target is run until it ends.`;
+        change.output = `A change freeze holds here until ${until}. No change card or file write is run here until it ends.`;
         this.deps.changed();
         throw new ToolBrokerError(
           "auth_denied",
-          `A change freeze holds on ${change.target} until ${until}: nothing that changes it is run until then. Read-only commands still run. Tell the user what you would have changed, and do not try to make the change another way.`,
+          `A change freeze holds on ${change.target} until ${until}: no change card and no file write is run there until then. Commands still run, to look and to check. Tell the user what you would have changed, and do not make the change another way.`,
           { code: "change_freeze" },
         );
       }
@@ -1915,7 +1829,7 @@ export class ToolBroker {
       const maxMode = lowerMode(task.mode, clusterPolicy?.maxMode);
       try {
         this.checkCurrentPolicy(task, change);
-        if (maxMode === "plan" && task.mode !== "plan" && task.plan?.status !== "approved" && change.riskLevel !== "safe")
+        if (!plain && maxMode === "plan" && task.mode !== "plan" && task.plan?.status !== "approved")
           throw new Error("This target requires an approved plan.");
       } catch (error) {
         change.status = "denied";
@@ -1924,68 +1838,20 @@ export class ToolBroker {
         this.deps.changed();
         throw error;
       }
-      requiresApproval = shouldRequireCommandApproval({
-        analysis: {
-          riskLevel: change.riskLevel ?? "modify",
-          riskReason:
-            change.riskReason ??
-            (change.kind === "file" ? "Remote file modification" : ""),
-          parsedSubcommands: change.parsedSubcommands ?? [],
-          ...(sensitiveRead ? { sensitiveRead: true } : {}),
-        },
-        mode: maxMode,
-        targetTags: ctx.targetTags,
-        policy: ctx.policy,
-      });
-      // On its own on production, a change has to carry its check and its way
-      // back; a bare command that changes something is not run at all.
-      if (
-        task.mode === "autonomous" &&
-        isProd &&
-        (ctx.policy?.requireApprovalOnProdTags ?? true) &&
-        change.kind === "command" &&
-        !change.check &&
-        (change.riskLevel ?? "modify") !== "safe"
-      ) {
-        change.status = "denied";
-        change.decidedHow = "policy";
-        this.deps.changed();
-        throw new ToolBrokerError(
-          "auth_denied",
-          "This target is production and you are running on your own: a change here must be made with sshs3_change, which carries the check that shows it worked and the rollback that takes it back.",
-          { code: "prod_requires_change_proof" },
-        );
-      }
+      // Auto runs a change card unasked, except on production while the rule for it is on.
+      requiresApproval =
+        !plain &&
+        (maxMode !== "autonomous" || (isProd && (ctx.policy?.requireApprovalOnProdTags ?? true)));
     }
 
-    // Session-scoped allowlist prefixes (from #143): skip approval in assisted mode for non-destructive, non-prod-guarded commands.
-    if (
-      requiresApproval &&
-      change.kind === "command" &&
-      task.mode === "assisted" &&
-      !change.hiddenValues &&
-      change.riskLevel !== "destructive" &&
-      !sensitiveRead &&
-      !(isProd && (policy?.requireApprovalOnProdTags ?? true)) &&
-      task.sessionAllowPrefixes?.length &&
-      matchesCommandAllowPrefix(
-        change.parsedSubcommands ?? [],
-        task.sessionAllowPrefixes,
-        { shellKind },
-      )
-    ) {
-      requiresApproval = false;
-      change.decidedHow = "policy";
-    }
-
-    // The user approved a plan that lists exactly this command: it is not asked
-    // about a second time. A destructive command is always asked about.
-    const matchesPlan = (consume = false) => planCoversCommand(task, change.commandHash, change.riskLevel, Date.now(), {
+    // The user approved a plan that lists exactly this command: a change card is not asked about a
+    // second time.
+    const matchesPlan = (consume = false) => planCoversCommand(task, change.commandHash, Date.now(), {
       targetKey: change.targetKey,
       check: request.check,
       rollback: request.rollback,
       observeSeconds: request.observeSeconds,
-      extras: Boolean(request.preflightCommand || request.structuredCheck || request.check?.structuredCheck || sensitiveRead),
+      extras: Boolean(request.preflightCommand || request.structuredCheck || request.check?.structuredCheck),
     }, consume);
     let listedInPlan = false;
     if (
@@ -2004,27 +1870,25 @@ export class ToolBroker {
     }
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
     if (change.guard || change.forceApproval) requiresApproval = true;
-    // Asked for from outside sshs3: a person decides every one of these, even the
-    // ones the policy would let through, because nobody here is watching the asker.
+    // Asked for from outside sshs3: a person decides every one of these, a plain command too,
+    // because nobody here is watching the asker.
     if (task.fromOutside) requiresApproval = true;
 
+    // How many people a change needs. A plain command needs nobody, so neither rule counts for it.
     let requiredApprovals = Math.max(1, change.requiredApprovals ?? 1);
     if (
+      !plain &&
       clusterPolicy?.requiredApprovals &&
       clusterPolicy.requiredApprovals > requiredApprovals
     ) {
       requiredApprovals = clusterPolicy.requiredApprovals;
     }
-    if (
-      policy?.requirePeerApprovalOnProd &&
-      isProd &&
-      (change.riskLevel ?? "modify") !== "safe"
-    ) {
+    if (!plain && policy?.requirePeerApprovalOnProd && isProd) {
       requiredApprovals = Math.max(requiredApprovals, 2);
     }
-    // A plan that as many people approved covers the commands it lists for all of them: each of them
-    // read the command in the plan. Not a destructive one, not one with hidden values, not a change to
-    // the rules and not one asked for from outside: those are put to the people themselves.
+    // A plan that as many people approved covers the change cards it lists for all of them: each of them
+    // read the command in the plan. Not one with hidden values, not a change to the rules and not one
+    // asked for from outside: those are put to the people themselves.
     // Who approved the plan is looked at first: a step is marked as run only when the plan does cover it.
     const enoughPeople =
       requiredApprovals > 1 && change.kind === "command" && !change.hiddenValues && !change.guard && !task.fromOutside
@@ -2129,6 +1993,8 @@ export class ToolBroker {
         change.status = "denied";
         throw new Error("The approved plan changed before execution.");
       }
+      // A plain command that an approved plan lists: its step is marked as run. The plan decided nothing about it.
+      if (plain) matchesPlan(true);
       change.status = "approved";
       change.decidedHow ??= "policy";
       this.deps.changed();

@@ -202,7 +202,18 @@ describe("Agent in chat, for an administrator", () => {
     render(<AgentInChatCard hub={hub(adminChat())} act={act} />);
     const rows = screen.getByTestId("agent-chat-channels");
     const ops = within(rows).getByTestId("agent-chat-row-C1");
+    // What each reach means is said as it is: a command runs in all three, and nothing checks it.
+    expect(within(rows).getByTestId("agent-chat-commands-note")).toHaveTextContent(
+      "Anyone in a channel can have the agent run commands on its servers. Give the bot an SSH user that can only do what you accept.",
+    );
+    const reach = within(ops).getByLabelText("Reach for #ops");
+    expect(within(reach).getAllByRole("option").map((o) => o.textContent)).toEqual(["Commands only", "Commands, and change cards approved in the thread", "Plan first"]);
+    expect(ops).toHaveTextContent("The agent runs commands without asking. Each change card waits until a person who may approve it says yes.");
+    fireEvent.change(reach, { target: { value: "read" } });
+    expect(ops).toHaveTextContent("The agent runs commands on these servers and proposes no change. Nothing checks what a command does.");
+    expect(ops).not.toHaveTextContent(/only commands that look|is refused/i);
     fireEvent.change(within(ops).getByLabelText("Reach for #ops"), { target: { value: "plan" } });
+    expect(ops).toHaveTextContent("The agent runs commands to look around, then writes a plan. Change cards and file writes wait until the plan is approved.");
     fireEvent.change(within(ops).getByLabelText("Who may approve in #ops"), { target: { value: "admins" } });
     fireEvent.change(within(ops).getByLabelText("Agent for #ops"), { target: { value: "sre" } });
     fireEvent.change(within(ops).getByLabelText("Clusters for #ops"), { target: { value: "staging, prod-eu" } });
@@ -341,7 +352,7 @@ describe("Agent in chat, for an administrator", () => {
         { id: "m2", role: "assistant", text: "I will remove old files.", at: NOW },
       ],
       changes: [
-        { id: "c1", kind: "command", target: "web-1", description: "Remove old files in /tmp", command: "find /tmp -mtime +7 -delete", status: "pending", riskLevel: "destructive", requiredApprovals: 1 } as ChatTaskView["changes"][number],
+        { id: "c1", kind: "command", target: "web-1", description: "Remove old files in /tmp", command: "find /tmp -mtime +7 -delete", check: { command: "df -h /tmp", expected: "%" }, rollback: { command: "true" }, status: "pending", requiredApprovals: 1 } as ChatTaskView["changes"][number],
       ],
       plan: { id: "p1", goal: "Free disk space", steps: [{ action: "Remove old files", risk: "low", check: "df -h" }], status: "proposed", revision: 1, review: { verdict: "approve", findings: [] }, createdAt: NOW },
     };
@@ -377,9 +388,11 @@ describe("Agent in chat, for an administrator", () => {
     expect(told).toHaveTextContent("keep it short and plain");
     const change = within(open).getByTestId("agent-chat-change-c1");
     expect(change).toHaveTextContent("find /tmp -mtime +7 -delete");
-    // The same plain words as the waiting list, the Inbox and the chat card: never "risk: destructive".
-    expect(change).toHaveTextContent("High. It can remove or overwrite data. No approvals yet. 1 needed.");
+    // Nothing rates the command: the line under it says how many approvals, and no risk.
+    expect(within(change).getByTestId("agent-chat-change-line")).toHaveTextContent(/^No approvals yet\. 1 needed\.$/);
     expect(change).not.toHaveTextContent("risk:");
+    expect(change).not.toHaveTextContent("High.");
+    expect(change).not.toHaveTextContent("remove or overwrite");
     expect(change).not.toHaveTextContent("0 of 1");
     fireEvent.click(within(change).getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(screen.getByTestId("agent-chat-answered")).toHaveTextContent("Approved. It runs now."));
@@ -694,8 +707,10 @@ describe("Agent in chat, for an administrator", () => {
           target: "um-01",
           description: "Restart the Harvest poller",
           command: "sudo systemctl restart harvest",
+          // A change card: it carries its check and its rollback.
+          check: { command: "systemctl is-active harvest", expected: "active" },
+          rollback: { command: "sudo systemctl stop harvest" },
           status: "pending",
-          riskLevel: "modify",
           // A change from chat need not carry how many must approve: one person does.
           at: NOW + 1,
         } as ChatTaskView["changes"][number],
@@ -706,8 +721,8 @@ describe("Agent in chat, for an administrator", () => {
       status,
       changes: [
         { ...base.changes[0], status: change, approvals: [{ actor: "Maria", allowed: true, at: NOW }] } as ChatTaskView["changes"][number],
-        // A command that only reads is kept with the changes, and must not be called one.
-        { id: "c0", kind: "command", target: "um-01", description: "Look at the poller", command: "systemctl status harvest", status: "completed", riskLevel: "safe", at: NOW } as ChatTaskView["changes"][number],
+        // A plain command is kept with the changes, and must not be called one: nobody was asked about it.
+        { id: "c0", kind: "command", target: "um-01", description: "Look at the poller", command: "systemctl status harvest", status: "completed", at: NOW } as ChatTaskView["changes"][number],
       ],
       messages: status === "completed" ? [...base.messages, { id: "m2", role: "assistant", text: "Restarted it.", at: NOW + 2 }] : base.messages,
     });
@@ -728,13 +743,14 @@ describe("Agent in chat, for an administrator", () => {
     fireEvent.click(within(runs).getByRole("button", { name: "Open Restart the poller" }));
     const status = await screen.findByTestId("agent-chat-task-status");
     expect(status).toHaveTextContent("Status: Waiting.");
-    expect(within(screen.getByTestId("agent-chat-change-c1")).getByText("It changes something. No approvals yet. 1 needed.")).toBeInTheDocument();
+    expect(within(screen.getByTestId("agent-chat-change-c1")).getByTestId("agent-chat-change-line")).toHaveTextContent(/^No approvals yet\. 1 needed\.$/);
     fireEvent.click(within(screen.getByTestId("agent-chat-change-c1")).getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(screen.getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Working on it."));
     await waitFor(() => expect(screen.getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Done."), { timeout: 3000 });
     expect(screen.getByTestId("agent-chat-change-c1")).toHaveTextContent("Change on um-01. Done.");
     expect(screen.getByTestId("agent-chat-change-c0")).toHaveTextContent("Command on um-01. Done.");
-    expect(screen.getByTestId("agent-chat-change-c0")).toHaveTextContent("Low. It only reads.");
+    // A plain command has no rating and no approvals to show.
+    expect(within(screen.getByTestId("agent-chat-change-c0")).getByTestId("agent-chat-change-line")).toBeEmptyDOMElement();
     expect(screen.getByTestId("agent-chat-change-c1")).toHaveTextContent("1 of 1 approval.");
     // The change shows before the reply the agent gave after it ran, as it happened.
     const changeBlock = screen.getByTestId("agent-chat-change-c1");
@@ -754,7 +770,7 @@ describe("Agent in chat, for an administrator", () => {
     const tryIt = screen.getByTestId("agent-chat-try");
     // Short option labels: what the channel may do is said under the list.
     expect(within(tryIt).getByRole("option", { name: "#ops, Slack" })).toBeInTheDocument();
-    expect(within(tryIt).getByTestId("agent-chat-try-reach")).toHaveTextContent("There: Ask before changes.");
+    expect(within(tryIt).getByTestId("agent-chat-try-reach")).toHaveTextContent("There: Commands, and change cards approved in the thread.");
     // It does not claim the person is linked: Try it only acts as if they were.
     expect(within(tryIt).getByRole("option", { name: "You, as if linked" })).toBeInTheDocument();
     expect(within(tryIt).getByText(/This does not link it/)).toBeInTheDocument();
@@ -841,16 +857,17 @@ describe("Your chat account", () => {
       enabled: true,
       services: ["slack"],
       links: [],
-      waiting: [{ taskId: "t1", id: "c1", kind: "change", service: "slack", channelName: "ops", askedBy: "Omar", description: "Restart nginx", command: "systemctl restart nginx", target: "web-1", risk: "modify", requiredApprovals: 2, approvedBy: ["Maria"], at: NOW }],
+      waiting: [{ taskId: "t1", id: "c1", kind: "change", service: "slack", channelName: "ops", askedBy: "Omar", description: "Restart nginx", command: "systemctl restart nginx", target: "web-1", requiredApprovals: 2, approvedBy: ["Maria"], at: NOW }],
     };
     render(<AgentInChatCard hub={hub(member)} act={act} />);
     const waiting = screen.getByTestId("agent-chat-waiting");
     expect(waiting).toHaveTextContent("A change asked by Omar in #ops (Slack): Restart nginx.");
-    // The command on its own line, in a code block; the target, risk and approvals after it.
+    // The command on its own line, in a code block; the target and approvals after it. Nothing rates it.
     expect(within(waiting).getByTestId("agent-chat-waiting-command").tagName).toBe("PRE");
     expect(within(waiting).getByTestId("agent-chat-waiting-command")).toHaveTextContent("systemctl restart nginx");
     expect(waiting).not.toHaveTextContent("Restart nginx systemctl");
-    expect(waiting).toHaveTextContent("On web-1. It changes something. 1 of 2 approvals.");
+    expect(waiting).toHaveTextContent("On web-1. 1 of 2 approvals.");
+    expect(waiting).not.toHaveTextContent("It changes something");
     // A column, so a long command wraps on a phone.
     expect(within(waiting).getByRole("listitem")).toHaveStyle({ flexDirection: "column" });
     fireEvent.click(within(waiting).getByRole("button", { name: "Approve" }));

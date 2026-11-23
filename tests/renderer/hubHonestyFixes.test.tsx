@@ -90,25 +90,33 @@ describe("audit log verdicts", () => {
 });
 
 const change = (id: string, extra: Partial<AgentChange> = {}): AgentChange =>
-  ({ id, kind: "command", target: "web-01", description: `change ${id}`, command: "systemctl restart nginx", status: "completed", riskLevel: "modify", at: Date.now(), ...extra }) as AgentChange;
+  ({ id, kind: "command", target: "web-01", description: `change ${id}`, command: "systemctl restart nginx", status: "completed", at: Date.now(), ...extra }) as AgentChange;
+/** What makes a change a change card: its check and its rollback. Without them it is a plain command. */
+const CARD = { check: { command: "systemctl is-active nginx", expected: "active" }, rollback: { command: "systemctl stop nginx" } };
 const task = (id: string, changes: AgentChange[], extra: Partial<AgentTask> = {}): AgentTask =>
   ({ id, title: `Run ${id}`, mode: "assisted", status: "completed", messages: [], changes, sources: [], createdAt: 1, updatedAt: 1, ...extra }) as AgentTask;
 
 describe("the timeline", () => {
-  it("says when a change that touched state has no approval on record", () => {
+  it("says when a change card has no approval on record, and never says it of a plain command", () => {
     const hub = makeHub({
       tasks: [
         task("t1", [
-          change("bare"),
-          change("read", { riskLevel: "safe" }),
-          change("ruled", { decidedHow: "policy" }),
-          change("asked", { decidedBy: { name: "Sara", at: 1, allowed: true }, decidedHow: "person" }),
+          // A change card, a file write and a tool of another system that ran with no word of who let them through.
+          change("bare", CARD),
+          change("file", { kind: "file" }),
+          change("tool", { toolCall: true }),
+          // A plain command is never asked about: nothing is missing from its record.
+          change("plain"),
+          change("ruled", { ...CARD, decidedHow: "policy" }),
+          change("asked", { ...CARD, decidedBy: { name: "Sara", at: 1, allowed: true }, decidedHow: "person" }),
         ]),
       ],
     });
     render(<ChangesView hub={hub} onOpenTask={vi.fn()} request={vi.fn(async () => hub)} />);
-    expect(screen.getByTestId("no-approval-bare")).toHaveTextContent("No approval recorded");
-    for (const id of ["read", "ruled", "asked"]) expect(screen.queryByTestId(`no-approval-${id}`)).not.toBeInTheDocument();
+    for (const id of ["bare", "file", "tool"]) expect(screen.getByTestId(`no-approval-${id}`)).toHaveTextContent("No approval recorded");
+    for (const id of ["plain", "ruled", "asked"]) expect(screen.queryByTestId(`no-approval-${id}`)).not.toBeInTheDocument();
+    // No entry carries a rating of its command.
+    expect(document.body).not.toHaveTextContent(/read-only|changes state|destructive|Safety check:/);
     expect(screen.getByTestId("approval-badge-asked")).toHaveTextContent("Approved by Sara");
     expect(screen.queryByTestId("timeline-demo-notice")).not.toBeInTheDocument();
   });
@@ -209,7 +217,7 @@ describe("memory", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Add by hand" }));
     expect(screen.getByTestId("memory-approval-hint")).toHaveTextContent(
-      "Memories are background for the assistant. They never change what needs approval: that is set in AI settings, Command safety.",
+      "Memories are background for the assistant. They never change what needs approval: that is set in AI settings, Safety rules.",
     );
   });
 

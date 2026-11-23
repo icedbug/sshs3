@@ -7,6 +7,7 @@ import type {
   WorkTicket,
   WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
+import { isPlainCommand } from "../../../shared/types/aiHub";
 import { clip } from "./privacy";
 
 export interface ScheduleRunSummary {
@@ -181,7 +182,9 @@ export function buildDailyReport(input: DailyReportInput): string {
 
   const changes = input.tasks.flatMap((task) =>
     recent(task.changes, (c) => c.at)
-      .filter((c) => (c.riskLevel ?? "modify") !== "safe" && ["completed", "failed", "uncertain"].includes(c.status))
+      // A change card, a file write, a settings change or a tool of another system. A plain command is not
+      // counted: nothing looks at what a command did.
+      .filter((c) => !isPlainCommand(c) && ["completed", "failed", "uncertain"].includes(c.status))
       .map((c) => ({ c, who: task.agentName || "Assistant" })),
   );
   const blockedRecent = recent(input.tickets.filter((t) => t.status === "blocked"), (t) => t.updatedAt);

@@ -28,9 +28,10 @@ const RISK_CLASS: Record<AgentPlan["steps"][number]["risk"], string> = {
 
 /**
  * The plan an agent proposed, with its review, for the user to decide on.
- * Until it is approved the agent cannot change anything; once approved, the
- * commands it lists run without asking again (destructive ones still ask),
- * unless the plan or the person approving it says that each change asks.
+ * Until it is approved its change cards and file writes are held; once
+ * approved, the change cards it lists run without asking again, unless the
+ * plan or the person approving it says that each one asks. Commands are not
+ * held and not asked about at any point.
  */
 export function PlanCard({
   taskId,
@@ -115,8 +116,8 @@ export function PlanCard({
       {!waiting && plan.status === "approved" && listed > 0 && (
         <small data-testid="plan-covers">
           {plan.askEach
-            ? "Approved with every changing command asking first, also the ones listed."
-            : "Approved: the listed commands run without asking again; destructive ones still ask."}
+            ? "Approved with every change card asking first, also the ones listed."
+            : "Approved: a change card the plan lists runs without asking again."}
         </small>
       )}
       {!waiting && people && <small data-testid="plan-people">{people}</small>}
@@ -203,17 +204,17 @@ export function PlanCard({
               disabled={sending || busy || promised || gaveMine}
               onChange={(e) => setAskChoice(e.target.checked)}
             />
-            Ask me before each command that changes something
+            Ask me before each change card
           </label>
         )}
         <small data-testid="plan-covers">
           {busy
             ? "The agent is still working; you can decide when it has stopped."
             : listed === 0
-              ? `${people ? TWO_START : ONE_START}; commands that change something still ask.`
+              ? `${people ? TWO_START : ONE_START}; change cards and file writes still ask.`
               : asksEach
-                ? `${people ? TWO_START : ONE_START}. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}.`
-                : `${people ? TWO_START : ONE_START}. ${listed === 1 ? "The command listed above runs" : `The ${listed} commands listed above run`} without asking you again; anything else, and anything destructive, still asks.`}
+                ? `${people ? TWO_START : ONE_START}. Every change card asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}. Commands run without asking.`
+                : `${people ? TWO_START : ONE_START}. A change card that matches ${listed === 1 ? "the step listed above" : `one of the ${listed} steps listed above`} runs without asking you again. Any other change card or file write still asks. Commands run without asking.`}
         </small>
         {people && (
           <small data-testid="plan-people" role="status">

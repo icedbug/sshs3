@@ -132,7 +132,7 @@ describe("the agent bot in the panel", () => {
       ...fixture,
       chatAnswering: adminAnswering({
         waiting: [
-          { taskId: "t9", id: "c9", kind: "change", service: "slack", channelName: "ops", askedBy: "Omar", description: "Restart nginx", command: "sudo systemctl restart nginx", target: "web-1", risk: "modify", requiredApprovals: 1, approvedBy: [], at: 1 },
+          { taskId: "t9", id: "c9", kind: "change", service: "slack", channelName: "ops", askedBy: "Omar", description: "Restart nginx", command: "sudo systemctl restart nginx", target: "web-1", requiredApprovals: 1, approvedBy: [], at: 1 },
         ],
       }),
     } as HubSnapshot;
@@ -145,7 +145,7 @@ describe("the agent bot in the panel", () => {
     expect(waiting).toHaveTextContent("Restart nginx.");
     // The command on its own line, then the target, the risk and the approvals in plain words.
     expect(within(waiting).getByTestId("agent-chat-waiting-command")).toHaveTextContent("sudo systemctl restart nginx");
-    expect(waiting).toHaveTextContent("On web-1. It changes something. No approvals yet. 1 needed.");
+    expect(waiting).toHaveTextContent("On web-1. No approvals yet. 1 needed.");
     expect(waiting).not.toHaveTextContent("0 of 1");
     expect(screen.queryByTestId("inbox-empty")).toBeNull();
     request.mockImplementation(async (r: { action: string }) => (r.action === "chat-answering-answer" ? { ...fixture, reply: { chatAnswer: { outcome: "approved", message: "Maria Ek approved." } } } : fixture));

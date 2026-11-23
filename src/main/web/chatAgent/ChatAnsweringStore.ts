@@ -141,7 +141,7 @@ function checkRule(service: ChatServiceName, raw: Partial<ChatChannelRule>): Cha
 
 function checkDms(raw: Partial<ChatDmRule>, had: ChatDmRule): ChatDmRule {
   const unlinked = raw.unlinked ?? had.unlinked;
-  if (unlinked !== 'read' && unlinked !== 'off') throw new Error('For direct messages from people who are not linked, choose read only or off.');
+  if (unlinked !== 'read' && unlinked !== 'off') throw new Error('For direct messages from people who are not linked, choose commands only or off.');
   return {
     enabled: typeof raw.enabled === 'boolean' ? raw.enabled : had.enabled,
     unlinked,
@@ -178,7 +178,7 @@ export function fenceFromRule(rule: ChatChannelRule): ChatFence {
 
 /**
  * The fence of a direct message. A linked person's runs in their own hub, on their own servers, and
- * every change waits for them. An unlinked person's runs in the chat agent's hub, read only, inside the
+ * every change card waits for them. An unlinked person's runs in the chat agent's hub, with reach "read", inside the
  * servers the administrator set for direct messages. Neither searches the team chat: a direct message
  * is not a channel the team reads.
  */

@@ -31,12 +31,6 @@ export function TaskContextBar({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                         {task.agentName || activeAgent?.name || "Assistant"}
                       </span>
                       <ChatOriginBadge task={task} />
-                      <span
-                        className="ai-badge ai-badge-success"
-                        title="Command safety checks apply to every command in this conversation"
-                      >
-                        Safety checks on
-                      </span>
                       <button
                         type="button"
                         className="ai-mini-btn"
@@ -58,39 +52,6 @@ export function TaskContextBar({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                       >
                         Shorten
                       </button>
-                      {task.changes.some(
-                        (c) => c.status === "pending" && c.riskLevel === "safe",
-                      ) && (
-                        <button
-                          type="button"
-                          className="ai-btn-emerald"
-                          style={{ padding: "2px 8px", fontSize: 10.5 }}
-                          disabled={busy}
-                          onClick={() => {
-                            const safePending = task.changes.filter(
-                              (c) =>
-                                c.status === "pending" && c.riskLevel === "safe",
-                            );
-                            for (const c of safePending) {
-                              void act({
-                                action: "approve",
-                                taskId: task.id,
-                                changeId: c.id,
-                                approved: true,
-                              });
-                            }
-                          }}
-                        >
-                          Approve all read-only (
-                          {
-                            task.changes.filter(
-                              (c) =>
-                                c.status === "pending" && c.riskLevel === "safe",
-                            ).length
-                          }
-                          )
-                        </button>
-                      )}
                     </div>
                     {hub.demoMode && task.id.startsWith("demo-task-") && (
                       <small className="ai-hint" data-testid="demo-example-note">

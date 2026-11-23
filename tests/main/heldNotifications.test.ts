@@ -83,7 +83,7 @@ const waiting = (id: string, at: number, what = "Restart pgbouncer"): AgentTask 
     maxMinutes: 15,
     verification: "not-verified",
     target: { sessionId: "s", generation: "g", label: "pg-01" },
-    changes: [{ id: `${id}-c1`, kind: "command", target: "pg-01", description: what, command: "systemctl restart pgbouncer", status: "pending", riskLevel: "modify", riskReason: "restarts a service", at }],
+    changes: [{ id: `${id}-c1`, kind: "command", target: "pg-01", description: what, command: "systemctl restart pgbouncer", status: "pending", at }],
   }) as unknown as AgentTask;
 
 const text = (body: string): string => (JSON.parse(body) as { blocks: Array<{ text?: { text: string } }> }).blocks[0].text!.text;

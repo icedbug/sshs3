@@ -40,10 +40,10 @@ export function ComposerFooter({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                             value === "advice"
                               ? "Advice: talk it through. Nothing is run."
                               : value === "plan"
-                                ? "Plan: the agent writes the steps, and you approve them before anything is changed"
+                                ? "Plan: The agent looks around, then proposes a plan. Change cards and file writes wait until you approve it."
                                 : value === "assisted"
-                                  ? "Ask first: you approve commands and changes before they run"
-                                  : "Auto: the agent runs commands on this terminal without asking, inside the safety rules"
+                                  ? "Ask first: Commands run without asking. A change card or a file write waits for you."
+                                  : "Auto: Commands and change cards run without asking. On production a change card still waits for a person."
                           }
                           onClick={() => {
                             setAutonomy(value);

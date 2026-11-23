@@ -409,7 +409,8 @@ describe("the safety policy", () => {
   it("takes only on or off, and refuses the whole request otherwise", async () => {
     const { hub } = await makeHub();
     const before = { ...(await hub.snapshot()).safetyPolicy };
-    for (const policy of [{ blockDestructiveWithoutConfirm: "no" }, { requireApprovalOnProdTags: 0 }, { autoApproveSafeReadOnly: null }, { requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: "false" }])
+    expect(before).toEqual({ requireApprovalOnProdTags: true });
+    for (const policy of [{ requireApprovalOnProdTags: 0 }, { requireApprovalOnProdTags: "no" }, { requirePeerApprovalOnProd: null }, { requireApprovalOnProdTags: false, requirePeerApprovalOnProd: "false" }])
       await expect(hub.request({ action: "safety-policy-save", policy } as never)).rejects.toThrow(/either on \(true\) or off \(false\)/);
     expect((await hub.snapshot()).safetyPolicy).toEqual(before);
     expect(hub.store.data.safetyPolicyChanged).toBeUndefined();
@@ -418,28 +419,36 @@ describe("the safety policy", () => {
     expect(snap.safetyPolicy).toEqual({ ...before, requireApprovalOnProdTags: false });
   });
 
-  it("reads a value an earlier version stored as text for what it did", async () => {
+  it("leaves out the switches about commands that an older window still sends, and stores none of them", async () => {
     const { hub } = await makeHub();
-    hub.store.data.safetyPolicy = { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: "no" as never };
-    const snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: false } });
-    expect(snap.safetyPolicy).toEqual({ autoApproveSafeReadOnly: false, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+    const snap = await hub.request({
+      action: "safety-policy-save",
+      policy: { autoApproveSafeReadOnly: false, blockDestructiveWithoutConfirm: "no", commandAllowPrefixes: ["rm"], requireApprovalOnProdTags: false },
+    } as never);
+    expect(snap.safetyPolicy).toEqual({ requireApprovalOnProdTags: false });
+    expect(hub.store.data.safetyPolicy).toEqual({ requireApprovalOnProdTags: false });
   });
 
-  it("on a shared server is a floor: a member tightens their own rules, only an administrator loosens them", async () => {
+  it("reads a value an earlier version stored as text for what it did, and drops what it stored about commands", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.safetyPolicy = { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: "no", blockDestructiveWithoutConfirm: "no", commandAllowPrefixes: ["kubectl get"] } as never;
+    const snap = await hub.request({ action: "safety-policy-save", policy: { clusterPolicies: { db: { maxMode: "plan" } } } });
+    // Any text counted as on, and still does.
+    expect(snap.safetyPolicy).toEqual({ requireApprovalOnProdTags: true, clusterPolicies: { db: { maxMode: "plan" } } });
+  });
+
+  it("on a shared server is a floor: only an administrator loosens it", async () => {
     const { hub } = await makeHub(member);
-    for (const policy of [{ requireApprovalOnProdTags: false }, { blockDestructiveWithoutConfirm: false }, { requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false }])
-      await expect(hub.request({ action: "safety-policy-save", policy })).rejects.toThrow(/Only an administrator/);
-    // Asking for every read-only command is stricter, and a member's own choice.
-    let snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: false } });
-    expect(snap.safetyPolicy).toEqual({ autoApproveSafeReadOnly: false, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
-    snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: true } });
-    expect(snap.safetyPolicy?.autoApproveSafeReadOnly).toBe(true);
-    // Rules a member switched off before this held count as on.
-    hub.store.data.safetyPolicy = { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false };
-    expect((await hub.snapshot()).safetyPolicy).toEqual({ autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+    await expect(hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } })).rejects.toThrow(/Only an administrator/);
+    // Sent back as it is, it is not a change: a member is not refused for what they did not touch.
+    const same = await hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: true } });
+    expect(same.safetyPolicy).toEqual({ requireApprovalOnProdTags: true });
+    // A rule a member switched off before this held counts as on.
+    hub.store.data.safetyPolicy = { requireApprovalOnProdTags: false };
+    expect((await hub.snapshot()).safetyPolicy).toEqual({ requireApprovalOnProdTags: true });
 
     const anna = await makeHub(admin);
-    snap = await anna.hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } });
+    const snap = await anna.hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } });
     expect(snap.safetyPolicy?.requireApprovalOnProdTags).toBe(false);
   });
 });

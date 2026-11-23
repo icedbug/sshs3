@@ -6,6 +6,7 @@ import type {
   HubRequest,
   HubSnapshot,
 } from "@shared/types/aiHub";
+import { isPlainCommand } from "@shared/types/aiHub";
 import { hubRequest } from "../../lib/aiHub";
 import { useFullTask } from "../../lib/aiHubTasks";
 import { AuditLogView } from "./AuditLogView";
@@ -58,12 +59,6 @@ const KINDS: Record<string, string> = {
   note: "note",
 };
 
-const RISK: Record<string, { text: string; tone: string }> = {
-  safe: { text: "read-only", tone: "ai-badge-success" },
-  modify: { text: "changes state", tone: "ai-badge-mode" },
-  destructive: { text: "destructive", tone: "ai-badge-danger" },
-};
-
 const REPORTED_ONLY = "Reported by the team. Not run or approved through sshS3.";
 
 const STATUS_TONE: Record<AgentChange["status"], string> = {
@@ -90,7 +85,10 @@ function decision(c: AgentChange): string {
     case "policy":
       return c.status === "denied"
         ? "Refused by the safety rules"
-        : "Let through by the safety rules, without asking";
+        : isPlainCommand(c)
+          ? // No rule let it through: a plain command is never asked about.
+            "Not asked: a command runs without asking"
+          : "Let through by the safety rules, without asking";
     case "plan":
       return "Let through without asking: an approved plan lists exactly this command";
     case "timeout":
@@ -432,12 +430,12 @@ export function ChangesView({
     const approvalBadge = c
       ? formatApprovalBadge(c.approvals, c.requiredApprovals, c.decidedBy)
       : null;
-    // A change that touched state with no approver and no stated reason must
+    // A change card or a file write with no approver and no stated reason must
     // say so: an empty spot reads as "nothing was needed".
     const noApprovalRecorded = Boolean(
       c &&
         !approvalBadge &&
-        c.riskLevel !== "safe" &&
+        !isPlainCommand(c) &&
         c.status !== "pending" &&
         !c.decidedBy &&
         !c.decidedHow,
@@ -512,14 +510,6 @@ export function ChangesView({
               Reported by the team
             </span>
           )}
-          {c?.riskLevel && RISK[c.riskLevel] && (
-            <span
-              className={`ai-badge ${RISK[c.riskLevel].tone}`}
-              title={c.riskReason}
-            >
-              {RISK[c.riskLevel].text}
-            </span>
-          )}
           {c ? (
             <span className={`ai-badge ${STATUS_TONE[c.status]}`}>
               {c.rollback?.ran
@@ -567,7 +557,6 @@ export function ChangesView({
               {c && (
                 <ChangeProof change={c} taskId={e.taskId} request={request} />
               )}
-              {c?.riskReason && <small>Safety check: {c.riskReason}</small>}
               <div className="ai-card-actions">
                 {restorable && e.taskId && c && (
                   <button

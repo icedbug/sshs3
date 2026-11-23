@@ -84,7 +84,7 @@ const conversation = (extra: Partial<AgentTask> & { on?: string; commandOn?: str
       { id: "m1", role: "user", text: "it is slow, my partner's backup job runs at night", at: now },
       { id: "m2", role: "assistant", text: "Looked at it. ".repeat(60), at: now },
     ],
-    changes: target ? [{ id: "c1", kind: "command", target, description: "top", command: "top -bn1 | head", status: "completed", exitCode: 0, output: "load average: 9.1", riskLevel: "safe", at: now }] : [],
+    changes: target ? [{ id: "c1", kind: "command", target, description: "top", command: "top -bn1 | head", status: "completed", exitCode: 0, output: "load average: 9.1", at: now }] : [],
     sources: [],
     createdAt: now,
     updatedAt: now,

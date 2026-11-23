@@ -22,10 +22,13 @@ describe("the daily report", () => {
       {
         agentName: "DBA",
         changes: [
-          { id: "1", target: "pg-01", description: "Raise max_connections", status: "completed", riskLevel: "modify", at: NOW - HOUR, check: { command: "pg_isready", after: { exitCode: 0, output: "ok", at: NOW } } },
-          { id: "2", target: "pg-01", description: "Restart pgbouncer", status: "failed", riskLevel: "modify", at: NOW - 2 * HOUR, rollback: { command: "systemctl start pgbouncer", ran: true, exitCode: 0 } },
-          { id: "3", target: "pg-01", description: "df -h", status: "completed", riskLevel: "safe", at: NOW - HOUR },
-          { id: "4", target: "pg-01", description: "Old change", status: "completed", riskLevel: "modify", at: NOW - 30 * HOUR },
+          // Change cards: each carries a check or a rollback.
+          { id: "1", kind: "command", target: "pg-01", description: "Raise max_connections", status: "completed", at: NOW - HOUR, check: { command: "pg_isready", after: { exitCode: 0, output: "ok", at: NOW } } },
+          { id: "2", kind: "command", target: "pg-01", description: "Restart pgbouncer", status: "failed", at: NOW - 2 * HOUR, rollback: { command: "systemctl start pgbouncer", ran: true, exitCode: 0 } },
+          // Plain commands: not counted as changes, whatever they did. Nothing looks at a command.
+          { id: "3", kind: "command", target: "pg-01", description: "df -h", status: "completed", at: NOW - HOUR },
+          { id: "5", kind: "command", target: "pg-01", description: "rm -rf /var/tmp/old", status: "completed", at: NOW - HOUR },
+          { id: "4", kind: "file", target: "pg-01", description: "Old change", status: "completed", at: NOW - 30 * HOUR },
         ],
       },
     ] as unknown as AgentTask[];
@@ -51,6 +54,7 @@ describe("the daily report", () => {
     expect(text).toContain("Ticket “Fix replication” stopped: No access to the replica");
     expect(text).toContain("DBA on pg-01: Raise max_connections (its check showed it worked)");
     expect(text).not.toContain("df -h");
+    expect(text).not.toContain("rm -rf /var/tmp/old");
     expect(text).not.toContain("Old change");
     expect(text).toContain("Ana on web-01: Reloaded nginx");
     expect(text).toContain("- Rotate certificates");

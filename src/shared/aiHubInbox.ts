@@ -163,7 +163,6 @@ export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): Inbox
           target: change.target,
           taskId: task.id,
           changeId: change.id,
-          risk: change.riskLevel,
         });
     if (!plan && task.status === "waiting" && !task.changes.some((c) => c.status === "pending"))
       out.push({
@@ -240,7 +239,6 @@ export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): Inbox
       taskId: peer.taskId,
       changeId: peer.changeId,
       ownerId: peer.ownerId,
-      risk: peer.risk,
     });
   if (hub.dailyReport && !hub.dailyReport.readAt)
     out.push({ id: `report:${hub.dailyReport.day}`, kind: "report", title: `What happened ${hub.dailyReport.day}`, detail: hub.dailyReport.text.slice(0, 240), at: hub.dailyReport.at, since: hub.dailyReport.at });

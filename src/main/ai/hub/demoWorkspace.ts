@@ -1938,8 +1938,6 @@ const initialDemoTasks: AgentTask[] = [
         description: "Inspect ONTAP volume latency and QoS statistics (read-only)",
         command: "qos statistics volume latency show -iterations 1",
         status: "completed",
-        riskLevel: "safe",
-        riskReason: "Read-only ONTAP telemetry inspection (qos statistics show).",
         decidedHow: "policy",
         exitCode: 0,
         output:
@@ -1954,8 +1952,6 @@ const initialDemoTasks: AgentTask[] = [
         command:
           "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
         status: "completed",
-        riskLevel: "modify",
-        riskReason: "State-modifying ONTAP volume configuration change (volume modify -qos-policy-group).",
         // A seeded example of what an approved change looks like: who said yes,
         // the check that shows it held, and the command that takes it back.
         decidedHow: "person",

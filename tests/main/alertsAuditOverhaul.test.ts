@@ -390,7 +390,9 @@ describe("DailyReport shift-handoff overhaul", () => {
       {
         agentName: "DBA",
         changes: [
-          { id: "c1", target: "pg-01", description: "Reload postgres config", status: "failed", riskLevel: "modify", at: NOW - 117 * MIN },
+          // A change card that failed: what the report counts as a change. A plain command is not counted.
+          { id: "c1", kind: "command", target: "pg-01", description: "Reload postgres config", check: { command: "pg_isready", expected: "accepting" }, rollback: { command: "true" }, status: "failed", at: NOW - 117 * MIN },
+          { id: "c2", kind: "command", target: "pg-01", description: "pg_lsclusters", status: "failed", at: NOW - 116 * MIN },
         ],
       },
     ] as unknown as AgentTask[];

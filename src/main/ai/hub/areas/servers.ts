@@ -6,7 +6,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../../shared/types/aiHub";
 import { type ProviderProfile } from "../../../../shared/types/ai";
-import { isProdTag } from "../CommandSafetyService";
+import { isProdTag } from "../safetyPolicy";
 import { guardUrl } from "../Notifier";
 import { deleteDemoInfraEdge, getDemoInfraEdges, getDemoServers, isDemoMode, saveDemoInfraEdge } from "../demoWorkspace";
 import { isDemoTarget } from "../../../demo/demoMode";

@@ -33,7 +33,7 @@ vi.mock("../../src/main/ai/hub/AgentRuntime", () => ({
 import { HubService } from "../../src/main/ai/hub/HubService";
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
 import { ToolBroker, ToolBrokerError } from "../../src/main/ai/hub/ToolBroker";
-import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/CommandSafetyService";
+import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/safetyPolicy";
 import { isQuietHours } from "../../src/main/ai/hub/Notifier";
 import { NotifyStore } from "../../src/main/ai/hub/NotifyStore";
 import { AuditShipper, type AuditEntry } from "../../src/main/ai/hub/AuditLog";
@@ -127,7 +127,7 @@ function makeTask(overrides: Partial<AgentTask> = {}): AgentTask {
 }
 
 function pendingChange(id = "c-1", at = Date.now()): AgentChange {
-  return { id, kind: "command", target: "host", description: "restart app", command: "systemctl restart app", status: "pending", riskLevel: "modify", at };
+  return { id, kind: "command", target: "host", description: "restart app", command: "systemctl restart app", check: { command: "systemctl is-active app", expected: "active" }, rollback: { command: "systemctl stop app" }, status: "pending", at };
 }
 
 async function brokerWithTerminal(safetyContext: NonNullable<ConstructorParameters<typeof ToolBroker>[1]["safetyContext"]>) {
@@ -157,6 +157,14 @@ async function brokerWithTerminal(safetyContext: NonNullable<ConstructorParamete
 }
 
 describe("S3.1 approvals by two people", () => {
+  /** A change card: what the two person rules are about. A plain command needs nobody. */
+  const CARD = {
+    action: "change",
+    command: "systemctl restart app",
+    check: { command: "systemctl is-active app", expected: "active" },
+    rollback: "systemctl stop app",
+  };
+
   it("does not count one person twice when approvals carry only a name", async () => {
     const { broker, task, cap } = await brokerWithTerminal(() => ({
       policy: DEFAULT_SAFETY_POLICY,
@@ -165,7 +173,7 @@ describe("S3.1 approvals by two people", () => {
       requesterId: "local",
       peerApproval: true,
     }));
-    const pending = broker.invoke(cap.key, { action: "command", command: "systemctl restart app" });
+    const pending = broker.invoke(cap.key, CARD);
     pending.catch(() => undefined);
     await vi.waitFor(() => expect(task.changes[0]?.status).toBe("pending"));
     const change = task.changes[0]!;
@@ -182,11 +190,15 @@ describe("S3.1 approvals by two people", () => {
       requesterId: "local",
       peerApproval: false,
     }));
-    const error = await broker.invoke(cap.key, { action: "command", command: "systemctl restart app" }).catch((e) => e);
+    const error = await broker.invoke(cap.key, CARD).catch((e) => e);
     expect(error).toBeInstanceOf(ToolBrokerError);
     expect((error as ToolBrokerError).message).toMatch(/only one person/);
     expect(task.changes[0]?.status).toBe("denied");
     expect(broker.waitingOnPerson(task.id)).toBe(false);
+    // The same command as a plain command needs nobody, so it is not refused: it runs.
+    await expect(broker.invoke(cap.key, { action: "command", command: "systemctl restart app" })).resolves.toMatchObject({ exitCode: 0 });
+    expect(task.changes[1]).toMatchObject({ status: "completed", decidedHow: "policy" });
+    expect(task.changes[1]?.requiredApprovals).toBeUndefined();
   });
 
   it("desktop: the peer rule is not in force and the requester is the person, not the agent", async () => {

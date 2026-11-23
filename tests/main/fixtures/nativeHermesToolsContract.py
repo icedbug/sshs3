@@ -77,15 +77,18 @@ context_again = json.loads(handle_function_call(
 assert context_again["source"] == "one", context_again
 module = sys.modules[registry.get_entry("sshs3_terminal_context").handler.__module__]
 with ThreadPoolExecutor(max_workers=1) as pool:
+    # A command runs at once and nobody is asked. What waits for a person is a file write.
     pending = pool.submit(handle_function_call,
-        "sshs3_terminal_command", {"command": "echo must-not-run", "description": "Pending during native Stop"},
+        "sshs3_terminal_file_write",
+        {"path": "/etc/must-not-be-written", "content": "x", "expected": "expected-hash",
+         "description": "Pending during native Stop"},
         task_id=compressed_id, session_id=compressed_id)
     for _ in range(100):
         if module._rpc("status", compressed_id).get("status") == "waiting":
             break
         time.sleep(0.02)
     else:
-        raise AssertionError("Native command never reached approval")
+        raise AssertionError("Native file write never reached approval")
     invoke_hook("agent_loop_stopped", session_key=compressed_id, platform="tui", reason="user_stop")
     cancelled = json.loads(pending.result(timeout=5))
     assert "error" in cancelled, cancelled

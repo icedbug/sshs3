@@ -96,13 +96,13 @@ async function agent(scenarioId: string): Promise<number> {
         how === "ask"
           ? (ask) =>
               new Promise<boolean>((resolve) =>
-                rl!.question(`\nThe agent asks to run on ${ask.target}:\n  ${ask.command}\n  (${ask.reason ?? ask.risk ?? "a change"})\nAllow it? [y/N] `, (a) => resolve(/^y(es)?$/i.test(a.trim()))),
+                rl!.question(`\nThe agent asks to run on ${ask.target}:\n  ${ask.command}\n  (${ask.description})\nAllow it? [y/N] `, (a) => resolve(/^y(es)?$/i.test(a.trim()))),
               )
           : (how as "all" | "none"),
       onEvent: (e) => {
         if (!say) return;
         if (e.kind === "started") console.log(`Agent: ${e.agent} · mode: ${e.mode} · model: ${e.model} · terminal: ${e.target}\n`);
-        else if (e.kind === "approval") console.log(`  ASKED  ${e.ask.command}\n         ${e.ask.reason ?? e.ask.risk ?? ""}: ${e.allowed ? "allowed" : "refused"}`);
+        else if (e.kind === "approval") console.log(`  ASKED  ${e.ask.command}\n         ${e.ask.description}: ${e.allowed ? "allowed" : "refused"}`);
         else if (e.kind === "plan") console.log(`  PLAN   ${e.summary.slice(0, 300)}: ${e.allowed ? "approved" : "not approved"}${e.error ? ` (the answer was refused: ${e.error})` : ""}`);
         else if (e.kind === "command")
           console.log(`$ ${e.command}${e.status === "denied" ? "   [not run: refused]" : e.exitCode ? `   [exit ${e.exitCode}]` : ""}${e.output?.trim() ? `\n${brief(e.output)}` : ""}`);

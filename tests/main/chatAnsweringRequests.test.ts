@@ -383,7 +383,8 @@ describe('the agent bot in chat, asked through the web server', () => {
     const capability = await hub.broker.issue(task);
     ran.length = 0;
     let outcome: { exitCode: number } | undefined;
-    void (hub.broker.invoke(capability.key, { action: 'command', command: 'sudo systemctl restart nginx', description: 'Restart the web server' }) as Promise<{ exitCode: number }>).then(
+    // A change card: what a person is asked about. The terminal prints "done" for everything.
+    void (hub.broker.invoke(capability.key, { action: 'change', command: 'sudo systemctl restart nginx', description: 'Restart the web server', check: { command: 'systemctl is-active nginx', expected: 'done' }, rollback: 'sudo systemctl stop nginx' }) as Promise<{ exitCode: number }>).then(
       (r) => (outcome = r),
       () => undefined,
     );
@@ -411,7 +412,8 @@ describe('the agent bot in chat, asked through the web server', () => {
     const yes = await maria.ask({ action: 'chat-answering-answer', taskId: 'chat-run-1', id: change.id, kind: 'change', approved: true });
     expect(yes.reply?.chatAnswer).toEqual({ outcome: 'approved', message: 'Maria Ek approved.' });
     await until(() => outcome, 'the command runs');
-    expect(ran).toHaveLength(1);
+    // The check before, the change once, the check after.
+    expect(ran).toHaveLength(3);
     // Given in the app: the record says who, and no chat service.
     expect(change.approvals).toEqual([expect.objectContaining({ actor: 'Maria Ek', actorId: `user:${maria.id}`, allowed: true })]);
     expect(change.approvals?.[0]?.via).toBeUndefined();

@@ -9,7 +9,7 @@ import { TeamRulesSection } from "../../src/renderer/src/components/AiHub/TeamRu
 afterEach(cleanup);
 
 const hub = (teamRules?: HubSnapshot["teamRules"], more: Partial<HubSnapshot> = {}): HubSnapshot =>
-  ({ safetyPolicy: { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true }, teamRules, ...more }) as unknown as HubSnapshot;
+  ({ safetyPolicy: { requireApprovalOnProdTags: true }, teamRules, ...more }) as unknown as HubSnapshot;
 
 describe("the rules for everyone on a server", () => {
   it("is not there where there are none: the desktop app and the demo lab", () => {
@@ -72,16 +72,26 @@ describe("the rules for everyone on a server", () => {
   it("leaves a person's own two-person switch nothing to decide when the rule is on for everyone, and sends only what was changed", () => {
     const act = vi.fn(async () => undefined);
     const snapshot = hub({ canChange: false, requirePeerApprovalOnProd: true }, { peerApprovalPossible: true });
-    snapshot.safetyPolicy = { ...snapshot.safetyPolicy!, requirePeerApprovalOnProd: true, commandAllowPrefixes: ["uptime"], clusterPolicies: {} };
+    snapshot.safetyPolicy = { ...snapshot.safetyPolicy!, requirePeerApprovalOnProd: true, clusterPolicies: { db: { maxMode: "plan" } } };
     render(<SafetyPolicyCard hub={snapshot} act={act} />);
     expect(screen.getByTestId("safety-peer-approval-toggle")).toBeChecked();
     expect(screen.getByTestId("safety-peer-approval-toggle")).toBeDisabled();
     expect(screen.getByTestId("safety-peer-for-everyone")).toHaveTextContent("On for everyone on this server");
     // Another switch: the server's rule is not sent back as this person's own, nor are lists they did not touch.
-    fireEvent.click(screen.getAllByRole("checkbox").find((c) => !c.hasAttribute("disabled") && !(c as HTMLInputElement).dataset.testid)!);
+    fireEvent.click(screen.getByTestId("safety-prod-approval-toggle"));
     const sent = (act.mock.calls as unknown as Array<[{ action: string; policy: Record<string, unknown> }]>).at(-1)![0];
     expect(sent.action).toBe("safety-policy-save");
-    expect(Object.keys(sent.policy)).toHaveLength(1);
+    expect(sent.policy).toEqual({ requireApprovalOnProdTags: false });
     expect(sent.policy).not.toHaveProperty("requirePeerApprovalOnProd");
+  });
+
+  it("says what a freeze and the two-person rule are about: change cards and file writes, not commands", () => {
+    render(<TeamRulesSection hub={hub({ canChange: true, requirePeerApprovalOnProd: false })} act={vi.fn(async () => undefined)} />);
+    const rules = screen.getByTestId("team-rules");
+    expect(screen.getByTestId("team-freezes")).toHaveTextContent("A freeze stops change cards and file writes. Commands still run.");
+    expect(rules).toHaveTextContent("Two people must approve a change card or a file write on production");
+    expect(rules).toHaveTextContent("Commands are not covered.");
+    // Nothing says that only commands that look get through: nothing looks at a command.
+    expect(rules).not.toHaveTextContent(/only look|nothing that changes/i);
   });
 });

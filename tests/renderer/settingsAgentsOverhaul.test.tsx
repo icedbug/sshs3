@@ -247,16 +247,13 @@ describe("SettingsView privacy, profiles, role routing, and labs", () => {
 });
 
 describe("SafetyPolicyCard SoD & per-cluster/tag overrides", () => {
-  it("toggles Two-Person Rule (SoD), allowed command prefixes, and cluster/tag overrides", async () => {
+  it("says that commands are not checked, and toggles the two rules that are left and cluster/tag overrides", async () => {
     const hub = baseHub({
       // A second person can approve here, so a new override starts with two-person approval ticked.
       peerApprovalPossible: true,
       safetyPolicy: {
-        autoApproveSafeReadOnly: true,
         requireApprovalOnProdTags: true,
-        blockDestructiveWithoutConfirm: true,
         requirePeerApprovalOnProd: false,
-        commandAllowPrefixes: ["kubectl get"],
         clusterPolicies: {
           "tag:prod": { maxMode: "plan", requiredApprovals: 2, requireCheckAndRollback: true },
         },
@@ -265,21 +262,32 @@ describe("SafetyPolicyCard SoD & per-cluster/tag overrides", () => {
     const act = vi.fn().mockResolvedValue(hub);
     render(<SafetyPolicyCard hub={hub} act={act} />);
 
+    const card = screen.getByTestId("safety-policy-card");
+    // The note at the top, as ordinary text: what is not checked, what waits, and that it is no lock.
+    const note = screen.getByTestId("safety-policy-not-a-lock");
+    expect(note).toHaveTextContent(
+      "Commands the agent runs are not checked and nobody is asked first. Change cards, file writes and plans wait for approval. This is a working agreement, not a lock: the agent can run a command directly. What it can do on a server is decided by the account it logs in with.",
+    );
+    expect(note.tagName).toBe("SMALL");
+    expect(note.className).toBe("");
+    expect(card).toHaveTextContent("Safety rules");
+    // The switches about commands are gone, with the list of allowed prefixes.
+    expect(card).not.toHaveTextContent(/read-only|destructive|classified|Allowed command prefixes/i);
+    expect(screen.queryByTestId("safety-allow-prefixes")).toBeNull();
+    expect(screen.queryByLabelText("New allowed command prefix")).toBeNull();
+    expect(within(card).getAllByRole("checkbox")).toHaveLength(2);
+    // The two that are left speak of change cards and file writes.
+    expect(card).toHaveTextContent("Always ask before a change card or a file write on production");
+    expect(card).toHaveTextContent("Two people must approve a change card or a file write on production");
+    expect(screen.getByTestId("safety-freeze-note")).toHaveTextContent("A freeze stops change cards and file writes. Commands still run.");
+
     expect(screen.getByTestId("cluster-policy-tag:prod")).toHaveTextContent("2 people approve");
     expect(screen.getByTestId("cluster-policy-tag:prod")).toHaveTextContent("Plan");
 
+    fireEvent.click(screen.getByTestId("safety-prod-approval-toggle"));
+    expect(act).toHaveBeenLastCalledWith({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } });
     fireEvent.click(screen.getByTestId("safety-peer-approval-toggle"));
-    expect(act).toHaveBeenCalledWith({
-      action: "safety-policy-save",
-      policy: expect.objectContaining({ requirePeerApprovalOnProd: true }),
-    });
-
-    fireEvent.change(screen.getByLabelText("New allowed command prefix"), { target: { value: "df -h" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add prefix" }));
-    expect(act).toHaveBeenCalledWith({
-      action: "safety-policy-save",
-      policy: expect.objectContaining({ commandAllowPrefixes: ["kubectl get", "df -h"] }),
-    });
+    expect(act).toHaveBeenLastCalledWith({ action: "safety-policy-save", policy: { requirePeerApprovalOnProd: true } });
 
     fireEvent.click(screen.getByTestId("add-cluster-policy-btn"));
     const form = screen.getByTestId("cluster-policy-form");
@@ -518,7 +526,7 @@ describe("AgentsAndMcpView shows what was saved for an agent", () => {
     });
     render(<AgentsAndMcpView hub={hub} act={vi.fn().mockResolvedValue(hub)} selectedAgentId="" onSelectAgentForChat={vi.fn()} onStartedMission={vi.fn()} />);
     expect(screen.getByTestId("agent-may-a1")).toHaveTextContent("Commands: Never runs commands, advises only. Held to 2 of the things an agent may do.");
-    expect(screen.getByTestId("agent-may-a2")).toHaveTextContent("Commands: Asks before each command. May do everything that level allows.");
+    expect(screen.getByTestId("agent-may-a2")).toHaveTextContent("Commands: Runs commands, asks before a change card or a file write. May do everything that level allows.");
     expect(screen.getByTestId("runner-test-r1")).toHaveTextContent("Not checked yet. Test starts the program, greets it and stops it again. It is given no work.");
   });
 

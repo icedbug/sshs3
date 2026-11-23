@@ -1377,11 +1377,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(appSettings.dotfilesPoolEnabled).toBe(true);
   });
 
-  it("supports all 5 Open-Source AI Pillars: Multi-Agent Workforce & Swarm Handoffs, Mem0/Letta/Zep Smart Memory & Infra Graph, Orama Hybrid Concept RAG, AST Command Safety Classifier, and 1-Click MCP Marketplace", async () => {
+  it("supports Multi-Agent Workforce & Swarm Handoffs, Mem0/Letta/Zep Smart Memory & Infra Graph, Orama Hybrid Concept RAG, the safety rules, and 1-Click MCP Marketplace", async () => {
     const { HubService } = await import("../../src/main/ai/hub/HubService");
-    const { analyzeCommandSafety, splitShellAstSegments } = await import(
-      "../../src/main/ai/hub/CommandSafetyService"
-    );
     const { KnowledgeBaseService } = await import(
       "../../src/main/ai/hub/KnowledgeBaseService"
     );
@@ -1402,41 +1399,12 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     disposals.push(() => hub.dispose());
     await hub.initialize();
 
-    // --- PILLAR 4: AST-style Shell Command Safety Classifier ---
-    const astSegments = splitShellAstSegments(
-      "df -h | grep -E 'vol|aggr' && kubectl get pvc -A",
-    );
-    expect(astSegments).toEqual([
-      "df -h",
-      "grep -E 'vol|aggr'",
-      "kubectl get pvc -A",
-    ]);
-
-    const safeAnalysis = analyzeCommandSafety(
-      "df -h | grep -E 'vol|aggr' && kubectl get pvc -A",
-    );
-    expect(safeAnalysis.riskLevel).toBe("safe");
-
-    const modifyAnalysis = analyzeCommandSafety(
-      "kubectl get pods && systemctl restart trident-csi",
-    );
-    expect(modifyAnalysis.riskLevel).toBe("modify");
-
-    const destructiveAnalysis = analyzeCommandSafety(
-      "ls -la /tmp && rm -rf /var/lib/ceph/osd",
-    );
-    expect(destructiveAnalysis.riskLevel).toBe("destructive");
-
-    // Save Safety Policy via HubRequest
+    // --- The safety rules: when a change card or a file write waits. Commands are not rated. ---
     const snapPolicy = await hub.request({
       action: "safety-policy-save",
-      policy: {
-        autoApproveSafeReadOnly: true,
-        requireApprovalOnProdTags: true,
-        blockDestructiveWithoutConfirm: true,
-      },
+      policy: { requireApprovalOnProdTags: true },
     });
-    expect(snapPolicy.safetyPolicy?.autoApproveSafeReadOnly).toBe(true);
+    expect(snapPolicy.safetyPolicy).toEqual({ requireApprovalOnProdTags: true });
 
     // --- PILLAR 3: Orama-style Hybrid RAG (BM25 + Bilingual Semantic Concept Vectors + Trigram Similarity) ---
     const kb = new KnowledgeBaseService();
@@ -1665,11 +1633,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(getBuiltinSnippets().some((s) => s.id === "demo-snip-ontap-latency")).toBe(true);
   });
 
-  it("integrates @orama/orama hybrid vector+BM25 search, Myers diff, AST subshell safety guardrails, and Voyager/Reflexion continuous self-learning", async () => {
+  it("integrates @orama/orama hybrid vector+BM25 search, Myers diff, commands that run unasked, and Voyager/Reflexion continuous self-learning", async () => {
     const { HubService } = await import("../../src/main/ai/hub/HubService");
-    const { analyzeCommandSafety } = await import(
-      "../../src/main/ai/hub/CommandSafetyService"
-    );
     const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
     setDemoModeForTesting(true);
     const tmpDir = await fs.mkdtemp(
@@ -1723,23 +1688,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(hits.length).toBeGreaterThan(0);
     expect(hub.kb.getIndexedChunkCount()).toBeGreaterThan(10);
 
-    // 2. Verify AST Subshell Unwrapping (`bash -c`, `eval`, `<(...)`)
-    const subshellDestructive = analyzeCommandSafety(
-      `bash -c "echo checking && rm -rf /var/lib/postgresql/data"`,
-    );
-    expect(subshellDestructive.riskLevel).toBe("destructive");
-    expect(subshellDestructive.parsedSubcommands.length).toBeGreaterThanOrEqual(2);
-
-    // 3. Verify ToolBroker enforces SafetyPolicy (`autoApproveSafeReadOnly` in assisted mode & `blockDestructiveWithoutConfirm` in autonomous mode)
-    const { shouldRequireCommandApproval } = await import(
-      "../../src/main/ai/hub/CommandSafetyService"
-    );
-    expect(
-      shouldRequireCommandApproval({
-        analysis: analyzeCommandSafety("mkfs.ext4 /dev/nvme0n1"),
-        mode: "autonomous",
-      }),
-    ).toBe(true);
+    // 2. and 3. A command an agent runs goes through the broker without anybody being asked (below).
 
     hub.terminals.register(
       {
@@ -1782,15 +1731,16 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       verification: "not-verified",
     };
     const assistedCap = await hub.broker.issue(assistedTask);
-    // In assisted mode with autoApproveSafeReadOnly=true (default), safe read-only commands execute immediately without waiting for approval!
+    // In Ask first a command runs at once: nobody is asked and nothing rates it.
     const safeExecRes = (await hub.broker.invoke(assistedCap.key, {
       action: "command",
       command: "df -h && free -m",
-      description: "Read-only disk and memory check",
+      description: "Disk and memory check",
     })) as { exitCode: number; output: string };
     expect(safeExecRes.exitCode).toBe(0);
-    expect(assistedTask.changes[0].riskLevel).toBe("safe");
+    expect(assistedTask.changes[0]).not.toHaveProperty("riskLevel");
     expect(assistedTask.changes[0].status).toBe("completed");
+    expect(assistedTask.changes[0].decidedHow).toBe("policy");
 
     // 4. Verify Voyager Failure -> Fix Automatic Skill Synthesis
     // A person runs a command that fails, then one that fixes it, in the same terminal. The shell's

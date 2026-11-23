@@ -1,4 +1,4 @@
-import { RISK_LEVEL_TEXT, type ChatServiceName } from '../../../shared/types/aiHub';
+import type { ChatServiceName } from '../../../shared/types/aiHub';
 import type { RunView } from '../../ai/hub/areas/chatRuns';
 import { maskContext } from '../../ai/hub/privacy';
 import type { MattermostAttachment, SlackBlock } from './AgentBotApi';
@@ -498,8 +498,6 @@ function whoMayText(options: CardOptions): string {
   return options.production ? `${who} This is production, so only people allowed to approve changes there can.` : who;
 }
 
-const RISK_TEXT: Record<string, string> = RISK_LEVEL_TEXT;
-
 const STEP_RISK: Record<string, string> = { low: 'low', medium: 'medium', high: 'high' };
 
 function renderSlackPart(part: Part): string {
@@ -639,19 +637,18 @@ function buildCard(spec: CardSpec, options: CardOptions): CardOut {
 }
 
 /**
- * The card for one change waiting for approval: what, where, risk and why, the whole command, a note
- * when values in it are hidden, the check and what it should show, how it is taken back, the file diff,
- * the approvals so far and needed, and who may approve.
+ * The card for one change waiting for approval: what, where, what it can affect when that was said, the
+ * whole command, a note when values in it are hidden, the check and what it should show, how it is
+ * taken back, the file diff, the approvals so far and needed, and who may approve. Nothing rates the
+ * command: the person approves what they read.
  */
 export function changeCard(change: CardChange, options: CardOptions): CardOut {
   const title =
     change.kind === 'setting' ? "A change to sshs3's rules is waiting" : change.kind === 'file' ? 'A file change is waiting for approval' : 'A change is waiting for approval';
   const what: Part = { label: 'What', segments: [{ text: sentence(change.description) || 'No description was given.' }] };
   const where: Part = { label: 'Where', segments: [{ text: `${change.target || 'Not said.'}${options.production ? ' (production)' : ''}` }] };
-  const riskLines: Segment[] = [{ text: [change.riskLevel ? RISK_TEXT[change.riskLevel] : 'Not rated.', sentence(change.riskReason)].filter(Boolean).join(' ') }];
-  if (change.blastRadius) riskLines.push({ text: `What it can affect: ${sentence(change.blastRadius)}` });
-  const risk: Part = { label: 'Risk', segments: riskLines };
-  const parts: Part[] = [what, where, risk];
+  const parts: Part[] = [what, where];
+  if (change.blastRadius) parts.push({ label: 'What it can affect', segments: [{ text: sentence(change.blastRadius) }] });
   if (change.command !== undefined) {
     const segments: Segment[] = [{ code: change.command }];
     if (change.hiddenValues) segments.push({ text: chatText.hiddenValues() });
@@ -666,23 +663,15 @@ export function changeCard(change: CardChange, options: CardOptions): CardOut {
   const short: Part[] = [
     { label: 'What', segments: [{ text: shorten(sentence(change.description) || 'No description was given.', 300) }] },
     where,
-    { label: 'Risk', segments: [{ text: change.riskLevel ? RISK_TEXT[change.riskLevel] : 'Not rated.' }] },
   ];
-  const sure = change.riskLevel === 'destructive' || options.production;
   return buildCard(
     {
       title,
       parts,
       short,
       ...(change.kind === 'setting' ? { appOnly: chatText.settingInApp() } : {}),
-      ...(sure
-        ? {
-            confirm: {
-              title: 'Approve this change?',
-              text: options.production ? 'It runs on production.' : 'It can remove or overwrite data.',
-            },
-          }
-        : {}),
+      // On production the button asks once more before it counts.
+      ...(options.production ? { confirm: { title: 'Approve this change?', text: 'It runs on production.' } } : {}),
     },
     options,
   );
@@ -824,7 +813,7 @@ export const chatText = {
   runFailed: (error?: string): string =>
     `Something went wrong and the run stopped${error ? `: ${shorten(error.replace(/\s+/g, ' '), 200)}` : '.'} Reply to try again.`,
   freeze: (where: string, until?: number, why?: string): string =>
-    `Nothing is changed on ${where || 'these servers'} now: a change freeze holds${untilText(until)}.${why ? ` Reason: ${why.trim()}` : ''} Nothing was posted to approve.`,
+    `No change card or file write runs on ${where || 'these servers'} now: a change freeze holds${untilText(until)}.${why ? ` Reason: ${why.trim()}` : ''} Nothing was posted to approve.`,
   rateLimited: (kind: ChatLimitKind, limit?: number): string => {
     switch (kind) {
       case 'person-new':
@@ -842,7 +831,7 @@ export const chatText = {
   budgetSpent: (): string => "I have used this month's budget for answers in chat. An administrator can raise it in sshs3.",
   dmsOff: (): string => 'I do not answer direct messages. Ask me in a channel where I answer, or use sshs3.',
   dmsLinkedOnly: (): string => `I answer direct messages only from people who linked their chat account. ${HOW_TO_LINK}`,
-  unlinkedReadOnly: (): string => 'Your chat account is not linked to sshs3, so here I can only look. I change nothing.',
+  unlinkedReadOnly: (): string => 'Your chat account is not linked to sshs3, so here I run commands and propose no change.',
   channelOff: (): string => 'I do not answer in this channel yet. An administrator can turn it on in sshs3.',
   busy: (): string => 'I am still working in this thread. Wait for my answer, then write again.',
   attachmentsNotRead: (): string => 'I cannot read attachments. Paste the text into a message instead.',

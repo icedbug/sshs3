@@ -200,8 +200,6 @@ const change = (over: Partial<CardChange> = {}): CardChange => ({
   target: 'web-1',
   description: 'Restart nginx to load the new certificate',
   command: 'sudo systemctl restart nginx',
-  riskLevel: 'modify',
-  riskReason: 'The site is down for a second.',
   check: { command: 'systemctl is-active nginx', expected: 'active' },
   rollback: 'sudo systemctl start nginx',
   requiredApprovals: 2,
@@ -233,11 +231,22 @@ describe('change card', () => {
     expect(action.integration).toEqual({ url: buttons.mattermostUrl, context: { t: 'tok-approve' } });
   });
 
-  it('asks Slack for a second click on production or a destructive change', () => {
-    const card = changeCard(change({ riskLevel: 'destructive' }), { approvers: 'admins', production: true, buttons });
+  it('asks Slack for a second click on production, and nowhere else: nothing rates the command', () => {
+    const card = changeCard(change(), { approvers: 'admins', production: true, buttons });
     const actions = card.slack.blocks!.find((b) => b.type === 'actions') as { elements: Array<{ confirm?: { text: { text: string } } }> };
-    expect(actions.elements[0].confirm?.text.text).toContain('production');
+    expect(actions.elements[0].confirm?.text.text).toBe('It runs on production.');
     expect(JSON.stringify(card.slack.blocks)).toContain('administrators');
+    // Off production there is one click, whatever the command would do.
+    const wipe = changeCard(change({ command: 'rm -rf /var/lib/app', rollback: 'true' }), { approvers: 'linked', buttons });
+    const once = wipe.slack.blocks!.find((b) => b.type === 'actions') as { elements: Array<{ confirm?: unknown }> };
+    expect(once.elements[0].confirm).toBeUndefined();
+  });
+
+  it('carries no risk rating and no reason for one', () => {
+    for (const card of [changeCard(change(), { approvers: 'linked', buttons }), changeCard(change({ command: 'rm -rf /var/lib/app' }), { approvers: 'linked', production: true, buttons })]) {
+      const all = `${JSON.stringify(card.slack.blocks)}\n${card.mattermost.message}`;
+      expect(all).not.toMatch(/Risk|Not rated|It changes something|It only reads|remove or overwrite/);
+    }
   });
 
   it('without a public address, a Mattermost card says to answer with a reaction and has no buttons', () => {
@@ -325,13 +334,12 @@ describe('plan card', () => {
 describe('card lines', () => {
   it('end as sentences where they are prose, whatever the model wrote', () => {
     const card = changeCard(
-      change({ description: 'Restart the Harvest poller', riskReason: 'Systemd service state modification', blastRadius: 'the poller only', check: { command: 'systemctl is-active harvest', expected: 'active' } }),
+      change({ description: 'Restart the Harvest poller', blastRadius: 'the poller only', check: { command: 'systemctl is-active harvest', expected: 'active' } }),
       { approvers: 'linked', buttons },
     );
     const mm = card.mattermost.message;
     expect(mm).toContain('Restart the Harvest poller.');
-    expect(mm).toContain('It changes something. Systemd service state modification.');
-    expect(mm).toContain('What it can affect: the poller only.');
+    expect(mm).toContain('**What it can affect**\nthe poller only.');
     expect(mm).toContain('It should show: active.');
     // A command is not prose: it gets no period.
     expect(mm).toContain('```\nsystemctl is-active harvest\n```');

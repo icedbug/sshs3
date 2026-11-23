@@ -154,8 +154,8 @@ function mcpOAuthStatus(oauth?: McpOAuthConfig): { label: string; badgeClass: st
 const COMMAND_LEVELS: Record<AgentMode, string> = {
   advice: "Never runs commands, advises only",
   plan: "Proposes a plan for approval first",
-  assisted: "Asks before each command",
-  autonomous: "Runs commands on its own",
+  assisted: "Runs commands, asks before a change card or a file write",
+  autonomous: "Runs commands and change cards on its own",
 };
 
 export function AgentsAndMcpView({

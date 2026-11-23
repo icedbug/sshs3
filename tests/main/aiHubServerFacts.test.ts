@@ -9,7 +9,6 @@ import { parseHypotheses } from "../../src/main/ai/hub/AgentDiscipline";
 import { maskProviderText } from "../../src/main/ai/hub/privacy";
 import { expireTerminalSources } from "../../src/shared/answerSources";
 import { inboxItems } from "../../src/shared/aiHubInbox";
-import { analyzeCommandSafety } from "../../src/main/ai/hub/CommandSafetyService";
 import {
   CERT_COMMAND,
   FACT_COMMANDS,
@@ -93,17 +92,30 @@ function debian(o: { nginx?: string; failed?: string[]; ports?: string[]; conf?:
 }
 
 describe("the commands that read a server", () => {
-  it("are all read-only by the app's own classifier, and what installs is not", () => {
-    const level = (c: string): string => analyzeCommandSafety(c).riskLevel;
-    for (const { command, only } of FACT_COMMANDS) {
-      expect(`${command} => ${level(command)}`).toBe(`${command} => safe`);
-      if (only) expect(level(`command -v ${only}`)).toBe("safe");
+  it("each start with a known program that only looks, and are one program that writes nowhere", () => {
+    // Nothing in the app checks what these commands do. This list is the check: whoever adds a command
+    // adds how it starts here, and reads the command as they do.
+    const LOOKS = [
+      "cat /etc/os-release",
+      "cat /proc/",
+      "uname -",
+      "hostname",
+      "dpkg-query -W ",
+      "rpm -qa ",
+      "apk info ",
+      "systemctl list-units ",
+      "ss -H ",
+      "df -P",
+      "openssl x509 -in ",
+      "sha256sum ",
+    ];
+    const commands = [...FACT_COMMANDS.map((c) => c.command), CERT_COMMAND("/etc/ssl/a.crt"), HASH_COMMAND("/etc/hosts")];
+    for (const command of commands) {
+      expect([command, LOOKS.some((start) => command === start.trim() || command.startsWith(start))]).toEqual([command, true]);
+      // No chain, pipe, redirection or substitution: one program and its arguments.
+      expect([command, /[;&|<>`]|\$\(/.test(command)]).toEqual([command, false]);
     }
-    expect(level(CERT_COMMAND("/etc/ssl/a.crt"))).toBe("safe");
-    expect(level(HASH_COMMAND("/etc/hosts"))).toBe("safe");
-    // The package managers were taught to the classifier for this: only their asking forms.
-    for (const c of ["rpm -i x.rpm", "rpm -Uvh x.rpm", "rpm -e nginx", "dpkg -i x.deb", "dpkg --purge nginx", "apk add nginx", "apk del nginx", "apt install nginx", "pip install x", "command -v ss; rm -rf /tmp/x"])
-      expect(`${c} => ${level(c)}`).not.toBe(`${c} => safe`);
+    for (const { only } of FACT_COMMANDS) if (only) expect(only).toMatch(/^[a-z0-9-]+$/);
   });
 
   it("only lets plain absolute paths into the script", () => {

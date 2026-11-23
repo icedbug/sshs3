@@ -16,7 +16,7 @@ import type { HubRunEvent, RunView } from '../../ai/hub/areas/chatRuns';
 import type { HubService } from '../../ai/hub/HubService';
 import type { StoredMessage } from '../../ai/hub/ChatIndex';
 import { chatServiceLabel, THREAD_CONTEXT_HEADS } from '../../ai/hub/chatFence';
-import { isProdTag } from '../../ai/hub/CommandSafetyService';
+import { isProdTag } from '../../ai/hub/safetyPolicy';
 import { spotlightUntrustedData } from '../../ai/hub/ContextService';
 import type { GuardOptions } from '../../ai/hub/Notifier';
 import { clip, safeError } from '../../ai/hub/privacy';
@@ -264,7 +264,7 @@ const fenceKey = (f: ChatFence | undefined): string =>
       : null,
   );
 /**
- * Whether a card may still be answered under a fence: a channel that may only look ("read") answers none.
+ * Whether a card may still be answered under a fence: a channel with reach "read" answers none.
  * A plan is answered in an "ask" channel too: a run there proposes one for a risky change, and approving
  * it is a person's answer like any other.
  */
@@ -1458,8 +1458,6 @@ function cardChange(change: AgentChange): CardChange {
     description: change.description,
     ...(change.command !== undefined ? { command: change.command } : {}),
     ...(change.hiddenValues ? { hiddenValues: true } : {}),
-    ...(change.riskLevel ? { riskLevel: change.riskLevel } : {}),
-    ...(change.riskReason ? { riskReason: change.riskReason } : {}),
     ...(change.check ? { check: { command: change.check.command, expected: change.check.expected } } : {}),
     ...(change.rollback ? { rollback: change.rollback.command } : {}),
     ...(change.diff ? { diff: change.diff } : {}),

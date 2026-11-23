@@ -231,10 +231,10 @@ def register(ctx):
         ("context", "context", "Read redacted, source-linked context for the assigned sshs3 terminal.", {
             "query": {"type": "string", "description": "Optional search for relevant observations."},
         }, []),
-        ("command", "command", "Run a command visibly in the assigned sshs3 terminal. Read sshs3_terminal_context first and use that target's shell and cwd. Requires user approval; wait for correlated shell completion.", {
+        ("command", "command", "Run a command visibly in the assigned sshs3 terminal. Read sshs3_terminal_context first and use that target's shell and cwd. It runs at once: nobody is asked and nothing checks what the command does. Wait for correlated shell completion.", {
             "command": {"type": "string"}, "description": {"type": "string"},
         }, ["command", "description"]),
-        ("verify", "verify", "Run a verification command in the assigned sshs3 terminal and check an explicit expected output. Use the shell shown by sshs3_terminal_context. Approval is required.", {
+        ("verify", "verify", "Run a verification command in the assigned sshs3 terminal and check an explicit expected output. Use the shell shown by sshs3_terminal_context. It runs at once and nobody is asked.", {
             "command": {"type": "string"}, "expected": {"type": "string"}, "description": {"type": "string"},
         }, ["command", "expected", "description"]),
         ("file_read", "file-read", "Read a complete UTF-8 text file under 64 KB on the assigned sshs3 target. Returns a content hash; secrets are redacted.", {

@@ -256,25 +256,6 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                         <Terminal size={13} />
                         {item.change.ref && <small className="ai-ref-name">{item.change.ref}</small>}
                         <span>{item.change.description}</span>
-                        {item.change.riskLevel && (
-                          <small
-                            className={
-                              item.change.riskLevel === "safe"
-                                ? "ai-badge ai-badge-success"
-                                : item.change.riskLevel === "destructive"
-                                  ? "ai-badge ai-badge-danger"
-                                  : "ai-badge ai-badge-mode"
-                            }
-                            title={item.change.riskReason}
-                            data-testid={`change-risk-${item.change.riskLevel}`}
-                          >
-                            {item.change.riskLevel === "safe"
-                              ? "read-only"
-                              : item.change.riskLevel === "destructive"
-                                ? "destructive"
-                                : "changes state"}
-                          </small>
-                        )}
                         <small
                           className={
                             item.change.status === "pending"
@@ -291,21 +272,6 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                         </small>
                       </summary>
                       <ChangeProof change={item.change} />
-                      {item.change.riskReason && (
-                        <small
-                          style={{
-                            display: "block",
-                            marginTop: 6,
-                            fontSize: 11,
-                            opacity: 0.85,
-                          }}
-                        >
-                          {item.change.riskReason}
-                          {(item.change.parsedSubcommands?.length ?? 0) > 1
-                            ? ` · ${item.change.parsedSubcommands!.length} commands in it, each judged on its own`
-                            : ""}
-                        </small>
-                      )}
                       {item.change.command && (
                         <div className="ai-code-block" style={{ marginTop: "8px" }}>
                           <div className="ai-code-header">

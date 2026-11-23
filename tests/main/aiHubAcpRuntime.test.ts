@@ -158,7 +158,7 @@ describe("a ticket for an external agent", () => {
     }
   };
 
-  it("runs on the runner set up on this computer, asks through the same approval as any command, and reports for review", async () => {
+  it("runs on the runner set up on this computer, lets its command run as any command does, and reports for review", async () => {
     const { hub, dir } = await makeHub();
     process.env.FAKE_ACP = "ask";
     await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "Implements", mission: "Build", systemPrompt: "Follow the conventions.", defaultMode: "assisted", runnerId: "fake" } as never });
@@ -171,13 +171,13 @@ describe("a ticket for an external agent", () => {
     snap = await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
     expect(snap.externalRunners!.map((r) => r.id)).toEqual(["fake"]);
     await hub.request({ action: "ticket-start", id: ticketId });
-    // Assisted: the agent's command waits for the person.
-    await waitFor(() => hub.store.data.tasks.some((t) => t.ticketId === ticketId && t.status === "waiting"));
-    const run = hub.store.data.tasks.find((t) => t.ticketId === ticketId && t.status === "waiting")!;
-    const pending = run.changes.find((c) => c.status === "pending")!;
-    expect(pending).toMatchObject({ description: "Run npm test", command: "npm test" });
-    await hub.request({ action: "approve", taskId: run.id, changeId: pending.id, approved: true });
+    // Ask first: a command the agent asks to run is a plain command. It is allowed, and nobody is asked.
     await waitFor(() => hub.store.data.workTickets![0].status === "review");
+    const run = hub.store.data.tasks.find((t) => t.ticketId === ticketId)!;
+    expect(run.changes).toHaveLength(1);
+    expect(run.changes[0]).toMatchObject({ description: "Run npm test", command: "npm test", decidedHow: "policy", status: "completed" });
+    expect(run.changes[0].decidedBy).toBeUndefined();
+    expect(run.changes[0]).not.toHaveProperty("riskLevel");
     const done = hub.store.data.workTickets![0];
     expect(done.result).toContain("Permission: yes.");
     expect(done.result).toContain("Follow the conventions.");
@@ -201,18 +201,50 @@ describe("a ticket for an external agent", () => {
     expect(notify.mock.calls.some(([title]) => title === "Task finished")).toBe(false);
   });
 
-  it("stops a destructive command for approval even when the agent runs on its own", async () => {
+  it.each(["assisted", "autonomous", "plan"] as const)("lets a command the agent asks for run without asking, whatever it would do, in %s", async (mode) => {
     const { hub, dir } = await makeHub();
     process.env.FAKE_ACP = "ask";
     process.env.FAKE_ACP_COMMAND = "rm -rf /var/lib/app";
     await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
-    await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: "autonomous", runnerId: "fake" } as never });
+    await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: mode, runnerId: "fake" } as never });
     const snap = await hub.request({ action: "ticket-save", ticket: { title: "Clean up", assigneeAgentId: "builder" } });
+    await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });
+    await waitFor(() => hub.store.data.workTickets![0].status === "review");
+    expect(hub.store.data.workTickets![0].result).toContain("Permission: yes.");
+    const run = hub.store.data.tasks.find((t) => t.ticketId === snap.workTickets![0].id)!;
+    // Nobody was asked, and nothing rated the command.
+    expect(run.changes).toHaveLength(1);
+    expect(run.changes[0]).toMatchObject({ command: "rm -rf /var/lib/app", decidedHow: "policy" });
+    expect(run.changes[0].decidedBy).toBeUndefined();
+    expect(run.changes[0]).not.toHaveProperty("riskLevel");
+  });
+
+  it("refuses a command the agent asks for in Advice", async () => {
+    const { hub, dir } = await makeHub();
+    process.env.FAKE_ACP = "ask";
+    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
+    await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: "advice", runnerId: "fake" } as never });
+    const snap = await hub.request({ action: "ticket-save", ticket: { title: "Look", assigneeAgentId: "builder" } });
+    await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });
+    await waitFor(() => hub.store.data.workTickets![0].status === "review");
+    expect(hub.store.data.workTickets![0].result).toContain("Permission: no.");
+    const run = hub.store.data.tasks.find((t) => t.ticketId === snap.workTickets![0].id)!;
+    expect(run.changes[0]).toMatchObject({ status: "denied", decidedHow: "policy" });
+  });
+
+  it.each(["assisted", "autonomous"] as const)("puts an edit the agent gave no command for to a person, as a file write, in %s", async (mode) => {
+    const { hub, dir } = await makeHub();
+    process.env.FAKE_ACP = "ask-edit";
+    await hub.request({ action: "runner-save", runner: { id: "fake", name: "Fake agent", command: process.execPath, args: [FAKE], cwd: dir } });
+    await hub.request({ action: "agent-save", agent: { id: "builder", name: "Builder", role: "r", mission: "m", systemPrompt: "", defaultMode: mode, runnerId: "fake" } as never });
+    const snap = await hub.request({ action: "ticket-save", ticket: { title: "Add a login form", assigneeAgentId: "builder" } });
     await hub.request({ action: "ticket-start", id: snap.workTickets![0].id });
     await waitFor(() => hub.store.data.tasks.some((t) => t.status === "waiting"));
     const run = hub.store.data.tasks.find((t) => t.status === "waiting")!;
     const pending = run.changes.find((c) => c.status === "pending")!;
-    expect(pending.riskLevel).toBe("destructive");
+    // Not a plain command: it carries what the agent said it would do, and it waits.
+    expect(pending).toMatchObject({ description: "Edit src/login.tsx", toolCall: true });
+    expect(pending.command).toContain("src/login.tsx");
     await hub.request({ action: "approve", taskId: run.id, changeId: pending.id, approved: false });
     await waitFor(() => hub.store.data.workTickets![0].status === "review");
     expect(hub.store.data.workTickets![0].result).toContain("Permission: no.");

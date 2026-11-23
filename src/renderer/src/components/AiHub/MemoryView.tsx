@@ -558,7 +558,7 @@ export function Memory({
           </div>
           <p className="ai-hint" data-testid="memory-approval-hint">
             Memories are background for the assistant. They never change what needs approval: that is set in AI
-            settings, Command safety.
+            settings, Safety rules.
           </p>
           <p className="ai-hint">
             Never write passwords, keys or tokens here. An entry that closely resembles an existing one is merged into
@@ -706,7 +706,7 @@ export function Memory({
                   <span
                     className="ai-badge ai-badge-mode"
                     data-testid={`memory-rule-like-${m.id}`}
-                    title="Approvals are set in AI settings, Command safety. A memory cannot switch them off."
+                    title="Approvals are set in AI settings, Safety rules. A memory cannot switch them off."
                   >
                     Reads like a rule: it does not change approvals
                   </span>

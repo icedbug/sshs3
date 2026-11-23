@@ -44,7 +44,8 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
             command: "systemctl status nginx",
             target: "web-01",
             status: "pending",
-            riskLevel: "safe",
+            check: { command: "systemctl is-active nginx", expected: "active" },
+            rollback: { command: "true" },
             at: now - 5_000,
           },
         ],
@@ -64,7 +65,8 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
             command: "rm -rf /var/cache/tmp/*",
             target: "web-02",
             status: "pending",
-            riskLevel: "destructive",
+            check: { command: "ls /var/cache/tmp", expected: "" },
+            rollback: { command: "true" },
             at: now - 15_000,
           },
         ],
@@ -159,7 +161,7 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
     fireEvent.keyDown(window, { key: "o" });
     expect(onOpenTask).toHaveBeenCalledWith("t-safe");
 
-    // Approve safe approval with a -> immediate approve
+    // Approve with a -> immediate approve
     fireEvent.keyDown(window, { key: "a" });
     expect(act).toHaveBeenCalledWith({
       action: "approve",
@@ -168,13 +170,13 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
       approved: true,
     });
 
-    // Navigate down to destructive approval -> first 'a' arms, second 'a' approves
+    // Navigate down to the next approval. Nothing rates a command, so there is no second step for one
+    // that deletes: 'a' approves it as it approves any other.
     fireEvent.keyDown(window, { key: "j" });
     expect(approvals[1]).toHaveAttribute("data-selected", "true");
     fireEvent.keyDown(window, { key: "a" });
-    expect(screen.getByTestId("inbox-destructive-arm")).toBeVisible();
-    expect(act).toHaveBeenCalledTimes(1);
-    fireEvent.keyDown(window, { key: "a" });
+    expect(screen.queryByTestId("inbox-destructive-arm")).toBeNull();
+    expect(act).toHaveBeenCalledTimes(2);
     expect(act).toHaveBeenLastCalledWith({
       action: "approve",
       taskId: "t-dest",
@@ -204,7 +206,7 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
     });
   });
 
-  it("approves only low-risk non-guard approvals via batch triage bar and renders snooze countdowns", async () => {
+  it("offers no batch approval by risk, carries no risk badge on an approval, and renders snooze countdowns", async () => {
     const act = vi.fn(async () => makeHub());
     const batchHub = makeHub({
       tasks: [
@@ -214,9 +216,9 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
           status: "waiting",
           messages: [],
           changes: [
-            { id: "c1", kind: "command", description: "Safe check 1", command: "uptime", target: "web-01", status: "pending", riskLevel: "safe", at: now - 10 },
-            { id: "c2", kind: "command", description: "Safe guard", command: "cat /etc/sshs3", target: "web-01", status: "pending", riskLevel: "safe", guard: true, at: now - 20 },
-            { id: "c3", kind: "command", description: "Modify action", command: "systemctl reload nginx", target: "web-01", status: "pending", riskLevel: "modify", at: now - 30 },
+            { id: "c1", kind: "command", description: "Check 1", command: "uptime", target: "web-01", status: "pending", check: { command: "uptime", expected: "up" }, rollback: { command: "true" }, at: now - 10 },
+            { id: "c2", kind: "setting", description: "A guarded setting", command: "requireApprovalOnProdTags: false", target: "sshs3", status: "pending", guard: true, at: now - 20 },
+            { id: "c3", kind: "file", description: "Edit nginx.conf", target: "web-01", status: "pending", at: now - 30 },
           ],
         },
       ] as unknown as HubSnapshot["tasks"],
@@ -229,18 +231,14 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
     });
 
     render(<InboxView hub={batchHub} act={act} onOpenTask={vi.fn()} onOpenView={vi.fn()} />);
-    expect(screen.getByTestId("inbox-batch-bar")).toHaveTextContent("1 low-risk read-only approval ready");
-    fireEvent.click(screen.getByTestId("inbox-approve-low-risk"));
-    await waitFor(() =>
-      expect(act).toHaveBeenCalledWith({
-        action: "approve",
-        taskId: "t1",
-        changeId: "c1",
-        approved: true,
-      }),
-    );
-    expect(act).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("inbox-snooze-countdown")).toHaveTextContent(/Back in 4[45] min/);
+    // Each approval is answered on its own: nothing sorts them by a rating, and none is waved through in a batch.
+    expect(screen.queryByTestId("inbox-batch-bar")).toBeNull();
+    expect(screen.queryByTestId("inbox-approve-low-risk")).toBeNull();
+    const approvals = screen.getAllByTestId("inbox-approval");
+    expect(approvals).toHaveLength(3);
+    for (const approval of approvals) expect(approval).not.toHaveTextContent(/read-only|changes state|destructive|low-risk/i);
+    expect(act).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId("inbox-snooze-countdown")).toHaveTextContent(/Back in 4[45] min/));
   });
 });
 
@@ -377,7 +375,7 @@ describe("a plan that takes two people", () => {
       />,
     );
     expect(screen.getByTestId("plan-people")).toHaveTextContent("Approved by you and Maria Ek.");
-    expect(screen.getByTestId("plan-covers")).toHaveTextContent("Approved: the listed commands run without asking again; destructive ones still ask.");
+    expect(screen.getByTestId("plan-covers")).toHaveTextContent("Approved: a change card the plan lists runs without asking again.");
   });
 
   it("says nothing about people for a plan one person approves", () => {
@@ -388,17 +386,12 @@ describe("a plan that takes two people", () => {
 });
 
 describe("TerminalControl inline pending approval bar & controls", () => {
-  it("shows blast radius, host, reason, command preview, Approve Once, Always Allow Prefix (safe), Deny, Return Control & Step-by-step", async () => {
+  it("shows blast radius, host, reason, the command with its check and rollback, Approve Once, Deny, Return Control & Step-by-step", async () => {
     const onRequest = vi.fn(async () => makeHub());
     const onStepByStep = vi.fn();
 
     const hub = makeHub({
-      safetyPolicy: {
-        autoApproveSafeReadOnly: true,
-        requireApprovalOnProdTags: true,
-        blockDestructiveWithoutConfirm: true,
-        commandAllowPrefixes: ["uptime"],
-      },
+      safetyPolicy: { requireApprovalOnProdTags: true },
       sessions: [
         { id: "s1", generation: "g1", label: "prod-web-01", kind: "ssh", shell: "bash", state: "ready", owner: "t1", updatedAt: 1 },
       ],
@@ -419,8 +412,9 @@ describe("TerminalControl inline pending approval bar & controls", () => {
               description: "Reload nginx config",
               command: "systemctl reload nginx",
               status: "pending",
-              riskLevel: "modify",
-              riskReason: "Reloads active HTTP worker processes",
+              // A change card: its check and its rollback are part of what is approved.
+              check: { command: "nginx -t", expected: "syntax is ok" },
+              rollback: { command: "systemctl restart nginx" },
               blastRadius: "1 production web node",
               at: 1,
             },
@@ -439,8 +433,15 @@ describe("TerminalControl inline pending approval bar & controls", () => {
     const bar = screen.getByTestId("terminal-approval-bar");
     expect(within(bar).getByTestId("terminal-approval-target")).toHaveTextContent("Host: prod-web-01");
     expect(within(bar).getByTestId("terminal-approval-blast")).toHaveTextContent("1 production web node");
-    expect(within(bar).getByTestId("terminal-approval-reason")).toHaveTextContent("Reloads active HTTP worker processes");
+    expect(within(bar).getByTestId("terminal-approval-reason")).toHaveTextContent("Reload nginx config");
     expect(within(bar).getByTestId("terminal-approval-command")).toHaveTextContent("systemctl reload nginx");
+    // The check and the rollback are shown whole: the person approves what they read.
+    expect(within(bar).getByTestId("terminal-approval-check")).toHaveTextContent("Check: nginx -t It should show: syntax is ok");
+    expect(within(bar).getByTestId("terminal-approval-rollback")).toHaveTextContent("Rollback: systemctl restart nginx");
+    // No rating of the command, and no way to allow commands like it from now on.
+    expect(screen.queryByTestId("terminal-approval-risk")).toBeNull();
+    expect(screen.queryByTestId("terminal-allow-prefix-btn")).toBeNull();
+    expect(screen.getByTestId("terminal-control")).not.toHaveTextContent(/modify|destructive|Always Allow/i);
 
     fireEvent.click(screen.getByTestId("terminal-approve-once-btn"));
     expect(onRequest).toHaveBeenCalledWith({
@@ -450,14 +451,7 @@ describe("TerminalControl inline pending approval bar & controls", () => {
       approved: true,
     });
 
-    await waitFor(() => expect(screen.getByTestId("terminal-allow-prefix-btn")).not.toBeDisabled());
-    fireEvent.click(screen.getByTestId("terminal-allow-prefix-btn"));
-    await waitFor(() =>
-      expect(onRequest).toHaveBeenCalledWith({
-        action: "safety-policy-save",
-        policy: { commandAllowPrefixes: ["uptime", "systemctl reload"] },
-      }),
-    );
+    expect(onRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "safety-policy-save" }));
 
     await waitFor(() => expect(screen.getByTestId("terminal-deny-btn")).not.toBeDisabled());
     fireEvent.click(screen.getByTestId("terminal-deny-btn"));
@@ -476,8 +470,8 @@ describe("TerminalControl inline pending approval bar & controls", () => {
     expect(onRequest).toHaveBeenCalledWith({ action: "takeover", sessionId: "s1" });
   });
 
-  it("hides Always Allow Prefix on destructive, compound, or secret-bearing commands and handles sudo prefixes", () => {
-    const makeCmdHub = (command: string, riskLevel: "safe" | "modify" | "destructive" = "modify") =>
+  it("shows the same approval bar whatever the command is: no rating, no second step, no Always Allow", () => {
+    const makeCmdHub = (command: string) =>
       makeHub({
         sessions: [
           { id: "s1", generation: "g1", label: "prod-db-01", kind: "ssh", state: "ready", owner: "t1", updatedAt: 1 },
@@ -497,8 +491,9 @@ describe("TerminalControl inline pending approval bar & controls", () => {
                 target: "prod-db-01",
                 description: "Op",
                 command,
+                check: { command: "true", expected: "" },
+                rollback: { command: "true" },
                 status: "pending",
-                riskLevel,
                 at: 1,
               },
             ],
@@ -506,19 +501,16 @@ describe("TerminalControl inline pending approval bar & controls", () => {
         ] as unknown as HubSnapshot["tasks"],
       });
 
-    const { rerender } = render(<TerminalControl sessionId="s1" hub={makeCmdHub("rm -rf /tmp/old-data", "destructive")} onRequest={vi.fn()} />);
-    expect(screen.getByTestId("terminal-approve-once-btn")).toBeVisible();
-    expect(screen.getByTestId("terminal-deny-btn")).toBeVisible();
-    expect(screen.queryByTestId("terminal-allow-prefix-btn")).not.toBeInTheDocument();
-
-    rerender(<TerminalControl sessionId="s1" hub={makeCmdHub("cat file && rm -rf /", "modify")} onRequest={vi.fn()} />);
-    expect(screen.queryByTestId("terminal-allow-prefix-btn")).not.toBeInTheDocument();
-
-    rerender(<TerminalControl sessionId="s1" hub={makeCmdHub("curl https://token=abc", "modify")} onRequest={vi.fn()} />);
-    expect(screen.queryByTestId("terminal-allow-prefix-btn")).not.toBeInTheDocument();
-
-    rerender(<TerminalControl sessionId="s1" hub={makeCmdHub("sudo systemctl status nginx", "safe")} onRequest={vi.fn()} />);
-    expect(screen.getByTestId("terminal-allow-prefix-btn")).toHaveTextContent("Always Allow Prefix (systemctl status)");
+    const { rerender } = render(<TerminalControl sessionId="s1" hub={makeCmdHub("rm -rf /tmp/old-data")} onRequest={vi.fn()} />);
+    for (const command of ["rm -rf /tmp/old-data", "cat file && rm -rf /", "sudo systemctl status nginx"]) {
+      rerender(<TerminalControl sessionId="s1" hub={makeCmdHub(command)} onRequest={vi.fn()} />);
+      expect(screen.getByTestId("terminal-approval-command")).toHaveTextContent(command);
+      expect(screen.getByTestId("terminal-approve-once-btn")).toBeVisible();
+      expect(screen.getByTestId("terminal-deny-btn")).toBeVisible();
+      expect(screen.queryByTestId("terminal-allow-prefix-btn")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("terminal-approval-risk")).not.toBeInTheDocument();
+      expect(screen.getByTestId("terminal-control")).not.toHaveTextContent(/Destructive action|single-run approval/i);
+    }
   });
 });
 

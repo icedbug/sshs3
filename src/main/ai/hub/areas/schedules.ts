@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { HubReply, AgentSchedule, AgentTask } from "../../../../shared/types/aiHub";
-import { SHELL_KINDS } from "../../../../shared/types/aiHub";
+import { SHELL_KINDS, isPlainCommand } from "../../../../shared/types/aiHub";
 import { getDemoSchedules, isDemoMode } from "../demoWorkspace";
 import { boundedPrompt, clip, PERSON_PROMPT_MAX, safeError } from "../privacy";
 import { requiredText, integer } from "../hubHelpers";
@@ -75,7 +75,7 @@ export class SchedulesPart {
     if (!schedule || (schedule.lastTaskId && schedule.lastTaskId !== task.id && !this.scheduleStarts.has(schedule.id))) return;
     const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text.trim();
     if (schedule.quietSentinel && task.status === "completed" && !task.error && answer === "HEARTBEAT_OK" &&
-        !task.plan && task.changes.every((c) => c.status === "completed" && c.riskLevel === "safe") &&
+        !task.plan && task.changes.every((c) => c.status === "completed" && isPlainCommand(c)) &&
         (task.toolLog ?? []).every((rec) => rec.ok !== false && !rec.exitCode)) {
       task.quietScheduleResult = true;
     }

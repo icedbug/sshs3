@@ -75,20 +75,22 @@ explicitly enabled presentation on top of the same terminal authority.
   - *Held to it* (`continuationMessage`): when the model ends a turn without a
     tool call, the run sends it back if items are still open, if thorough mode
     has no list, or if something was changed and no `terminal_verify` has
-    passed since (a command counts as a change by the same classification the
-    approval prompt uses). Each is bounded, so a stuck run can end.
+    passed since. Something was changed when a change card (`sshs3_change`)
+    ran or a file was written. A plain command never counts: nothing looks at
+    what a command did. Each is bounded, so a stuck run can end.
   - *Thorough mode*: `ultrawork` / `ulw` in the request adds a section to the
     instructions, asks for a task list and doubles the turn budget.
   - *What the team knows about a failure* (`failureHints`): a failed command's
     result carries the team memories and skills that match it (exact error
     signature first, else at least three distinctive shared words).
   - *Investigators* (`sshs3_investigate`, `HubService.investigate`): the
-    agent hands precise questions to read-only runs that look in
+    agent hands precise questions to runs that only look, in
     parallel (all at once), each with a fresh context,
     `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`, and, when
-    one can be opened, a terminal of its own on the asking run's target where
-    only read-only commands run; it gets their reports back together, a
-    failed one with its error. They cannot delegate. Stopping the asking run
+    one can be opened, a terminal of its own on the asking run's target. An
+    investigator is told to only look and is given no change card and no file
+    write. Nothing checks what its commands do. The asking agent gets their
+    reports back together, a failed one with its error. They cannot delegate. Stopping the asking run
     stops them, and what they spend is put down to the asking agent.
   - *Compaction*: when everything sent (the transcript and the tool
     definitions) passes about half the context window (`compactAtChars`),
@@ -119,8 +121,9 @@ explicitly enabled presentation on top of the same terminal authority.
   `sshs3_plan_propose` when the user asks for one (`/plan` in the request) or
   on its own for a risky change. A plan has a goal and steps, each with
   target, exact command, risk, the check that shows it worked and, above low
-  risk, a rollback; a plan without these is refused with the reason, and a
-  destructive command cannot be called low risk. A command, check or rollback
+  risk, a rollback; a plan without these is refused with the reason. The
+  risk is the model's own word, for people to read: nothing checks it against
+  the command. A command, check or rollback
   is shown whole (up to 2,000 characters) or the plan is refused: a person
   never approves half of one. Goal and action are cut at their end when long.
   - *Review*: before the user sees it, a separate read-only run on the main
@@ -130,19 +133,24 @@ explicitly enabled presentation on top of the same terminal authority.
     told the findings; a fourth version without an approval is refused.
   - *The gate* (`planGate`, in the run loop before the broker): while a plan
     is proposed, while a sent-back plan is being revised, and in a request
-    that asked for a plan and has none approved, commands that change
-    something and file writes are refused; reading is allowed.
+    that asked for a plan and has none approved, change cards
+    (`sshs3_change`), file writes, tools of other systems (`mcp__*`) and
+    management operations that change something are held. `terminal_command`
+    and `sshs3_cluster_exec` are not held: nothing looks at what a command
+    does, and the agent is told to change nothing with one.
   - *The decision* (`plan-decide`, the plan card in the conversation):
     approving sets the agent's task list to the plan's steps and sends it to
     carry them out; sending it back with a note has the agent revise;
     declining without a note drops the plan.
   - *What approval covers* (`planCoversCommand`, in `ToolBroker.authorize`):
-    the exact command of a step that has not run yet is not asked about
-    again. Anything else, a second run of the same command, and any
-    destructive command are asked about as usual. A plan can instead have
-    every changing command ask (`plan.askEach`): when the plan's own text
+    a change card made exactly as a step lists it (command, check, expected
+    text, rollback) and that has not run yet is not asked about again. Any
+    other change card, a second run of the same one, and every file write are
+    asked about as usual. A plain command a plan lists runs like any other
+    command, and its step is ticked as run. A plan can instead have
+    every change card ask (`plan.askEach`): when the plan's own text
     promises separate approvals or the agent set `askBeforeEachChange`
-    (`"plan"`), when the person ticked "Ask me before each command" on the
+    (`"plan"`), when the person ticked "Ask me before each change card" on the
     card (`"person"`), or when they approved with a note and made no choice
     (`"note"`: only the agent reads a note, so it is never taken to mean
     less asking). The card and the message to the agent say which holds.
@@ -203,47 +211,25 @@ explicitly enabled presentation on top of the same terminal authority.
   lead) open with their instructions and quote bounded data, and are passed
   whole. An answer with pages that are not in the format asked for fails the
   run with that reason instead of counting as "nothing to write".
-- **`CommandSafetyService`** — reads a command the way a careful reviewer
-  would, classifies it as safe, modifying or destructive and applies the
-  `SafetyPolicyConfig` (`autoApproveSafeReadOnly`, `requireApprovalOnProdTags`,
-  `blockDestructiveWithoutConfirm`), including file writes on `prod`-tagged
-  servers. It splits on every operator (`;`, newline, `&&`, `||`, `|`, `|&`
-  and a single `&`), follows quotes including `$'…'`, and looks into `$(…)`,
-  backticks, `<(…)`, `bash -c`, `eval`, `find -exec` and `xargs`. It takes
-  away what only runs something else (`sudo`, `env`, `timeout`, `nice`,
-  `nohup`, `xargs`, `FOO=1`) and judges the program that runs on its own
-  arguments, never the raw text — so `grep reboot /var/log/syslog` is a
-  search and `env userdel root` is not read-only. Read-only is a list of
-  known forms with their writing flags excluded (`sort -o`, `sed -i`/`w`,
-  awk's `system()`, `ip link set`, `curl -XDELETE`, `2>file` …). Where a
-  family has options that write or run, its options are an allowlist: sed's
-  script is read command by command (`w`, `e`, `s///w`, `s///e` with any
-  delimiter, `-f`, every `-i`), git allows its reading subcommands without
-  `--output`, `--upload-pack`, `--ext-diff`, `grep -O` or `-c`, awk refuses
-  pipes, `system()`, print redirections and program files, and rsync is
-  read-only only in a dry run without a remote shell of its own. psql reads
-  with exactly one SHOW, a SELECT without INTO or an unlisted function, or a
-  listing meta-command (`\l`, `\dt`, `\d`); `python3 -m json.tool` and
-  `postgres -C` read too. A redirection is seen with or without a space
-  (`echo x>/etc/y`, `>&`, `&>`, `>|`, `<>`); only /dev/null and a copy of
-  stdout or stderr (`2>&1`) write nothing. A program named by a path outside
-  the system's directories (`./ls`), or an argument the shell fills in
-  (`sed $X f`) for a program whose verdict depends on its arguments, is a
-  change. Anything not on the list, or nested more than six deep, is
-  "modify"; a command that never ends by itself (`tail -f`, `less`, `watch`,
-  `vmstat 1`, a long `sleep`) is not run unasked.
-  `sudo -i` and `sudo -s` with nothing after them start a shell as another
-  user and are a change. A variable set in front of a command that decides
-  what it loads or runs (`LD_PRELOAD`, `PATH` with anything but the system's
-  own directories, `BASH_ENV`, `HOME`, a pager that is not `cat`/`less`/`more`)
-  makes it a change too. `bash -n` is a syntax check only where the shell
-  cannot be interactive: the script is named or comes through a pipe. ONTAP's
-  comparisons (`-time >2h`, `-size >1TB`) are read as comparisons only as the
-  value of an option of an ONTAP command and only as a bare number with a
-  unit; on a POSIX shell the same words would create an empty file of that
-  name, which is the one thing knowingly let through. It is
-  still a set of rules, not a shell: `tests/main/commandClassifier.test.ts`
-  holds every case the review found.
+- **No command classifier.** An earlier version had a file,
+  `CommandSafetyService.ts`, that read every command and called it safe,
+  modifying or destructive. It is gone. A
+  command an agent runs is not looked at and nobody is asked about it. What
+  still waits for a person is listed in
+  [What is checked and what is not](#what-is-checked-and-what-is-not). Three
+  small files hold what was kept:
+  - `safetyPolicy.ts`: the rules a workspace starts with
+    (`DEFAULT_SAFETY_POLICY`) and which tags mean production (`isProdTag`).
+  - `sensitivePaths.ts`: whether a path names a file that may hold a secret
+    (`isSensitivePath`). Paths only. It is used by the file tools of a run
+    asked for from chat (`sensitiveFile` in `chatFence.ts`) and nowhere else.
+    It stops no command.
+  - `olderStores.ts`: takes the old rating's fields out of a stored hub when
+    it is read (`dropCommandRating`): `riskLevel`, `riskReason` and
+    `parsedSubcommands` on a change, `sessionAllowPrefixes` on a conversation,
+    and `autoApproveSafeReadOnly`, `blockDestructiveWithoutConfirm` and
+    `commandAllowPrefixes` in the safety rules. They are not kept and not
+    shown.
 - **Team memory in the prompt** — `snapshotText` puts the ranked memories
   first as text with a budget of their own (12,000 characters, whole memories
   only, with a count of those left out), apart from the JSON snapshot, which is
@@ -555,9 +541,77 @@ the identity system, and sshs3 continues to enforce its own command approvals.
   something the original conversation never looked at, it gets "not recorded"
   and may conclude differently for that reason alone. The count is shown.
 
+## What is checked and what is not
+
+A command an agent runs is not checked. Nobody is asked about it, also when it
+deletes something. What waits for a person is a change card, a file write, a
+plan and a guarded settings change.
+
+This is a working agreement with the agent, not a lock. The agent is told to
+make every change with a change card, and it can still run the same thing as a
+plain command. What an agent can do on a server is decided by the account it
+logs in with. Give it an account that can only do what you accept.
+
+Two words:
+
+- **A plain command**: `terminal_command`, `terminal_verify`,
+  `sshs3_cluster_exec`, a command an external agent asks to run, and the
+  helper commands inside a card (its check, its rollback, a preflight).
+- **A card**: a change card (`sshs3_change`, which carries a check and a
+  rollback), a file write (`file_write`), a plan (`sshs3_plan_propose`) and a
+  guarded settings change. A call to a tool of another system (`mcp__*`) that
+  did not say it only reads waits as a change card does.
+
+| Case | A plain command | A change card or a file write |
+| --- | --- | --- |
+| Advice | Not run | Not run |
+| Ask first | Runs. Nobody is asked | Waits for a person |
+| Plan, or a plan that waits | Runs. Nobody is asked | Held until the plan is approved. A change card the approved plan lists then runs without a second question |
+| Auto | Runs | Runs without asking. On a server tagged production it waits for a person while "Always ask before a change card or a file write on production" is on |
+| A change freeze on the target | Runs | Refused |
+| Two people on production, or a cluster that needs more than one approval | Does not apply | Applies |
+| A cluster whose highest mode is Advice | Not run | Not run |
+| An investigator, or a chat channel set to "Commands only" | Runs. A chat run stays on the servers its channel was given | Refused |
+| Asked for from outside, through sshs3's own MCP server | Waits for a person | Waits for a person |
+| A guarded settings change | Not a command | Waits for a person in every mode |
+
+What went with the classifier:
+
+- No command is rated. There is no "read-only" or "destructive" badge, and no
+  rule that a destructive command always asks.
+- "Run read-only commands without asking", "Stop destructive commands until
+  reviewed" and the allowed command prefixes are gone, and so is "always allow
+  commands that start with" on the approval bar.
+- A command that reads a file with secrets is not asked about. The file tools
+  of a run asked for from chat still refuse such a file by its path
+  (`sensitivePaths.ts`). That is the file tools' own rule and stops no command.
+- In Auto on production a plain command is no longer refused.
+- A card's check does not have to be read-only, and its rollback is not
+  screened. The card shows the command, the check and the rollback in full.
+- `terminal_command` has no dry run option. The agent writes its own dry run
+  command (`kubectl --dry-run=server`, `terraform plan`, `rsync -n`).
+
+What did not change: the budget of a run, the guard against running one
+command again and again for one answer, the servers a chat run may reach,
+masking of secrets, and the audit log. Every finished command is in the audit
+log. A card and a file write are also written there before they run.
+
+Where it is decided: `ToolBroker.authorize` for every tool of a run,
+`isPlainCommand` (`src/shared/types/aiHub.ts`) for which of the two an action
+is, `planGate` (`PlanMode.ts`) for what is held while a plan waits, and
+`areas/runs.ts` for what an external agent asks for.
+`tests/main/commandsRunUnasked.test.ts` holds each row of the table, through
+a real hub with stand-in terminals. What an external agent asks for is in
+`tests/main/aiHubAcpRuntime.test.ts`.
+
+Not tried: a run with a real model since commands stopped being asked about.
+The runs with a real model that this guide records were made before that,
+when a command that changed something was asked about. Whether a model keeps
+to change cards when a plain command would do the same is not known.
+
 ## Changes that prove themselves and take themselves back (`sshs3_change`)
 
-- A change is made with `sshs3_change`: the command, a read-only `check` that
+- A change is made with `sshs3_change`: the command, a `check` that
   must exit 0 and whose output must contain `expected`, the `rollback`
   command, and how long to observe. The tool's own text tells the model both
   halves of that rule (it used to name only the text, and a correct fix was
@@ -581,19 +635,14 @@ the identity system, and sshs3 continues to enforce its own command approvals.
   matched as a word or phrase: "inactive" does not pass for "active".
 - Only a proven fix is learned: a change counts for team memory only when its
   check passed and had not passed before.
-- The check must be classified read-only. The change is approved as one
-  thing: the worse of the command and its rollback decides how it is treated,
-  and the approval shows both (`ChangeProof`).
-- On a production target, an agent running on its own cannot change anything
-  with a bare command: it is refused and pointed to `sshs3_change`.
-- While a plan is pending, `sshs3_change` is held back like any change.
-- The classifier (`CommandSafetyService`) now knows the usual health checks
-  as read-only: a curl that only asks (GET or HEAD, no body, no upload, output
-  to the terminal or /dev/null), `wget --spider` / `-O -`, `pg_isready`,
-  configuration tests (`nginx -t`, `sshd -t`, `haproxy -c` …), `docker ps`,
-  `logs`, `inspect`, `echo`, `test`. Their mutating forms are still changes.
-  It remains a set of rules: something it does not know is treated as a
-  change, and a rule that is wrong would let a command through.
+- Nothing looks at what the command, the check or the rollback do. The model
+  is told to give a check that only looks. The card shows all three in full
+  (`ChangeProof`, the terminal's approval bar, the chat card) and the person
+  approves what they read.
+- In Auto a change card runs without asking, except on a production target
+  while "Always ask before a change card or a file write on production" is
+  on: there it waits for a person.
+- While a plan is pending, `sshs3_change` is held back, like a file write.
 
 ## What a person approves is what runs
 
@@ -618,14 +667,17 @@ the identity system, and sshs3 continues to enforce its own command approvals.
   external agent's action it never reported back becomes "uncertain".
 - A run waiting for a person is not stopped by its own clock; the wait is
   given back when the answer comes. An external agent may have several
-  questions open; each answer counts as given. Without a command to check,
-  an external agent's own word that an action only reads is not trusted.
+  questions open; each answer counts as given. A command an external agent
+  asks to run is a plain command: it runs without asking in every mode but
+  Advice. An action it gave no command for (an edit, a delete, a move) waits
+  for a person, as a file write does.
 
 ### Two people (`peer-approve`, `approveAsPeer`, `approvePlanAsPeer`)
 
-The rule "Two people must approve a change on production"
+The rule "Two people must approve a change card or a file write on production"
 (`requirePeerApprovalOnProd`), and a cluster policy that asks for more than
-one approval, need a second person. There is one only on a web server with
+one approval, need a second person. Both are about change cards and file
+writes. A plain command needs nobody. There is one only on a web server with
 more than one account. Everywhere else the rule is not in force and cannot be
 switched on (`peerApprovalPossible`, shown as the reason on the safety card),
 because a change would wait for an answer that cannot come.
@@ -649,17 +701,18 @@ because a change would wait for an answer that cannot come.
   every step, with its command and where it runs, before answering. The two
   count in either order, and the agent starts when the second answer is in.
   What the person whose run it is chose about being asked before each
-  command, and what they wrote, is what the agent is told. What the second
+  change card, and what they wrote, is what the agent is told. What the second
   person writes is shown to the first in the conversation and is never sent
   to the agent as theirs. A second person's no does not send the agent back
   to work: the plan is "not approved", and the person whose run it is decides
   what next.
-- **A plan two people approved covers its listed commands for both**
-  (`planApprovalsCover`). A command exactly as the plan lists it then runs
-  without asking either of them again, and its record names the two. This
+- **A plan two people approved covers the change cards it lists for both**
+  (`planApprovalsCover`). A change card exactly as the plan lists it then runs
+  without asking either of them again, and its record names the two. A plain
+  command needs neither of them, listed or not. This
   holds only for a plan approved as one for production (`plan.production`),
-  so the second person was somebody who may approve there. A destructive
-  command, one with hidden values, a change to the rules, one asked for from
+  so the second person was somebody who may approve there. A change card
+  with hidden values, a change to the rules, one asked for from
   outside, and anything the plan does not list are put to both people.
 - **The chat agent's changes.** A conversation asked for in a Slack or
   Mattermost channel runs in the chat agent's own account (see
@@ -676,12 +729,14 @@ because a change would wait for an answer that cannot come.
 - Checked in `peerApprovalOnServer.test.ts` over each account's own
   websocket, with a terminal that answers: a member's production change runs
   once the administrator has approved; a refusal runs nothing; another member
-  is not asked and cannot answer; a plan takes two in either order and its
-  listed command then runs unasked. Also checked in two browsers against a
+  is not asked and cannot answer; a plan takes two in either order and the
+  change card it lists then runs unasked. Also checked in two browsers against a
   server in demo mode with a stand-in model: the member approves in his
   inbox, the administrator finds the change in hers as "Needs a second
   person" and approves, and only then does the command run; the same with a
-  plan, whose listed command then runs without a new question. Not checked
+  plan, whose listed command then runs without a new question. The two
+  browser runs were made before commands stopped being asked about, and were
+  not repeated since. Not checked
   with a real model, and not with single sign-on groups from a real identity
   provider.
 
@@ -693,7 +748,7 @@ Nobody's own rules can loosen them. The settings show them over a person's own
 rules (`TeamRulesSection`): an administrator changes them there, a member
 reads them. There are none in the desktop app and none in the demo lab.
 
-- **Two people on a change to production.** The same rule as a person's own
+- **Two people on a change card or a file write on production.** The same rule as a person's own
   (above), switched on for everybody. `safetyPolicy()` counts it as the
   person's own being on, so everything that follows from it is the same. A
   person's own switch then has nothing left to decide and is shown as on. It
@@ -701,11 +756,13 @@ reads them. There are none in the desktop app and none in the demo lab.
   approve production for (the only administrator), it does not hold, and the
   card says so.
 - **A change freeze.** On every server (`*`) or on one cluster, for a number
-  of hours, with a reason. Until it ends, nothing that changes a target there
-  is run: the broker refuses the command or the file write before anything
-  is asked or typed (`ToolBroker`, code `change_freeze`), an external agent's
-  change is refused, and a plan cannot be approved. Commands that only look
-  still run. An administrator can end a freeze early. A freeze a person set
+  of hours, with a reason. A freeze stops change cards and file writes.
+  Commands still run. Until it ends, the broker refuses a change card or a
+  file write before anything is asked or typed (`ToolBroker`, code
+  `change_freeze`), an external agent's action that is not a command is
+  refused, and a plan cannot be approved. Nothing looks at what a command
+  does, so a freeze does not stop an agent that runs a change as a plain
+  command: the agent is told not to. An administrator can end a freeze early. A freeze a person set
   for a cluster in their own rules is stopped at the same places.
 - **Where they are kept.** One file in the server's shared folder
   (`shared-workspace/team-rules.json`), read into memory when the server
@@ -714,15 +771,14 @@ reads them. There are none in the desktop app and none in the demo lab.
   activity and the audit log with who made it, and the other accounts'
   windows are told at once.
 - **What a member may change of their own.** Their own switches, and their
-  own two-person rule on and off. Not the two that hold for every member
-  ("Always ask before a change on production", "Stop destructive commands
-  until reviewed"), and not cluster policies or command allowlists. The
-  settings send only the switch that was moved, so a member is not refused
-  for lists they did not touch.
+  own two-person rule on and off. Not the one that holds for every member
+  ("Always ask before a change card or a file write on production"), and not
+  cluster policies. The settings send only the switch that was moved, so a
+  member is not refused for what they did not touch.
 - Checked in `teamRulesOnServer.test.ts` over each account's own websocket:
   the rule holds for a member who never switched it on and only an
-  administrator sets it; a freeze refuses a member's change without typing
-  it and lets a read-only command through; a cluster's freeze leaves other
+  administrator sets it; a freeze refuses a member's change card without
+  typing it and lets a command through; a cluster's freeze leaves other
   servers alone; a member changes their own rules and is refused only what
   is the administrator's.
 
@@ -797,13 +853,13 @@ reads them. There are none in the desktop app and none in the demo lab.
   could only read what the workspace already knew. An investigator now gets a
   terminal of its own on the asking run's target (opened like a schedule's,
   labelled "Investigator: <target>", closed afterwards) and
-  `terminal_command`, and the broker lets through only
-  what `analyzeCommandSafety` classifies as read-only, without asking anyone;
-  everything else is refused, as is any file write. Where no terminal can be
-  opened (a target that needs an interactive login, Kubernetes sessions, the
-  demo lab) the investigator works from context and says what it could not
-  check. The classifier is a set of rules: it can refuse a harmless command,
-  and a command it wrongly calls read-only would run.
+  `terminal_command`. Its commands run without asking anyone. It is told
+  "You only look. Change nothing.", and the broker refuses it a change card,
+  a file write and a tool of another system. Nothing checks what its commands
+  do: an investigator that runs a changing command changes the system. Where
+  no terminal can be opened (a target that needs an interactive login,
+  Kubernetes sessions, the demo lab) the investigator works from context and
+  says what it could not check.
 
 ## What an agent may not change about its own rules (`AppGuard`)
 
@@ -817,7 +873,7 @@ mode, whatever the safety policy or an approved plan says. It waits in the
 inbox and goes out to the notification channels like a command.
 
 Guarded:
-- the command safety policy (under any of the operation names the handler
+- the safety rules (under any of the operation names the handler
   accepts: the fields decide, not the name);
 - which model endpoint is used (`aiProvider`, `aiBaseUrl`, `aiEnabled`);
 - adding or changing an MCP server, and installing one from the list (a stdio
@@ -831,7 +887,7 @@ Guarded:
   them.
 
 Not guarded: everything else, including an agent or a schedule that asks before
-each command. A conversation in Advice mode still runs no command and writes no
+each change card. A conversation in Advice mode still runs no command and writes no
 file, but it does ask about a guarded change: the person is there to answer.
 
 Beside the gate:
@@ -947,8 +1003,8 @@ described above, each with a test that fails without the fix.
 
 Not guarded, on purpose, and worth knowing: an agent can create a ticket for
 another agent, and the heartbeat runs it in that agent's mode. That is the
-workforce doing its job; the safety switches (production, destructive
-commands) still apply to the run.
+workforce doing its job; the safety rules (production, two people, a
+freeze) still apply to the run's change cards and file writes.
 
 Related hardening done with this:
 - MCP servers' environment variables and headers leave the hub as names only
@@ -989,9 +1045,9 @@ read, which is what keeps a web page on the same machine from reaching it.
 
 A key says what it may do: read, write tickets, or ask for a command on one
 named server. A command asked for this way waits for the person in the
-inbox — every one of them, including the read-only ones an agent inside
-sshs3 would be allowed to run unasked, because nobody here is watching
-whoever asked (`AgentTask.fromOutside`). It runs in the terminal that is
+inbox. Every one of them does, although a command of a run inside sshs3 is
+never asked about, because nobody here is watching whoever asked
+(`AgentTask.fromOutside`). It runs in the terminal that is
 already open for that server and nowhere else.
 
 ### What an agent may be held to
@@ -1128,10 +1184,9 @@ keeps what is different. No model is involved.
   ports with their process, connections the server opened itself, disks,
   certificates in the usual places with their end date, and SHA-256 of a list
   of configuration files (`DEFAULT_WATCH` plus the user's own paths). One
-  script for `sh -s`, a marker line before each section, nothing written. A
-  test holds every command to `analyzeCommandSafety`; the classifier learned
-  the asking forms of the package managers (`rpm -q…`, `dpkg-query -W`,
-  `apk info`) for this, and only those.
+  script for `sh -s`, a marker line before each section, nothing written.
+  Each command is written to only look. Nothing in the app checks that:
+  whoever adds a command keeps it so.
 - **How it runs** (`HubHost.execOnServer`, in `createHub.ts`): over the
   ControlMaster socket of an open tab to that server when there is one
   (beside the terminal, nothing is typed into it), otherwise a connection of
@@ -1676,7 +1731,7 @@ services are saved together.
 | Channel | Its id (in Slack like `C0123ABCD`) and a name to show. The bot answers in no channel without a row |
 | Servers | Names, ids or hosts, or all of the chat agent's servers |
 | Clusters | Every server in them |
-| What it may do | Read only, Ask before changes, or Plan first |
+| What it may do | Commands only; Commands, and change cards approved in the thread; or Plan first |
 | Agent | The chat agent's default agent, or another of the chat agent's own agents. Its hub runs the conversation, so an agent of the administrator's own is not offered, and saving one is refused. External runners are not offered: a conversation from chat runs on the chat agent's model |
 | Who may approve | Anyone who may approve it, or administrators only. In chat only people who linked their chat account can answer |
 | What it may search | Which of the context bot's channels `sshs3_chat_history` may search. None chosen: only this channel |
@@ -1684,11 +1739,18 @@ services are saved together.
 - **Servers are matched exactly**, by id, name or host, or by cluster.
   `web-1` never lets in `web-10`. A row with no servers and no clusters
   reaches nothing.
-- **Read only:** commands that only look run, and anything that would change
-  something is refused. No card is posted. **Ask before changes:** each
-  change waits until a person who may approve it says yes. **Plan first:**
-  the agent proposes a plan and changes nothing until it is approved. A
-  conversation from chat never runs in Auto.
+- **Commands only** (`read`): the agent runs commands on these servers and
+  proposes no change. Nothing checks what a command does. It is told "You
+  only look. Change nothing.", and it is given no change card and no file
+  write, so no card is posted. **Commands, and change cards approved in the
+  thread** (`ask`): commands run without asking, and each change card waits
+  until a person who may approve it says yes. **Plan first** (`plan`): the
+  agent runs commands to look around and proposes a plan. Change cards and
+  file writes wait until it is approved. A conversation from chat never runs
+  in Auto.
+- **Anyone in a channel can have the agent run commands on its servers.**
+  Give the bot an SSH user that can only do what you accept. What the agent
+  can do on a server is decided by that account, not by sshs3.
 - **In a channel the bot answers only when it is named**, in its own thread
   too. A later message in the thread that names it goes on with the same
   conversation, given to the agent as `Omar Lind wrote: …`. One answer at a
@@ -1696,7 +1758,7 @@ services are saved together.
 - **A conversation keeps the rule it started with.** When an administrator
   changes a channel's row, the next message there starts a new conversation,
   and the bot says so. A card in a channel that was turned off, removed or
-  set to read only can no longer be answered in chat, only in sshs3.
+  set to "Commands only" can no longer be answered in chat, only in sshs3.
 - **Conversations do not see each other.** The chat agent's account holds
   every channel's conversations. A run asked for in one channel searches only
   that channel's earlier conversations (in a direct message, only that
@@ -1713,9 +1775,10 @@ services are saved together.
   the chat sends people there: an answer cut short, a card that is answered
   only in sshs3 or has ended, and a card that could not be posted. The link
   opens sshs3, not the conversation itself.
-- **A card** shows what the change does, where, the risk and why, the whole
-  command, the check, how it is taken back, the approvals so far and who may
-  approve. A card that does not fit whole gets no buttons and says to answer
+- **A card** shows what the change does, where, what it can affect when the
+  agent said so, the whole command, the check, how it is taken back, the
+  approvals so far and who may approve. Nothing rates the command. On
+  production the button asks once more before it counts. A card that does not fit whole gets no buttons and says to answer
   in sshs3: nothing is approved from a part of it.
 
 ### Who may approve
@@ -1788,10 +1851,11 @@ services are saved together.
   app, marked "from Slack" or "from Mattermost" (`ChatOriginBadge`). Only that
   person answers its cards. Where a second person is needed, that person
   answers in their Inbox as usual.
-- **From somebody who did not link:** read only, or not answered, as the
-  administrator chose. Read only runs in the chat agent's account, only on the
-  servers and clusters set for direct messages, and the bot says it can only
-  look. Not answered: the bot says how to link.
+- **From somebody who did not link:** commands only, or not answered, as the
+  administrator chose. Commands only runs in the chat agent's account, only on
+  the servers and clusters set for direct messages, and the bot says that it
+  runs commands and proposes no change. Not answered: the bot says how to
+  link.
 - Each message in a direct message goes on with the same conversation.
 
 ### Model, limits and budget
@@ -1964,7 +2028,7 @@ once. `chatAgentOnServer.test.ts` runs the real web server with three accounts
 stand-in model. It checks a change asked for in a channel posted as a card,
 the member who did not link told to link, and the administrator's approval
 running it; production with two people; a freeze stopping a change before any
-card; a read only channel; a plan channel; a linked person's direct message
+card; a "Commands only" channel; a plan channel; a linked person's direct message
 in their own account; that no channel sees another channel's conversations,
 terminals or chat; the two bots kept apart; a restart; link codes written in
 a channel; "Try it"; and in Mattermost, reactions and buttons.
@@ -2164,7 +2228,7 @@ broker, the safety rules and the approvals. Use the service's API base URL. The 
 The default protocol is Responses at the official OpenAI API and Chat Completions
 at other addresses. Set `--api-protocol responses` or `--api-protocol chat-completions`
 to select one explicitly. `--approve
-all|none|ask` says who answers when the agent asks before a change: `all`
+all|none|ask` says who answers when a change card or a file write waits: `all`
 lets everything through, which shows whether the agent's own judgement holds;
 `ask` puts each question to the person at the terminal. The app sets no limit
 on a run, so this one does: it is stopped at `--max-commands` (40) or
@@ -2528,8 +2592,9 @@ because there is no server to run one on.
 - **Heartbeat** (`preferences.workforceAutopilot`, off by default; the Workforce
   view calls it "Start tickets by itself"): on each
   timer tick the app takes the oldest runnable ticket in To do and starts it,
-  one at a time. It runs in the agent's own mode, so an agent set to run
-  commands on its own does so unattended, within the safety policy.
+  one at a time. It runs in the agent's own mode, so an agent set to Auto
+  runs commands and change cards unattended. By default a change card on
+  production still waits for a person.
 - **Sharing.** `WorkSync` keeps one object per item under `work/` in the team
   bucket: goals, tickets, agents, shared runbooks and dependencies. Per item
   the newer copy wins, with these exceptions where that would lose something.
@@ -2621,8 +2686,9 @@ because there is no server to run one on.
   external coding agent over the Agent Client Protocol: a program started on
   this computer that speaks JSON-RPC on stdio. sshS3 sends the prompt, shows
   the agent's text, plan and tool calls, and answers its permission requests
-  through the same approval and safety rules as its own commands, once per
-  action. It offers the agent no file access and no terminal: the agent uses
+  by the same rules as its own runs, once per action: a command it asks to
+  run is allowed without asking in every mode but Advice, and an edit or a
+  delete it gave no command for waits for a person. It offers the agent no file access and no terminal: the agent uses
   its own, in the runner's folder. Token use is not reported over ACP, so
   such runs do not count against a budget. On a shared server a runner is a
   program on the server's host: only an administrator saves one, checked
@@ -2848,8 +2914,8 @@ The application-owned `sshs3_terminal` backend plugin provides:
 - `sshs3_terminal_file_read`: target-provider reads of complete UTF-8 text under 64 KB.
 - `sshs3_terminal_file_write`: reviewed replacements with expected-hash checks and read-back.
 
-New assigned conversations default to **assisted** mode. Commands and file replacements require approval for
-that exact task/change. An expiring private capability connects the native
+New assigned conversations default to **assisted** mode. Commands run at once and nobody is asked. A file
+replacement requires approval for that exact task and change. An expiring private capability connects the native
 backend to a loopback broker; browser origins and missing capabilities are
 refused. Model arguments never supply a terminal, native profile/session ID,
 permission grant or target provider.
@@ -2937,10 +3003,10 @@ done once per team day. Each installation's report covers the time since its
 last report, however long the computer was off. A scheduled run records how it
 ended. A schedule counts as missed only if it was due before the previous check.
 
-**AI in the terminal.** A suggestion is cleaned of control characters, says
-when it is more than one line and how risky it is, and runs with one key only
-when it is a single read-only line on an empty prompt; otherwise it is pasted
-for the person to read. What is sent to the model is masked.
+**AI in the terminal.** A suggestion is cleaned of control characters and says
+when it is more than one line. Nothing looks at what it does. It is pasted for
+the person to read, with the line "Read it before you press Enter.", and is
+never run for them. What is sent to the model is masked.
 
 **Settings and first start.** Saved settings are never rewritten when they are
 read: a ChatGPT/Codex sign-in is offered on first start, not switched to.
@@ -3123,7 +3189,7 @@ remaining platform/product work.
 ## Source map
 
 - `src/main/desktopEntry.ts`: desktop entry; launches the pinned native engine/frontend only with `SSHS3_FORCE_NATIVE_HERMES=1`.
-- `src/main/ai/hub/`: AI Hub services (HubService, createHub, DirectAgentRuntime, KnowledgeBaseService, SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, HubStore, privacy, builtins, demoWorkspace).
+- `src/main/ai/hub/`: AI Hub services (HubService, createHub, DirectAgentRuntime, KnowledgeBaseService, SelfLearningService, safetyPolicy, sensitivePaths, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, HubStore, privacy, builtins, demoWorkspace).
 - `src/main/ai/hub/areas/`: the hub's own methods, a file per area, and `routes.ts`, the table of which part answers which request (see "Where the hub's code is").
 - `src/main/ai/desktop/`: native Hermes host views, authenticated control IPC and NativeToolBridge.
 - `src/main/ai/hub/ChatSources.ts`, `ChatIndex.ts`, `ChatBridge.ts`: the context bot in Slack and Mattermost, the index of what was said, and the search over it. It only reads.

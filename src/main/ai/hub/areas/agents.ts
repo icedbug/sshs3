@@ -272,7 +272,7 @@ export class AgentsPart {
     prompt: string;
     agent?: MissionAgent;
     agentName: string;
-    /** A terminal of the run's own: it may then run read-only commands there. */
+    /** A terminal of the run's own: it then runs commands there, told to only look. Nothing checks them. */
     sessionId?: string;
     /** Work that needs the main model's judgment even when a fast model is set. */
     mainModel?: boolean;
@@ -363,7 +363,7 @@ export class AgentsPart {
   }
 
   /**
-   * An agent hands questions to read-only investigators that look in
+   * An agent hands questions to investigators that only look, in
    * parallel (as many as there are questions) and gets their reports
    * back together. Each investigator is a model run of its own with a fresh
    * context, so the asking agent's context is spent on the answers, not on the
@@ -406,7 +406,7 @@ export class AgentsPart {
             prompt:
               investigatorPrompt(question, scope, parent.title) +
               (sessionId
-                ? "\n\nYou have a terminal of your own on the target. You may run read-only commands there (looking at state, logs, configuration); anything that would change the system is refused. Say which command showed what."
+                ? "\n\nYou have a terminal of your own on the target. A command runs there at once and nothing checks it, so run only commands that read (state, logs, configuration). You only look. Change nothing. Say which command showed what."
                 : "\n\nNo terminal could be opened for you on the target, so you cannot run commands: work from the workspace's context and the knowledge base, and say what would have to be checked on the system."),
             agentName: `Investigator ${index + 1}`,
             sessionId,

@@ -60,7 +60,7 @@ renderer and main-process services also run without Electron in the multi-user *
 │   │   ├── index.ts                # Application lifecycle, window creation, quit hooks
 │   │   ├── IpcBridge.ts            # IPC bridge: constructor/wiring, prompt layer (pending prompts, presence), auto-sync, dispose
 │   │   ├── ai/                     # AI: AiConfigStore, CodexAuthProvider, HermesManager, desktop/ (native Hermes host + NativeToolBridge)
-│   │   │   └── hub/                # AI Hub: HubService (actions, agent tools), createHub (host wiring), HubStore, DirectAgentRuntime, KnowledgeBaseService (Orama), SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, builtins/demoWorkspace, privacy
+│   │   │   └── hub/                # AI Hub: HubService (actions, agent tools), createHub (host wiring), HubStore, DirectAgentRuntime, KnowledgeBaseService (Orama), SelfLearningService, safetyPolicy, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, builtins/demoWorkspace, privacy
 │   │   ├── demo/                   # Launch-time demo mode: demoMode, outwardSync, DemoVirtualPty, DemoStorageProvider
 │   │   ├── web/                    # Multi-user Web Server: serverEntry, WebServer, WebAuthService, WebTenantManager, electronShim
 │   │   ├── ipc/                    # One registerXHandlers(bridge) per domain (terminal, smartcard, storage, transfer, profile, dotfile, sync, k8s, key install, git, …) + ipcHelpers.ts

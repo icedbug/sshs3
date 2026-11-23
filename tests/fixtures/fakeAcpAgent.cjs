@@ -54,6 +54,18 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
       verdict = answer.outcome.outcome === "selected" ? answer.outcome.optionId : "cancelled";
       update({ sessionUpdate: "tool_call_update", toolCallId: "c1", status: verdict === "yes" ? "completed" : "failed", content: [{ type: "content", content: { type: "text", text: verdict === "yes" ? "12 passed" : "not run" } }] });
     }
+    if (mode === "ask-edit") {
+      // An action of the agent's own with no command to run: an edit of a file in its folder.
+      const edit = { path: "src/login.tsx", old_text: "a", new_text: "b" };
+      update({ sessionUpdate: "tool_call", toolCallId: "c3", title: "Edit src/login.tsx", kind: "edit", status: "pending", rawInput: edit });
+      const answer = await ask("session/request_permission", {
+        sessionId: "s1",
+        toolCall: { toolCallId: "c3", title: "Edit src/login.tsx", kind: "edit", rawInput: edit },
+        options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }],
+      });
+      verdict = answer.outcome.outcome === "selected" ? answer.outcome.optionId : "cancelled";
+      update({ sessionUpdate: "tool_call_update", toolCallId: "c3", status: verdict === "yes" ? "completed" : "failed", content: [{ type: "content", content: { type: "text", text: verdict === "yes" ? "edited" : "not edited" } }] });
+    }
     // The client offers no file access: asking for it must be refused, not hang.
     const fsAnswer = await ask("fs/read_text_file", { sessionId: "s1", path: "/etc/passwd" });
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Permission: ${verdict}. File read through the client: ${fsAnswer.code === -32601 ? "refused" : "ALLOWED"}.` } });

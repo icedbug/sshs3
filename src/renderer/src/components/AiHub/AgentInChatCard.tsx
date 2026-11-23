@@ -12,11 +12,10 @@ import type {
   ChatTaskView,
   ChatTryResult,
   ChatWaitingItem,
-  CommandRiskLevel,
   HubSnapshot,
   RunStatus,
 } from "@shared/types/aiHub";
-import { RISK_LEVEL_TEXT } from "@shared/types/aiHub";
+import { isPlainCommand } from "@shared/types/aiHub";
 import { copyToClipboard } from "../../lib/clipboard";
 import { ConfirmButton } from "./ConfirmButton";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -25,11 +24,11 @@ import type { Act } from "./panelShared";
 const NAME: Record<ChatServiceName, string> = { slack: "Slack", mattermost: "Mattermost" };
 const SERVICES: ChatServiceName[] = ["slack", "mattermost"];
 
-const REACH: Record<ChatReach, string> = { read: "Read only", ask: "Ask before changes", plan: "Plan first" };
+const REACH: Record<ChatReach, string> = { read: "Commands only", ask: "Commands, and change cards approved in the thread", plan: "Plan first" };
 const REACH_HINT: Record<ChatReach, string> = {
-  read: "Only commands that look. Anything that changes something is refused.",
-  ask: "Each change waits until a person who may approve it says yes.",
-  plan: "The agent writes a plan first. Nothing runs until the plan is approved.",
+  read: "The agent runs commands on these servers and proposes no change. Nothing checks what a command does.",
+  ask: "The agent runs commands without asking. Each change card waits until a person who may approve it says yes.",
+  plan: "The agent runs commands to look around, then writes a plan. Change cards and file writes wait until the plan is approved.",
 };
 
 /** The scopes the agent bot's Slack app needs, and no more: it never reads a channel's history. */
@@ -98,12 +97,6 @@ export function monthText(month: string): string {
   const m = /^(\d{4})-(\d{2})$/.exec(month.trim());
   const name = m ? MONTHS[Number(m[2]) - 1] : undefined;
   return m && name ? `${name} ${m[1]}` : month;
-}
-
-/** How far a change goes, in the same words in the waiting list, the Inbox, a conversation and the chat card. */
-export function riskText(risk: string | undefined): string {
-  if (!risk) return "";
-  return RISK_LEVEL_TEXT[risk as CommandRiskLevel] ?? `Risk: ${risk}.`;
 }
 
 /** "No approvals yet. 1 needed." or "1 of 2 approvals." The number stays on the line of its word. */
@@ -424,6 +417,10 @@ function Channels({
         The agent bot answers in a channel only when someone names it there, and only in the channels listed here. Each row is
         what a conversation started in that channel may reach. A row with no servers and no clusters reaches nothing.
       </small>
+      <small data-testid="agent-chat-commands-note">
+        Anyone in a channel can have the agent run commands on its servers. Give the bot an SSH user that can only do what
+        you accept.
+      </small>
       {rows.length === 0 && <p className="ai-empty">No channel yet. The agent bot answers in no channel.</p>}
       {rows.map((row) => {
         const others = read(row.service).filter((c) => c.id !== row.channelId);
@@ -601,7 +598,7 @@ function DirectMessages({
           <label>
             People who did not link their chat account
             <select aria-label="Direct messages from people who did not link" value={unlinked} onChange={(e) => { setSaved(false); setUnlinked(e.target.value as ChatDmRule["unlinked"]); }}>
-              <option value="read">Read only</option>
+              <option value="read">Commands only</option>
               <option value="off">Not answered</option>
             </select>
           </label>
@@ -878,7 +875,7 @@ export function ChatWaitingList({
               </pre>
             )}
             <small>
-              {[item.target ? `On ${item.target}.` : "", riskText(item.risk), approvalsText(item.approvedBy.length, item.requiredApprovals)].filter(Boolean).join(" ")}
+              {[item.target ? `On ${item.target}.` : "", approvalsText(item.approvedBy.length, item.requiredApprovals)].filter(Boolean).join(" ")}
             </small>
             {item.kind === "plan" && (
               <small>
@@ -952,12 +949,12 @@ function ReadChange({ c, taskId, act, onDone }: { c: ChatTaskView["changes"][num
   return (
     <div className="ai-chat-thread" data-testid={`agent-chat-change-${c.id}`}>
       <small>
-        {/* A command that only reads is kept with the changes, but it is not one. */}
-        {c.riskLevel === "safe" ? "Command" : "Change"} on {c.target}. {CHANGE_STATUS[c.status] ?? c.status}.
+        {/* A plain command is kept with the changes, but it is not one: nobody was asked about it. */}
+        {isPlainCommand(c) ? "Command" : "Change"} on {c.target}. {CHANGE_STATUS[c.status] ?? c.status}.
       </small>
       <p>{sentence(c.description)}</p>
       {c.command && <pre className="ai-mono ai-chat-command">{c.command}</pre>}
-      <small data-testid="agent-chat-change-line">{[riskText(c.riskLevel), changeApprovals(c)].filter(Boolean).join(" ")}</small>
+      <small data-testid="agent-chat-change-line">{changeApprovals(c)}</small>
       {c.status === "pending" && <Answer taskId={taskId} id={c.id} kind="change" act={act} onDone={onDone} />}
     </div>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, PauseCircle, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, PauseCircle, X } from "lucide-react";
 import type { AgentChange, AgentTask, HubRequest, HubSnapshot, ShellKind } from "@shared/types/aiHub";
 import type { NativeToolState } from "@shared/types/nativeHermes";
 import { hubRequest, useHub } from "../../lib/aiHub";
@@ -14,84 +14,11 @@ export interface TerminalControlProps {
   onRequest?: (request: HubRequest) => Promise<HubSnapshot | undefined>;
   /** Optional callback invoked when the user clicks "Step-by-step". */
   onStepByStep?: (taskId: string) => void;
-  /** Optional callback invoked when the user clicks "Always Allow Prefix". */
-  onAllowPrefix?: (prefix: string, task: AgentTask, change: AgentChange) => void;
-}
-
-const MULTI_SUBCOMMAND_BINARIES = new Set([
-  "systemctl",
-  "journalctl",
-  "kubectl",
-  "docker",
-  "podman",
-  "git",
-  "service",
-  "helm",
-  "aws",
-  "az",
-  "gcloud",
-  "apt",
-  "apt-get",
-  "dnf",
-  "yum",
-  "ufw",
-  "ip",
-  "nginx",
-  "pg_ctl",
-  "redis-cli",
-]);
-
-const SHELL_CHAIN_PATTERN = /&&|\|\||[;|`]|\$\(/;
-const SECRET_ARG_PATTERN = /(token|secret|password|passwd|apikey|api_key|key=|:=|:\/\/)/i;
-
-/**
- * Derives a safe normalized command prefix (1-2 tokens, no flags or secrets) for
- * "Always Allow Prefix" inline approvals, or returns null if the command is compound/unsafe.
- */
-function deriveSafeCommandPrefix(
-  command?: string,
-  parsedSubcommands?: string[],
-): string | null {
-  if (parsedSubcommands && parsedSubcommands.length === 1 && parsedSubcommands[0].trim()) {
-    return SECRET_ARG_PATTERN.test(parsedSubcommands[0]) ? null : parsedSubcommands[0].trim();
-  }
-  if (!command) return null;
-  const trimmed = command.trim();
-  if (!trimmed || SHELL_CHAIN_PATTERN.test(trimmed) || SECRET_ARG_PATTERN.test(trimmed)) return null;
-  if (parsedSubcommands && parsedSubcommands.length > 1) return null;
-
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  let idx = 0;
-  while (idx < tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]) || tokens[idx] === "sudo")) {
-    idx++;
-  }
-  const binary = tokens[idx];
-  if (!binary || binary.startsWith("-") || SECRET_ARG_PATTERN.test(binary)) return null;
-
-  const next = tokens[idx + 1];
-  if (
-    MULTI_SUBCOMMAND_BINARIES.has(binary) &&
-    next &&
-    !next.startsWith("-") &&
-    !next.startsWith("/") &&
-    !SECRET_ARG_PATTERN.test(next) &&
-    /^[A-Za-z0-9_.-]+$/.test(next)
-  ) {
-    return `${binary} ${next}`;
-  }
-
-  return binary;
 }
 
 function codeLangForShell(shell?: ShellKind): string {
   if (shell === "powershell" || shell === "pwsh") return "powershell";
   return "bash";
-}
-
-function riskBadgeClass(risk?: AgentChange["riskLevel"]): string {
-  if (risk === "destructive") return "ai-badge ai-badge-danger";
-  if (risk === "safe") return "ai-badge ai-badge-success";
-  return "ai-badge ai-badge-mode";
 }
 
 interface ControlBarViewProps {
@@ -104,7 +31,6 @@ interface ControlBarViewProps {
   onReturnControl: () => void;
   onStepByStep: () => void;
   onApproveOnce: () => void;
-  onAllowPrefix?: (prefix: string) => void;
   onDeny: () => void;
 }
 
@@ -118,17 +44,8 @@ function TerminalControlBar({
   onReturnControl,
   onStepByStep,
   onApproveOnce,
-  onAllowPrefix,
   onDeny,
 }: ControlBarViewProps): JSX.Element {
-  const safePrefix =
-    pending &&
-    pending.kind === "command" &&
-    pending.riskLevel !== "destructive" &&
-    !pending.guard
-      ? deriveSafeCommandPrefix(pending.command, pending.parsedSubcommands)
-      : null;
-
   const statusText = pending
     ? "Waiting for approval"
     : task
@@ -139,7 +56,7 @@ function TerminalControlBar({
           : "AI working"
       : "You control";
 
-  const reasonText = pending?.riskReason || pending?.description;
+  const reasonText = pending?.description;
   const targetLabel = pending?.target || task?.target?.label || sessionLabel;
 
   return (
@@ -156,11 +73,6 @@ function TerminalControlBar({
             {statusText}
             {sessionLabel ? ` · ${sessionLabel}` : ""}
           </span>
-          {pending && (
-            <span className={riskBadgeClass(pending.riskLevel)} data-testid="terminal-approval-risk">
-              {pending.riskLevel ?? "modify"}
-            </span>
-          )}
           {pending?.guard && (
             <span className="ai-badge ai-badge-danger" data-testid="terminal-approval-guard">
               Guard
@@ -198,7 +110,7 @@ function TerminalControlBar({
           className="flex flex-col gap-1.5 border-t border-divider bg-app-surface-raised/60 px-2 py-1.5"
           data-testid="terminal-approval-bar"
           role="region"
-          aria-label="Pending command approval"
+          aria-label="Pending approval"
         >
           <div className="flex flex-wrap items-center gap-2">
             {targetLabel && (
@@ -238,6 +150,24 @@ function TerminalControlBar({
             </pre>
           ) : null}
 
+          {/* The check and the rollback are part of what is approved: shown whole, like the command. */}
+          {pending.check && (
+            <pre
+              className="m-0 overflow-x-auto rounded bg-black/40 px-2 py-1 font-mono text-[11px]"
+              data-testid="terminal-approval-check"
+            >
+              <code>{`Check: ${pending.check.command}\nIt should show: ${pending.check.expected}`}</code>
+            </pre>
+          )}
+          {pending.rollback && (
+            <pre
+              className="m-0 overflow-x-auto rounded bg-black/40 px-2 py-1 font-mono text-[11px]"
+              data-testid="terminal-approval-rollback"
+            >
+              <code>{`Rollback: ${pending.rollback.command}`}</code>
+            </pre>
+          )}
+
           {pending.dryRunOutput && (
             <small className="text-app-ink-faint" data-testid="terminal-approval-dryrun">
               Preflight: {pending.dryRunOutput}
@@ -263,27 +193,6 @@ function TerminalControlBar({
               </button>
             )}
 
-            {safePrefix && onAllowPrefix && (
-              <button
-                type="button"
-                className="ai-btn-accent inline-flex items-center gap-1 rounded px-2 py-0.5"
-                data-testid="terminal-allow-prefix-btn"
-                title={`Always allow commands matching "${safePrefix}"`}
-                disabled={busy}
-                onClick={() => onAllowPrefix(safePrefix)}
-              >
-                <ShieldCheck size={12} aria-hidden="true" />
-                Always Allow Prefix ({safePrefix})
-              </button>
-            )}
-
-            {pending.riskLevel === "destructive" && (
-              <span className="inline-flex items-center gap-1 text-[11px] text-rose-300">
-                <ShieldAlert size={12} aria-hidden="true" />
-                Destructive action requires single-run approval
-              </span>
-            )}
-
             <button
               type="button"
               className="ai-btn-danger inline-flex items-center gap-1 rounded px-2 py-0.5"
@@ -303,9 +212,9 @@ function TerminalControlBar({
 
 /**
  * Compact control bar and inline approval banner docked above the active terminal.
- * Shows who controls the PTY, active blast radius / reason / syntax-highlighted command
- * preview when an approval is pending, and 1-click Approve Once / Allow Prefix / Deny /
- * Return Control / Step-by-step controls.
+ * Shows who controls the PTY and, when a change card, a file write or a setting waits for
+ * approval, what it would do in full (command, check, rollback, or the diff), with Approve
+ * Once / Deny / Return Control / Step-by-step controls. A plain command never waits here.
  */
 export function TerminalControl(props: TerminalControlProps): JSX.Element | null {
   if (props.hub === undefined && window.multissh?.nativeHermes) {
@@ -316,9 +225,7 @@ export function TerminalControl(props: TerminalControlProps): JSX.Element | null
 
 function NativeTerminalControl({
   sessionId,
-  onRequest,
   onStepByStep,
-  onAllowPrefix,
 }: TerminalControlProps): JSX.Element | null {
   const api = window.multissh.nativeHermes!;
   const [tools, setTools] = useState<NativeToolState>({ bindings: [] });
@@ -365,24 +272,6 @@ function NativeTerminalControl({
         setBusy(true);
         void api.approve(task.id, pending.id, true).finally(() => setBusy(false));
       }}
-      onAllowPrefix={(prefix) => {
-        if (!task || !pending) return;
-        if (onAllowPrefix) {
-          onAllowPrefix(prefix, task, pending);
-          return;
-        }
-        setBusy(true);
-        const dispatch =
-          onRequest ?? (typeof window.multissh?.aiHubRequest === "function" ? hubRequest : undefined);
-        const persist = dispatch
-          ? dispatch({ action: "safety-policy-save", policy: { commandAllowPrefixes: [prefix] } }).catch(
-              () => undefined,
-            )
-          : Promise.resolve();
-        void persist
-          .then(() => api.approve(task.id, pending.id, true))
-          .finally(() => setBusy(false));
-      }}
       onDeny={() => {
         if (!task || !pending) return;
         setBusy(true);
@@ -397,7 +286,6 @@ function LegacyTerminalControl({
   hub: hubProp,
   onRequest,
   onStepByStep,
-  onAllowPrefix,
 }: TerminalControlProps): JSX.Element | null {
   const storeHub = useHub();
   const hub = hubProp ?? storeHub;
@@ -460,30 +348,6 @@ function LegacyTerminalControl({
           approved: true,
         })
           .catch(() => {})
-          .finally(() => setBusy(false));
-      }}
-      onAllowPrefix={(prefix) => {
-        if (!task || !pending) return;
-        if (onAllowPrefix) {
-          onAllowPrefix(prefix, task, pending);
-          return;
-        }
-        const existing = hub.safetyPolicy?.commandAllowPrefixes ?? [];
-        const nextPrefixes = existing.includes(prefix) ? existing : [...existing, prefix];
-        setBusy(true);
-        void dispatch({
-          action: "safety-policy-save",
-          policy: { commandAllowPrefixes: nextPrefixes },
-        })
-          .catch(() => {})
-          .then(() =>
-            dispatch({
-              action: "approve",
-              taskId: task.id,
-              changeId: pending.id,
-              approved: true,
-            }).catch(() => {}),
-          )
           .finally(() => setBusy(false));
       }}
       onDeny={() => {

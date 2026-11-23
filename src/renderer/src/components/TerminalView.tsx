@@ -304,45 +304,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [inlineAiOpen, setInlineAiOpen] = useState(false);
   const [inlineAiPrompt, setInlineAiPrompt] = useState('');
+  /** A suggested command. Nothing looks at what it does: it is pasted, and the person presses Enter. */
   const [inlineSuggestion, setInlineSuggestion] = useState<{
     command: string;
     explanation: string;
-    /** May run with one key: one line, classified read-only. */
-    runnable?: boolean;
-    riskLevel?: string;
-    riskReason?: string;
     multiline?: boolean;
   } | null>(null);
-  const inlineSuggestionRef = useRef(inlineSuggestion);
-  inlineSuggestionRef.current = inlineSuggestion;
   /** Which question an answer belongs to: an answer to an earlier one, or one asked in a bar since closed, is dropped. */
   const inlineAskRef = useRef(0);
-
-  /**
-   * Runs a suggestion with one key: only one line classified read-only, and only onto an empty prompt
-   * (a half-typed line, a running program or an unanswered question would take it as input).
-   * Anything else is pasted for the person to read and run.
-   */
-  const runInlineSuggestion = (): void => {
-    const term = termRef.current;
-    const suggestion = inlineSuggestionRef.current;
-    if (!term || !suggestion) return;
-    if (suggestion.multiline) return;
-    if (!suggestion.runnable || !isAtEmptyPrompt(term)) {
-      term.paste(suggestion.command);
-    } else {
-      term.paste(suggestion.command);
-      if (sessionIdRef.current) {
-        outputTrackerRef.current?.recordEnter();
-        const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
-        write?.(sessionIdRef.current, '\r');
-      }
-    }
-    setInlineSuggestion(null);
-    setInlineAiPrompt('');
-    setInlineAiOpen(false);
-    term.focus();
-  };
   const [inlineLoading, setInlineLoading] = useState(false);
   const [terminalErrorHint, setTerminalErrorHint] = useState<string | null>(null);
   const [selectionPopover, setSelectionPopover] = useState<{ text: string; top: number; left: number } | null>(null);
@@ -1498,9 +1467,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 if (suggested) {
                   setInlineSuggestion({
                     command: suggested.command,
-                    runnable: suggested.runnable === true,
-                    riskLevel: suggested.riskLevel,
-                    riskReason: suggested.riskReason,
                     multiline: suggested.multiline,
                     // A general check picked by keyword must not pass for an answer.
                     explanation:
@@ -1549,9 +1515,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   setInlineAiOpen(false);
                   setInlineSuggestion(null);
                   termRef.current?.focus();
-                } else if (e.key === 'Enter' && e.ctrlKey && inlineSuggestion) {
-                  e.preventDefault();
-                  runInlineSuggestion();
                 } else if (e.key === 'Enter' && e.shiftKey && inlineAiPrompt.trim()) {
                   e.preventDefault();
                   const q = inlineAiPrompt.trim();
@@ -1661,26 +1624,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       Paste (Enter)
                     </button>
                   )}
-                  {inlineSuggestion.runnable && (
-                    <button
-                      type="button"
-                      onClick={() => runInlineSuggestion()}
-                      className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-emerald-500"
-                    >
-                      ▶ Run now (Ctrl+Enter)
-                    </button>
-                  )}
                 </div>
               </div>
-              {inlineSuggestion.riskLevel && inlineSuggestion.riskLevel !== 'safe' && (
-                <span
-                  className={`text-[11px] ${inlineSuggestion.riskLevel === 'destructive' ? 'text-rose-300' : 'text-amber-300'}`}
-                  title={inlineSuggestion.riskReason}
-                >
-                  {inlineSuggestion.riskLevel === 'destructive' ? 'Hard to take back' : 'Changes something'}
-                  {inlineSuggestion.riskReason ? `: ${inlineSuggestion.riskReason}` : ''}. Read it before you press Enter.
-                </span>
-              )}
+              <span className="text-[11px] text-txt-muted" data-testid="terminal-inline-read-it">
+                Read it before you press Enter.
+              </span>
               {inlineSuggestion.multiline && (
                 <span className="text-[11px] text-amber-300">
                   More than one command: copy it and run each one yourself.

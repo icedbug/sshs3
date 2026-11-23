@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { analyzeCommandSafety } from "../../src/main/ai/hub/CommandSafetyService";
 import { flagStaleMemories, type FactsRecord } from "../../src/main/ai/hub/FactsStore";
 import { KnowledgeBaseService } from "../../src/main/ai/hub/KnowledgeBaseService";
 import { LearningQueue, type QueueStore, type QueueWriteOptions } from "../../src/main/ai/hub/LearningQueue";
@@ -219,7 +218,7 @@ describe("MemoryDistiller governance, quarantine, and schema extensions", () => 
           op: "add",
           kind: "skill",
           scope: "cluster:prod",
-          title: "Unsafe verify ignored",
+          title: "A verify command is kept as it was given",
           text: "Check service",
           commandTemplate: "systemctl status nginx",
           verifyCommand: "rm -rf /tmp/something",
@@ -264,8 +263,11 @@ describe("MemoryDistiller governance, quarantine, and schema extensions", () => 
     expect(proposals?.[1].commandTemplate).toContain("<pod>");
     expect(proposals?.[1].verifyCommand).toBe("kubectl get pods");
 
-    // Destructive verifyCommand is stripped by CommandSafetyService check.
-    expect(proposals?.[2].verifyCommand).toBeUndefined();
+    // Nothing looks at what a verify command does: it is kept as given. A proposal that carries a
+    // command is of the high kind and waits for a person, whatever the command is.
+    expect(proposals?.[2].verifyCommand).toBe("rm -rf <path>");
+    expect(proposals?.[2].riskLevel).toBe("high");
+    expect(proposals?.[2].requiresApproval).toBe(true);
   });
 });
 
@@ -586,9 +588,12 @@ describe("ServerFacts JSON/POSIX parsing, partial profile, triage telemetry, Dra
     expect(jsonFacts.os?.pretty).toBe("Ubuntu 24.04 LTS");
   });
 
-  it("keeps all TRIAGE_COMMANDS safe under CommandSafetyService and parses triage telemetry + Drain log clusters", () => {
+  it("keeps every TRIAGE_COMMANDS entry one known program that only looks, and parses triage telemetry + Drain log clusters", () => {
+    // Nothing in the app checks these commands. Whoever adds one adds how it starts here.
+    const LOOKS = ["cat /proc/", "nproc", "free -m", "df -P", "dmesg -T", "journalctl -p "];
     for (const cmd of TRIAGE_COMMANDS) {
-      expect(analyzeCommandSafety(cmd.command).riskLevel).toBe("safe");
+      expect([cmd.command, LOOKS.some((start) => cmd.command.startsWith(start))]).toEqual([cmd.command, true]);
+      expect([cmd.command, /[;&|<>`]|\$\(/.test(cmd.command)]).toEqual([cmd.command, false]);
     }
     const script = buildTriageScript();
     expect(script).toContain("@@sshs3:load");

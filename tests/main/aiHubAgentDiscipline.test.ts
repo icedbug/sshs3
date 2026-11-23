@@ -86,9 +86,16 @@ describe("continuationMessage", () => {
   it("asks once for the check when something was changed and nothing verified it since", () => {
     const state = newDiscipline();
     noteToolResult(state, "terminal_command", { command: "df -h" }, { exitCode: 0, output: "" });
-    expect(continuationMessage(state)).toBeUndefined(); // looking is not changing
+    expect(continuationMessage(state)).toBeUndefined(); // a command is not a change
 
+    // Nothing looks at what a command does, so a command is never counted as a change: not this one either.
     noteToolResult(state, "terminal_command", { command: "systemctl restart nginx" }, { exitCode: 0, output: "" });
+    noteToolResult(state, "sshs3_cluster_exec", { command: "systemctl restart nginx" }, { ok: true });
+    expect(state.madeChanges).toBe(false);
+    expect(continuationMessage(state)).toBeUndefined();
+
+    // A file that was written is a change.
+    noteToolResult(state, "file_write", { path: "/etc/nginx/x.conf" }, { ok: true });
     expect(state.madeChanges).toBe(true);
     expect(continuationMessage(state)).toMatch(/no check has passed/);
     expect(continuationMessage(state)).toBeUndefined(); // asked once
@@ -102,8 +109,19 @@ describe("continuationMessage", () => {
     expect(state.verifiedSinceChange).toBe(false);
     noteToolResult(state, "terminal_verify", { command: "nginx -t", expected: "syntax is ok" }, { exitCode: 0, output: "nginx: syntax is ok" });
     expect(continuationMessage(state)).toBeUndefined();
-    noteToolResult(state, "sshs3_cluster_exec", { command: "systemctl reload nginx" }, { ok: true });
+    // A change card whose check did not pass and that was not taken back: a change nothing has verified.
+    noteToolResult(state, "sshs3_change", { command: "systemctl reload nginx" }, { checkPassed: false, rolledBack: false });
     expect(continuationMessage(state)).toMatch(/no check has passed/);
+  });
+
+  it("takes a change card whose check passed, or that was rolled back, as verified", () => {
+    const passed = newDiscipline();
+    noteToolResult(passed, "sshs3_change", { command: "systemctl reload nginx" }, { checkPassed: true });
+    expect(passed.madeChanges).toBe(true);
+    expect(continuationMessage(passed)).toBeUndefined();
+    const undone = newDiscipline();
+    noteToolResult(undone, "sshs3_change", { command: "systemctl reload nginx" }, { checkPassed: false, rolledBack: true });
+    expect(continuationMessage(undone)).toBeUndefined();
   });
 
   it("does not count a failed or refused change as a change", () => {
@@ -260,20 +278,21 @@ describe("the run loop holds the agent to its work", () => {
     expect(events.some((e) => e.type === "todos.updated")).toBe(false);
   });
 
-  it("asks for the check after a change, and not after only looking", async () => {
+  it("asks for the check after a file was written, and not after a command", async () => {
     const changed = await run(
-      [call("terminal_command", { command: "systemctl reload nginx" }), say("Reloaded."), say("Reloaded; I could not verify the stream from here, so this is unverified.")],
-      (req) => (req.action === "command" ? { exitCode: 0, output: "" } : {}),
+      [call("file_write", { path: "/etc/nginx/x.conf", content: "x", expected: "h", description: "raise the timeout" }), say("Written."), say("Written; I could not verify the stream from here, so this is unverified.")],
+      (req) => (req.action === "file-write" ? { ok: true } : {}),
     );
     expect(changed.bodies).toHaveLength(3);
     expect(lastUser(changed.bodies[2])).toContain("no check has passed");
     expect(changed.events.find((e) => e.type === "run.completed")!.output).toContain("unverified");
 
-    const looked = await run(
-      [call("terminal_command", { command: "df -h" }), say("Disk is at 41%.")],
-      (req) => (req.action === "command" ? { exitCode: 0, output: "41%" } : {}),
+    // A command is not counted as a change, whatever it does: nothing looks at it.
+    const ran = await run(
+      [call("terminal_command", { command: "systemctl reload nginx" }), say("Reloaded.")],
+      (req) => (req.action === "command" ? { exitCode: 0, output: "" } : {}),
     );
-    expect(looked.bodies).toHaveLength(2);
+    expect(ran.bodies).toHaveLength(2);
   });
 
   it("puts what the team knows about a failure into the failed command's result", async () => {

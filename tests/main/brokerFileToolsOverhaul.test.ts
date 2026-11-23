@@ -14,7 +14,7 @@ import {
   ToolBrokerError,
   showsExpected,
 } from "../../src/main/ai/hub/ToolBroker";
-import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/CommandSafetyService";
+import { DEFAULT_SAFETY_POLICY } from "../../src/main/ai/hub/safetyPolicy";
 import type {
   AgentChange,
   AgentTask,
@@ -512,25 +512,24 @@ describe("ToolBroker overhaul", () => {
     });
   });
 
-  it("supports dryRun previews, preflightCommand snapshots, and non-interactive fail-fast approval_required", async () => {
-    // 1. Dry-run preview returns preview without executing the live command
+  it("refuses a dryRun request, takes preflightCommand snapshots, and fails fast with approval_required where nobody can be asked", async () => {
+    // 1. There is no dry run any more. A caller that still asks for one is refused, and the real command does not run in its place.
     const drySetup = await setupBroker({
       mode: "autonomous",
       taskOverrides: { id: "task-dry" },
     });
     disposals.push(() => drySetup.broker.dispose(), () => drySetup.terminals.dispose());
-    const dryRes = (await drySetup.broker.invoke(drySetup.cap.key, {
-      action: "command",
-      command: "kubectl apply -f deploy.yaml",
-      dryRun: true,
-    })) as { dryRun: boolean; previewCommand: string; output: string };
+    await expect(
+      drySetup.broker.invoke(drySetup.cap.key, {
+        action: "command",
+        command: "kubectl apply -f deploy.yaml",
+        dryRun: true,
+      } as never),
+    ).rejects.toMatchObject({ code: "dry_run_removed" });
+    expect(drySetup.executedCommands).toEqual([]);
+    expect(drySetup.task.changes).toEqual([]);
 
-    expect(dryRes.dryRun).toBe(true);
-    expect(dryRes.previewCommand).toBe("kubectl apply -f deploy.yaml --dry-run=server");
-    expect(drySetup.executedCommands).toContain("kubectl apply -f deploy.yaml --dry-run=server");
-    expect(drySetup.executedCommands).not.toContain("kubectl apply -f deploy.yaml");
-
-    // 2. Non-interactive fail-fast returns approval_required immediately and frees ledger key
+    // 2. Where nobody can be asked, a change card comes back as approval_required at once and frees its ledger key.
     const headlessSetup = await setupBroker({
       mode: "assisted",
       taskOverrides: { id: "task-headless" },
@@ -538,9 +537,11 @@ describe("ToolBroker overhaul", () => {
     });
     disposals.push(() => headlessSetup.broker.dispose(), () => headlessSetup.terminals.dispose());
     const gateRes = (await headlessSetup.broker.invoke(headlessSetup.cap.key, {
-      action: "command",
+      action: "change",
       command: "systemctl reload nginx",
       description: "reload nginx",
+      check: { command: "systemctl is-active nginx", expected: "active" },
+      rollback: "systemctl restart nginx",
       idempotencyKey: "k-reload",
       preflightCommand: "systemctl status nginx",
     })) as { ok: boolean; status: string; approvalRequired: boolean; changeId: string };
@@ -550,10 +551,17 @@ describe("ToolBroker overhaul", () => {
       status: "approval_required",
       approvalRequired: true,
     });
+    // Nothing rates a command: the answer carries no risk.
+    expect(gateRes).not.toHaveProperty("riskLevel");
+    expect(gateRes).not.toHaveProperty("riskReason");
     expect(headlessSetup.broker.waitingOnPerson(headlessSetup.task.id)).toBe(false);
     expect(headlessSetup.broker.getIdempotencyEntry(headlessSetup.task.id, "k-reload")).toBeUndefined();
+    expect(headlessSetup.executedCommands).toEqual([]);
+    // A plain command there is not a question for anybody: it runs.
+    await headlessSetup.broker.invoke(headlessSetup.cap.key, { action: "command", command: "systemctl reload nginx" });
+    expect(headlessSetup.executedCommands).toEqual(["systemctl reload nginx"]);
 
-    // 3. Preflight snapshot captures command state before execution
+    // 3. Preflight snapshot captures command state before execution. Nothing looks at what the preflight command does.
     const snapSetup = await setupBroker({
       mode: "autonomous",
       taskOverrides: { id: "task-snap" },
@@ -571,17 +579,15 @@ describe("ToolBroker overhaul", () => {
     expect(snapRes.preflightSnapshot).toContain("pre-snapshot: active");
   });
 
-  it("enforces two-person approval (no self-approval or duplicate approver) and sessionAllowPrefixes", async () => {
+  it("enforces two-person approval (no self-approval or duplicate approver) for a change card, and asks nobody about a plain command", async () => {
     const policy: SafetyPolicyConfig = {
       ...DEFAULT_SAFETY_POLICY,
       requirePeerApprovalOnProd: true,
     };
     const twoPaSetup = await setupBroker({
       mode: "assisted",
-      taskOverrides: {
-        id: "task-2pa",
-        sessionAllowPrefixes: ["systemctl status", "journalctl -u"],
-      },
+      taskOverrides: { id: "task-2pa" },
+      runOutput: (cmd) => ({ exitCode: 0, output: cmd.startsWith("systemctl is-active") ? "active" : "ok" }),
       safetyContext: () => ({
         policy,
         targetTags: ["prod"],
@@ -592,14 +598,17 @@ describe("ToolBroker overhaul", () => {
     disposals.push(() => twoPaSetup.broker.dispose(), () => twoPaSetup.terminals.dispose());
 
     const pendingPromise = twoPaSetup.broker.invoke(twoPaSetup.cap.key, {
-      action: "command",
+      action: "change",
       command: "systemctl restart app",
       description: "restart app in prod",
+      check: { command: "systemctl is-active app", expected: "active" },
+      rollback: "systemctl stop app",
     });
+    await vi.waitFor(() => expect(twoPaSetup.task.status).toBe("waiting"));
 
     const change = twoPaSetup.task.changes[0]!;
     expect(change.requiredApprovals).toBe(2);
-    expect(twoPaSetup.task.status).toBe("waiting");
+    expect(twoPaSetup.executedCommands).toEqual([]);
 
     // The requester's own approval is one of the two, never both
     expect(
@@ -626,21 +635,15 @@ describe("ToolBroker overhaul", () => {
     await pendingPromise;
     expect(twoPaSetup.executedCommands).toContain("systemctl restart app");
 
-    // Non-prod assisted run with sessionAllowPrefixes skips approval for allowed prefix
-    const devSetup = await setupBroker({
-      mode: "assisted",
-      taskOverrides: {
-        id: "task-allowprefix",
-        sessionAllowPrefixes: ["systemctl reload"],
-      },
-    });
-    disposals.push(() => devSetup.broker.dispose(), () => devSetup.terminals.dispose());
-    await devSetup.broker.invoke(devSetup.cap.key, {
-      action: "command",
-      command: "systemctl reload nginx",
-    });
-    expect(devSetup.executedCommands).toContain("systemctl reload nginx");
-    expect(devSetup.task.changes[0]?.decidedHow).toBe("policy");
+    // A plain command on the same production target needs nobody: neither rule counts for it.
+    const before = twoPaSetup.executedCommands.length;
+    await twoPaSetup.broker.invoke(twoPaSetup.cap.key, { action: "command", command: "systemctl restart app" });
+    expect(twoPaSetup.executedCommands.slice(before)).toEqual(["systemctl restart app"]);
+    const plain = twoPaSetup.task.changes.at(-1)!;
+    expect(plain.requiredApprovals).toBeUndefined();
+    expect(plain.approvals).toBeUndefined();
+    expect(plain.decidedHow).toBe("policy");
+    expect(twoPaSetup.task.status).toBe("running");
   });
 
   it("invokes pre_change and post_change lifecycle hooks and allows pre_change to patch or block changes", async () => {

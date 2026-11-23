@@ -11,15 +11,17 @@ import type {
   WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
 import { APP_OPS, type AppOpClass } from "./AppGuard";
-import { analyzeCommandSafety, isProdTag } from "./CommandSafetyService";
+import { isProdTag } from "./safetyPolicy";
 import { boundedContext, clip, exactHash, maskContext } from "./privacy";
 
 /**
  * Plan first, then act. For a change that is risky or that the user asked to
  * see planned (via `mode === "plan"` or `/plan`), the agent proposes a
- * structured plan, a second read-only run looks for what is wrong with it, and
- * the user decides. While a plan waits, and in a conversation where a plan was
- * asked for and none is approved yet, nothing that changes a system runs. None
+ * structured plan, a second run that only looks searches it for what is wrong,
+ * and the user decides. While a plan waits, and in a conversation where a plan
+ * was asked for and none is approved yet, change cards, file writes, tools of
+ * other systems and changing settings are held. Commands are not: nothing looks
+ * at what a command does, so the agent is told to make no change with one. None
  * of this calls a model itself.
  */
 
@@ -37,7 +39,7 @@ export const MAX_PLAN_REVISIONS = 3;
 export const PLAN_TOOL = {
   name: "sshs3_plan_propose",
   description:
-    "Propose a plan before changing anything, for the user to approve. Use it when the user asks for a plan (`/plan`), and on your own for a change that is risky: several steps on production, data that could be lost, something hard to undo. Investigate first (read-only) so the plan rests on what is actually there. Each step names its target, the exact command where there is one, its risk, the check that will show it worked and, for medium or high risk, how to undo it. The plan is reviewed by a second read-only run and then waits for the user: until they approve, commands that change something and file writes are refused. What the approval covers: the exact commands the plan lists run without asking the user again, except destructive ones, which always ask. Do not write that each step will be approved separately unless that is what should happen: then set `askBeforeEachChange`, and every changing command asks again. After calling this, tell the user the plan briefly, with the review's findings, and stop.",
+    "Propose a plan before changing anything, for the user to approve. Use it when the user asks for a plan (`/plan`), and on your own for a change that is risky: several steps on production, data that could be lost, something hard to undo. Investigate first, with commands that only look, so the plan rests on what is actually there. Each step names its target, the exact command where there is one, its risk, the check that will show it worked and, for medium or high risk, how to undo it. The plan is reviewed by a second run that only looks and then waits for the user: until they approve, change cards (sshs3_change) and file writes are refused. terminal_command still runs, so change nothing with it. What the approval covers: a change card the plan lists, made with sshs3_change exactly as the step gives it (command, check, checkExpected, rollback), runs without asking the user again. Do not write that each step will be approved separately unless that is what should happen: then set `askBeforeEachChange`, and every change card asks again. After calling this, tell the user the plan briefly, with the review's findings, and stop.",
   parameters: {
     type: "object",
     properties: {
@@ -51,7 +53,7 @@ export const PLAN_TOOL = {
           properties: {
             action: { type: "string", description: "What is done, in one sentence." },
             target: { type: "string", description: "The server, cluster, file or service." },
-            command: { type: "string", description: "The exact command, when the step is one. An approved plan's commands run without asking again." },
+            command: { type: "string", description: "The exact command, when the step is one. Made with sshs3_change exactly as listed here, it runs without asking again once the plan is approved." },
             risk: { type: "string", enum: ["low", "medium", "high"] },
             check: { type: "string", description: "The command and expected output that show the step worked. The command must exit with code 0 when the step worked: a check whose last command exits non-zero on success (a `diff` that finds the change, a `grep` that should match nothing) counts as failed and the step is rolled back." },
             checkExpected: { type: "string", description: "For a checked change, supply the exact expected text and give its exact command in check." },
@@ -69,7 +71,7 @@ export const PLAN_TOOL = {
       },
       askBeforeEachChange: {
         type: "boolean",
-        description: "True when the user should be asked again before each command that changes something, also the ones this plan lists (the user asked for that). Left out, approving the plan covers its listed commands.",
+        description: "True when the user should be asked again before each change card, also the ones this plan lists (the user asked for that). Left out, approving the plan covers the change cards it lists.",
       },
     },
     required: ["goal", "steps"],
@@ -102,7 +104,7 @@ function whole(value: unknown, step: number, what: string): { text: string } | {
  * A plan whose own words say that its approval is not enough for its changes
  * ("separate approval before each modifying command", "plan approval must not
  * substitute"). The person reads those words on the card, so they hold: such
- * a plan's commands ask again. It only ever makes more be asked.
+ * a plan's change cards ask again. It only ever makes more be asked.
  */
 const PROMISES_TO_ASK = [
   // eslint-disable-next-line security/detect-unsafe-regex -- alternatives of fixed words, each optional group taken at most once; the text is a plan's bounded fields
@@ -151,9 +153,6 @@ export function parsePlan(
     const shownCommand = whole(s.command, n, "command");
     if ("error" in shownCommand) return shownCommand;
     const command = shownCommand.text;
-    // A command that deletes or overwrites is never "low risk", whatever the plan calls it.
-    if (command && risk === "low" && analyzeCommandSafety(command).riskLevel === "destructive")
-      return { error: `Step ${n}: \`${command.slice(0, 80)}\` is destructive; it cannot be low risk, and it needs a rollback` };
     const shownExpected = whole(s.checkExpected, n, "expected check output");
     if ("error" in shownExpected) return shownExpected;
     if (s.observeSeconds !== undefined && (typeof s.observeSeconds !== "number" || !Number.isInteger(s.observeSeconds) || s.observeSeconds < 0 || s.observeSeconds > 180))
@@ -198,7 +197,7 @@ export function newPlan(
 
 export interface PlanApprovalDecision {
   note?: string;
-  /** Explicit user choice to require confirmation before every modifying step/command. */
+  /** Explicit user choice to be asked before every change card, also the ones the plan lists. */
   askPerStep?: boolean;
   /** Legacy alias for `askPerStep`. */
   askEach?: boolean;
@@ -318,9 +317,11 @@ export function planPending(task: Pick<AgentTask, "mode" | "plan" | "messages">)
 }
 
 /**
- * Why a tool call may not run now, if it may not: while a plan is pending,
- * nothing that changes a system does. Reading is always allowed, so the agent
- * can investigate for its plan.
+ * Why a tool call may not run now, if it may not: while a plan is pending, a
+ * change card, a file write, a tool of another system and a changing setting
+ * are held. A command is not held, so the agent can investigate for its plan:
+ * nothing looks at what a command does, and the agent is told to change
+ * nothing with one.
  */
 /** What a management tool's call would do: read, or write something. */
 function appOpClass(tool: string, args: Record<string, unknown>): AppOpClass | undefined {
@@ -336,14 +337,10 @@ export function planGate(
   args: Record<string, unknown>,
 ): string | undefined {
   if (!planPending(task)) return undefined;
-  const command = typeof args.command === "string" ? args.command : "";
   const changes =
     tool === "file_write" ||
     // A change is a change whatever its check says.
     tool === "sshs3_change" ||
-    ((tool === "terminal_command" || tool === "sshs3_cluster_exec") &&
-      command !== "" &&
-      analyzeCommandSafety(command).riskLevel !== "safe") ||
     // A tool on somebody else's MCP server changes something outside sshs3, unless
     // that server said the tool only looks; the call itself decides below.
     tool.startsWith("mcp__") ||
@@ -354,23 +351,21 @@ export function planGate(
     appOpClass(tool, args) === "guard-if";
   if (!changes) return undefined;
   if (task.plan?.status === "proposed") {
-    return "A plan is waiting for the user's approval. Nothing that changes a system runs until they approve it. Tell the user the plan and stop; read-only checks are still allowed.";
+    return "A plan is waiting for the user's approval. No change card and no file write runs until they approve it. Tell the user the plan and stop. Commands still run; make no change.";
   }
   if (isPlanMode(task.mode) && !PLAN_FIRST.test(lastUserText(task))) {
-    return "This conversation is in Plan mode. Propose a plan with sshs3_plan_propose and wait for the user's approval before changing anything; read-only checks are allowed.";
+    return "This conversation is in Plan mode. Propose a plan with sshs3_plan_propose and wait for the user's approval before changing anything. Commands still run; make no change.";
   }
-  return "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything; read-only checks are allowed.";
+  return "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything. Commands still run; make no change.";
 }
 
 /**
  * Whether an approved plan covers this command, so it need not be asked about
- * again: the exact command of a step that has not run yet, and not a
- * destructive one. Marks the step as run.
+ * again: the exact command of a step that has not run yet. Marks the step as run.
  */
 export function planCoversCommand(
   task: AgentTask,
   commandHash: string | undefined,
-  riskLevel: string | undefined,
   now = Date.now(),
   action?: { targetKey?: string; check?: { command?: string; expected?: string }; rollback?: string; observeSeconds?: number; extras?: boolean },
   consume = true,
@@ -379,7 +374,6 @@ export function planCoversCommand(
   if (task.plan?.status !== "approved" || !commandHash) return false;
   // The plan, or the person approving it, said that every change is asked about.
   if (task.plan.askEach) return false;
-  if (riskLevel === "destructive") return false;
   // Matched on the exact command, never on how it looks once its secrets are masked.
   const step = task.plan.steps.find((s) =>
     !s.ranAt && s.approvedTarget === action.targetKey && s.commandHash === commandHash &&
@@ -446,8 +440,8 @@ export function approvalMessage(plan: AgentPlan, note?: string): string {
     "[sshs3] The user approved your plan. Carry it out now, step by step, in order.",
     "Your task list has been set to the plan's steps. Run each step's check before the next step; if a check fails, stop, do not continue with later steps, and report (roll the step back if the plan says how and it is safe to).",
     plan.askEach
-      ? `Every command that changes something is asked about before it runs, also the ones the plan lists: ${ASKS_EACH_WHY[plan.askEach]}. Run them one at a time and wait for each answer; read-only checks run as usual. Anything the plan does not list is a deviation: say so.`
-      : "Commands exactly as the plan lists them run without asking the user again; a destructive one still asks. Do not tell the user that each change will be approved separately: it will not. Anything else you find you need is a deviation: say so, and it will be asked about as usual.",
+      ? `Every change card is asked about before it runs, also the ones the plan lists: ${ASKS_EACH_WHY[plan.askEach]}. Make them one at a time with sshs3_change and wait for each answer. Commands that only look run as usual. Anything the plan does not list is a deviation: say so.`
+      : "Make each change with sshs3_change, exactly as the plan lists it: then it runs without asking the user again. Do not tell the user that each change will be approved separately: it will not. Commands that only look run as usual. Anything else you find you need is a deviation: say so, and it will be asked about as usual.",
     ...(note ? [`The user added: ${boundedContext(note, 1000)}`] : []),
     "",
     renderPlan(plan),

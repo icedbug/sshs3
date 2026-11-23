@@ -47,25 +47,35 @@ async function setup(mode: AgentTask["mode"], approvalWaitMs = 60_000) {
   return { broker, t, capability };
 }
 
+/** A change card: what a person is asked about. The terminal of these tests prints "ok" for everything. */
+const CARD = { action: "change", command: "systemctl restart nginx", check: { command: "systemctl is-active nginx", expected: "ok" }, rollback: "systemctl stop nginx" };
+
 describe("how a change was decided", () => {
   it("records the safety rules, a person, a timeout and a stop, each as itself", async () => {
     const auto = await setup("autonomous");
-    await auto.broker.invoke(auto.capability.key, { action: "command", command: "uptime" });
+    await auto.broker.invoke(auto.capability.key, CARD);
     expect(auto.t.changes[0]).toMatchObject({ status: "completed", decidedHow: "policy" });
 
+    // A plain command is never asked about, in Ask first either. Its record says no rule was needed.
+    const plain = await setup("assisted");
+    await plain.broker.invoke(plain.capability.key, { action: "command", command: "systemctl restart nginx" });
+    expect(plain.t.changes[0]).toMatchObject({ status: "completed", decidedHow: "policy" });
+    expect(plain.t.changes[0].decidedBy).toBeUndefined();
+    expect(plain.t.status).toBe("running");
+
     const asked = await setup("assisted");
-    const p = asked.broker.invoke(asked.capability.key, { action: "command", command: "systemctl restart nginx" });
+    const p = asked.broker.invoke(asked.capability.key, CARD);
     await vi.waitFor(() => expect(asked.t.status).toBe("waiting"));
     asked.broker.approve(asked.t.id, asked.t.changes[0].id, true);
     await p;
     expect(asked.t.changes[0].decidedHow).toBe("person");
 
     const late = await setup("assisted", 20);
-    await expect(late.broker.invoke(late.capability.key, { action: "command", command: "systemctl restart nginx" })).rejects.toThrow();
+    await expect(late.broker.invoke(late.capability.key, CARD)).rejects.toThrow();
     expect(late.t.changes[0]).toMatchObject({ status: "denied", decidedHow: "timeout" });
 
     const stopped = await setup("assisted");
-    const q = stopped.broker.invoke(stopped.capability.key, { action: "command", command: "systemctl restart nginx" });
+    const q = stopped.broker.invoke(stopped.capability.key, CARD);
     await vi.waitFor(() => expect(stopped.t.status).toBe("waiting"));
     stopped.t.status = "interrupted";
     stopped.broker.revoke(stopped.t.id);
@@ -75,7 +85,7 @@ describe("how a change was decided", () => {
 
   it("gives the agent what the person said with the answer, and keeps the run going after a no", async () => {
     const no = await setup("assisted");
-    const p = no.broker.invoke(no.capability.key, { action: "command", command: "systemctl restart nginx" });
+    const p = no.broker.invoke(no.capability.key, CARD);
     await vi.waitFor(() => expect(no.t.status).toBe("waiting"));
     no.broker.approve(no.t.id, no.t.changes[0].id, false, "reload instead of restart");
     await expect(p).rejects.toThrow("Not approved. The person said: reload instead of restart");
@@ -83,7 +93,7 @@ describe("how a change was decided", () => {
     expect(no.t.changes[0]).toMatchObject({ status: "denied", decisionNote: "reload instead of restart" });
 
     const yes = await setup("assisted");
-    const q = yes.broker.invoke(yes.capability.key, { action: "command", command: "systemctl restart nginx" });
+    const q = yes.broker.invoke(yes.capability.key, CARD);
     await vi.waitFor(() => expect(yes.t.status).toBe("waiting"));
     yes.broker.approve(yes.t.id, yes.t.changes[0].id, true, "watch the error log after");
     expect(await q).toMatchObject({ personNote: "Approved with a note from the person: watch the error log after" });
@@ -148,11 +158,13 @@ describe("a person changing the safety rules", () => {
       await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
     await hub.initialize();
-    const snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: true } });
+    // An older window may still send the switches about commands that are gone: they are left out, not kept.
+    const snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: true } as never });
     expect(snap.safetyPolicyChanged?.by).toBeTruthy();
+    expect(snap.safetyPolicy).toEqual({ requireApprovalOnProdTags: false });
     await vi.waitFor(async () => {
       const log = (await hub.request({ action: "audit-read" })).reply?.audit;
-      expect(log?.entries[0]).toMatchObject({ kind: "setting", what: "Safety policy: always ask before a change on production: on → off" });
+      expect(log?.entries[0]).toMatchObject({ kind: "setting", what: "Safety policy: always ask before a change card or a file write on production: on → off" });
     });
   });
 });

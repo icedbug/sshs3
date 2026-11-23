@@ -8,7 +8,7 @@ import { NativeToolBridge, type NativeOwner } from "../../src/main/ai/desktop/Na
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
 import { ToolBroker } from "../../src/main/ai/hub/ToolBroker";
 import { HubStore } from "../../src/main/ai/hub/HubStore";
-import type { AgentTask } from "../../src/shared/types/aiHub";
+import type { AgentChange, AgentTask } from "../../src/shared/types/aiHub";
 import type { ToolRequest } from "../../src/main/ai/hub/ToolBroker";
 
 const disposals: Array<() => unknown> = [];
@@ -30,7 +30,17 @@ async function setup() {
   }
   const store = new HubStore(path.join(directory, "hub.json"));
   const changed = vi.fn();
-  const file = vi.fn(async (_task: AgentTask, _request: ToolRequest) => ({ content: "file content", hash: "expected-hash" }));
+  const file = vi.fn(async (task: AgentTask, request: ToolRequest, authorize?: (change: AgentChange) => Promise<void>) => {
+    // As the real file tools do: a write is put to the broker as a change before anything is written.
+    // A file write is what waits for a person here. A command runs at once, with nobody asked.
+    if (request.action === "file-write" && authorize) {
+      const change: AgentChange = { id: `file-${task.changes.length}`, kind: "file", target: task.target!.label, description: request.description ?? "Update file", status: "pending", at: Date.now() };
+      task.changes.push(change);
+      await authorize(change);
+      change.status = "completed";
+    }
+    return { content: "file content", hash: "expected-hash" };
+  });
   const broker = new ToolBroker(terminals, {
     context: async (task) => ({ text: terminals.context(task.target!.sessionId), source: task.target!.sessionId }),
     memory: async () => [], file, changed,
@@ -68,12 +78,13 @@ describe("native Hermes terminal authority", () => {
     const { body: { result: bound } } = await post("begin", { platform: "desktop" });
     expect(bound).toMatchObject({ bound: true, active: true, target: "host-one" });
     bridge.selectTerminal("two");
-    const command = post("tool", { request: { action: "command", command: "echo healthy", sessionId: "two", description: "Check health" } });
-    await vi.waitFor(() => expect(bridge.snapshot().bindings[0].task.status).toBe("waiting"));
+    // A command runs at once: nobody is asked, and nothing waits.
+    const command = await post("tool", { request: { action: "command", command: "echo healthy", sessionId: "two", description: "Check health" } });
+    expect(command.body.result).toMatchObject({ exitCode: 0, source: "terminal:one" });
     const task = bridge.snapshot().bindings[0].task;
-    expect(writes).toHaveLength(2);
-    bridge.approve(task.id, task.changes[0].id, true);
-    expect((await command).body.result).toMatchObject({ exitCode: 0, source: "terminal:one" });
+    expect(task.changes[0]).toMatchObject({ status: "completed", decidedHow: "policy" });
+    expect(task.changes[0].decidedBy).toBeUndefined();
+    expect(writes).toHaveLength(3);
     expect(writes[2].id).toBe("one");
     await post("end");
     expect(terminals.get("one")!.owner).toBeUndefined();
@@ -96,11 +107,13 @@ describe("native Hermes terminal authority", () => {
     const { bridge, post, writes, terminals } = await setup();
     bridge.selectTerminal("one");
     await post("begin", { platform: "desktop" });
-    const command = post("tool", { request: { action: "command", command: "echo pending", description: "Inspect" } });
+    // A file write waits for a person: that is the approval a takeover revokes.
+    const write = post("tool", { request: { action: "file-write", path: "/etc/service.conf", content: "x", expected: "expected-hash", description: "Edit" } });
     await vi.waitFor(() => expect(bridge.snapshot().bindings[0].task.status).toBe("waiting"));
     const task = bridge.snapshot().bindings[0].task;
     bridge.takeover(task.id);
-    expect((await command).status).toBe(400);
+    expect((await write).status).toBe(400);
+    expect(task.changes[0]).toMatchObject({ kind: "file", status: "denied" });
     expect(writes).toHaveLength(2);
     await post("end");
     expect(task.status).toBe("interrupted");
@@ -139,10 +152,10 @@ describe("native Hermes terminal authority", () => {
     await post("begin", { platform: "desktop" });
     const task = bridge.snapshot().bindings[0].task;
     task.maxCommands = 1;
-    const verify = post("tool", { request: { action: "verify", command: "echo healthy", expected: "healthy", description: "Verify service" } });
-    await vi.waitFor(() => expect(task.status).toBe("waiting"));
-    bridge.approve(task.id, task.changes[0].id, true);
-    expect((await verify).status).toBe(200);
+    // A verification is a command: it runs at once, with nobody asked.
+    const verify = await post("tool", { request: { action: "verify", command: "echo healthy", expected: "healthy", description: "Verify service" } });
+    expect(verify.status).toBe(200);
+    expect(task.status).toBe("running");
     expect(task.verification).toBe("verified");
     expect((await post("tool", { request: { action: "command", command: "echo extra" } })).body.error).toContain("budget exhausted");
   });
@@ -188,18 +201,17 @@ describe("native Hermes terminal authority", () => {
     const processResult = promisify(execFile)(python, ["-I", "-B", path.resolve("tests/main/fixtures/nativeHermesToolsContract.py")], {
       env: safeEnv, timeout: 60_000, windowsHide: true,
     });
-    await vi.waitFor(() => expect(bridge.snapshot().bindings[0]?.task.status).toBe("waiting"), { timeout: 30_000 });
-    const task = bridge.snapshot().bindings[0].task;
-    expect(writes).toHaveLength(2);
-    bridge.selectTerminal("two");
-    bridge.approve(task.id, task.changes[0].id, true);
+    // The fixture runs to its end by itself: its command runs at once, with nobody asked. What it leaves
+    // waiting is a file write, which its own native Stop then revokes.
     const output = await processResult;
     expect(output.stdout).toContain('"nativePlugin": "passed"');
     expect(output.stdout).toContain('"secretScrub": "passed"'); // pragma: allowlist secret
+    const task = bridge.snapshot().bindings[0].task;
     expect(writes[2].id).toBe("one");
     expect(terminals.get("one")!.owner).toBeUndefined();
     expect(task.status).toBe("interrupted");
-    expect(task.changes[1].status).toBe("denied");
+    expect(task.changes[0]).toMatchObject({ kind: "command", status: "completed", decidedHow: "policy" });
+    expect(task.changes[1]).toMatchObject({ kind: "file", status: "denied" });
     expect(writes).toHaveLength(3);
   }, 60_000);
 });

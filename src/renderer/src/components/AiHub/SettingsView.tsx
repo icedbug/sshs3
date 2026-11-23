@@ -65,7 +65,7 @@ const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
   {
     role: "fastTriage",
     label: "Quick checks (fast model)",
-    hint: "Read-only investigations and one-line terminal command suggestions.",
+    hint: "Investigations and one-line terminal command suggestions.",
   },
   {
     role: "backgroundDistill",

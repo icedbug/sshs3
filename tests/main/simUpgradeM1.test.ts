@@ -456,7 +456,6 @@ describe("M1 Backend Bug Fixes, Demo Seeding & Interactive Actions", () => {
           command: "kubectl get pods",
           status: "completed",
           exitCode: 0,
-          riskLevel: "safe",
           at: Date.now(),
         },
       ],

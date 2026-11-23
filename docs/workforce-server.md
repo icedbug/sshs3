@@ -69,11 +69,11 @@ TLS, or the address travels in the clear.
 
 ## Notifications, and answering from a phone
 
-An agent that asks before a command waits for a person. So that somebody
+An agent that asks before a change waits for a person. So that somebody
 knows: under Settings → Notifications, add a channel (Slack incoming webhook,
 Microsoft Teams webhook, ntfy, or any address that takes a JSON POST). When
 something starts to wait in the inbox, the channel is told once, with who asks,
-what, on which target, the risk, and a link to the item.
+what, on which target, and a link to the item.
 
 - Set the address people reach the server at, in the same place or with
   `SSHS3_PUBLIC_URL` (which then cannot be changed in the interface). Without
@@ -88,11 +88,13 @@ what, on which target, the risk, and a link to the item.
   their own conversations and inbox. A notification in a shared channel says
   whose answer is awaited; a teammate who opens the link sees their own inbox.
 - **Two people, where the rule asks for it.** With "Two people must approve a
-  change on production" switched on (Settings → Safety), a change or a plan
-  on a server tagged `prod`, `production` or `critical` is also put to a
-  second person. It is in the inbox of everybody who may be that person: an
-  administrator of this server, or a member of one of its approver groups,
-  and never the person whose agent asks. Their notification channels are
+  change card or a file write on production" switched on (Settings → Safety),
+  a change card, a file write or a plan on a server tagged `prod`,
+  `production` or `critical` is also put to a second person. A command is
+  not: an agent runs it without asking. What waits for a second person is in
+  the inbox of everybody who may be that person: an administrator of this
+  server, or a member of one of its approver groups, and never the person
+  whose agent asks. Their notification channels are
   told. The rule can be switched on only by somebody for whom such a second
   person exists on the server.
 - An agent waits for as long as it takes unless a wait is set under
@@ -191,8 +193,9 @@ the server's audit log.
 ## What is on the servers, and what changed
 
 Under Infrastructure, "Read the servers on a schedule" lets the server read
-each machine every few hours with read-only commands (system, packages,
-services, ports, disks, certificates, a list of configuration files) and keep
+each machine every few hours with a fixed set of commands that only read
+(system, packages, services, ports, disks, certificates, a list of
+configuration files) and keep
 what is different from last time. An agent that troubleshoots a machine is
 given what changed there, and so is the ticket of an alert about it. The
 server reads with its own key or agent; a machine that needs a password or a
@@ -220,8 +223,8 @@ server you name when you make it. What that is held to:
 
 - Nothing runs when the agent asks. The command appears in your inbox, with
   the line the agent wrote about why, and waits for you.
-- Every one of them waits, including a read-only command that an agent inside
-  sshs3 would be allowed to run unasked. Nobody here is watching whoever asked.
+- Every one of them waits, also a plain command, which an agent inside sshs3
+  runs without asking. Nobody here is watching whoever asked.
 - It runs in the terminal that is already open for that server, and nowhere
   else. If nothing is connected to it, the answer says so instead of borrowing
   another terminal.
@@ -379,12 +382,14 @@ accounts and no more, also when it is used by several at the same moment.
 
 ## What to know
 
-- **Modes still apply.** An agent set to ask before commands waits for a
-  person, also on the server: the ticket sits in progress until somebody
-  answers (see Notifications above) or the wait runs out. For unattended work use agents
-  that only report, or agents that run on their own, with the safety switches
-  on. Destructive commands and, by default, changes on production still stop
-  for approval.
+- **Modes still apply.** An agent set to ask first waits for a person before
+  a change card or a file write, also on the server: the ticket sits in
+  progress until somebody answers (see Notifications above) or the wait runs
+  out. A command is run without asking in every mode but Advice, and nothing
+  checks what a command does. For unattended work use agents that only
+  report, or agents that run on their own. By default a change card or a file
+  write on production still stops for approval. See "What is checked and what
+  is not" in `docs/ai-hub.md`.
 - **Budgets hold across installations.** Spending is counted per installation
   and added up, so the server and the apps share each agent's monthly budget.
 - **External coding agents** (Claude Code, Codex) run where their runner is
@@ -433,9 +438,10 @@ accounts and no more, also when it is used by several at the same moment.
 - **Team settings are an admin's.** Changing the shared workspace, the team
   bucket or other team-wide settings needs a team admin (set with the host
   option for admins). The safety rules are a floor on a server with more
-  than one account: a member makes their own stricter (asks before every
-  read-only command), but only an administrator switches off approval on
-  `prod` servers or the confirmation of destructive commands. The AI
+  than one account: a member may switch on the two-person rule for their own
+  runs, but only an administrator switches off approval of change cards and
+  file writes on `prod` servers, or changes the rules of a cluster. Commands
+  are not part of these rules: an agent runs them without asking. The AI
   endpoint's address is held to the same rule as any other address a member
   gives: not the server itself or its private network. Changing a password signs out the account's other
   sessions; sign-in attempts are limited per account as well as per address.

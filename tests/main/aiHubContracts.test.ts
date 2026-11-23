@@ -83,7 +83,7 @@ describe("what a request says it did", () => {
     expect(changed).not.toHaveBeenCalled();
     expect((await fs.stat(file)).mtimeMs).toBe(before);
     // A request that changes something still does both.
-    await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true } });
+    await hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } });
     expect(changed).toHaveBeenCalled();
     expect((await fs.stat(file)).mtimeMs).toBeGreaterThan(before);
   });

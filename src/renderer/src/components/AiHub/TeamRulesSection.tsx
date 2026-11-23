@@ -8,7 +8,7 @@ const where = (key: string): string => (key === "*" ? "every server" : `the clus
 
 /**
  * The rules an administrator sets for everyone on a server several people sign in to: two people on
- * a change to production, and change freezes. An administrator changes them here; a member reads
+ * a change card or a file write on production, and change freezes. An administrator changes them here; a member reads
  * them. Nothing is shown where there are no such rules (the desktop app, the demo lab).
  */
 export function TeamRulesSection({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element | null {
@@ -43,9 +43,10 @@ export function TeamRulesSection({ hub, act }: { hub: HubSnapshot; act: Act }): 
           onChange={(e) => void act({ action: "team-rules-save", requirePeerApprovalOnProd: e.target.checked })}
         />
         <span>
-          Two people must approve a change on production
+          Two people must approve a change card or a file write on production
           <small>
-            Changes on servers tagged prod, critical or production need a second person. They are asked in their inbox.
+            Change cards and file writes on servers tagged prod, critical or production need a second person. They are
+            asked in their inbox. Commands are not covered.
           </small>
           {rules.requirePeerApprovalOnProd && hub.peerApprovalPossible !== true && (
             <small data-testid="team-peer-not-you">
@@ -57,10 +58,7 @@ export function TeamRulesSection({ hub, act }: { hub: HubSnapshot; act: Act }): 
 
       <div data-testid="team-freezes" style={{ display: "grid", gap: 6, marginTop: 8 }}>
         <strong>Change freeze</strong>
-        <small>
-          During a freeze nothing that changes a server is run there: not by an agent, not from a plan, in any mode.
-          Commands that only look still run.
-        </small>
+        <small>A freeze stops change cards and file writes. Commands still run.</small>
         {freezes.length === 0 ? (
           <small data-testid="team-freeze-none">No freeze is on.</small>
         ) : (

@@ -104,7 +104,7 @@ describe("notification channels", () => {
 });
 
 describe("the item a notification pointed at", () => {
-  const task = { id: "t1", title: "Fix", agentName: "DBA", status: "waiting", mode: "assisted", messages: [], sources: [], changes: [{ id: "c1", kind: "command", target: "pg-01", description: "Restart pgbouncer", command: "systemctl restart pgbouncer", status: "pending", riskLevel: "modify", at: Date.now() }] };
+  const task = { id: "t1", title: "Fix", agentName: "DBA", status: "waiting", mode: "assisted", messages: [], sources: [], changes: [{ id: "c1", kind: "command", target: "pg-01", description: "Restart pgbouncer", command: "systemctl restart pgbouncer", check: { command: "systemctl is-active pgbouncer", expected: "active" }, rollback: { command: "systemctl stop pgbouncer" }, status: "pending", at: Date.now() }] };
 
   it("is marked when it still waits, and said to be handled when it does not", () => {
     const { rerender } = render(<InboxView hub={hub({ tasks: [task] as never })} act={vi.fn()} onOpenTask={vi.fn()} onOpenView={vi.fn()} focusItemId="approval:c1" />);

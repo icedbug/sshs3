@@ -131,12 +131,17 @@ describe("what a chat channel's fence lets in", () => {
     expect(allowedProfiles({ servers: ["web"], clusters: [], reach: "ask" }, SERVERS).size).toBe(0);
     expect(allowedServerNamed({ servers: ["web-1"], clusters: [], reach: "ask" }, SERVERS, "web-10")).toBeUndefined();
     expect(allowedServerNamed({ servers: ["web-1"], clusters: [], reach: "ask" }, SERVERS, "10.0.0.11")?.id).toBe("srv-web-1");
-    // Read only is not advice: advice would refuse even a look. Never autonomous.
+    // Reach "read" is not advice: advice would refuse every command. Never autonomous.
     expect([reachMode("read"), reachMode("ask"), reachMode("plan")]).toEqual(["assisted", "assisted", "plan"]);
     const prompt = chatPrompt(origin({ reach: "read" }), "Is nginx up on web-1?");
     expect(prompt).toContain("Omar Lind asked you in #ops on Slack.");
-    expect(prompt).toContain("You may only look");
+    expect(prompt).toContain("You only look. Change nothing.");
+    // It does not say that a command is checked: none is.
+    expect(prompt).not.toMatch(/read-only commands run|is refused\./);
     expect(prompt.endsWith("Is nginx up on web-1?")).toBe(true);
+    // Every reach is told what terminal_command is for, since nothing else holds a command back.
+    for (const reach of ["read", "ask", "plan"] as const)
+      expect(chatPrompt(origin({ reach }), "x")).toContain("terminal_command runs at once and nobody is asked");
   });
 });
 
@@ -188,7 +193,7 @@ describe("the tools a chat run is offered", () => {
     const params = terminal.parameters as { required: string[]; properties: { sessionId: { description: string } } };
     expect(params.required).toContain("sessionId");
     expect(params.properties.sessionId.description).toContain("one of: db-1, web-1.");
-    // A channel that may only look is not offered what only writes.
+    // A channel with reach "read" is not offered what changes something.
     expect(names(conversation("offer-read", { chat: origin({ reach: "read" }) }))).not.toContain("sshs3_change");
     // A direct message from a linked person may keep a note; from somebody not linked, or where it may
     // only look, it may not: that hub is every channel's.
@@ -246,16 +251,28 @@ describe("a chat run's terminals", () => {
     await expect(other({ action: "file-read", path: "/etc/nginx/nginx.conf" })).rejects.toMatchObject({ code: "outside_chat_fence" });
   });
 
-  it("with a channel that may only look, runs a safe command and refuses a change without typing it", async () => {
+  it("with a channel set to commands only, runs a command unasked, whatever it does, and refuses a change card without typing it", async () => {
     const { runOf, ran } = await chatHub();
     const task = conversation("chat-read", { chat: origin({ reach: "read" }) });
     const invoke = await runOf(task);
     await expect(invoke({ action: "command", command: "systemctl status nginx", description: "Look", id: "web-1" })).resolves.toMatchObject({ exitCode: 0 });
     const own = task.target!.sessionId;
     expect(ran(own, "systemctl status nginx")).toBe(true);
-    await expect(invoke({ action: "command", command: "sudo systemctl restart nginx", description: "Restart" })).rejects.toMatchObject({ code: "chat_read_only" });
-    expect(ran(own, "systemctl restart nginx")).toBe(false);
+    // Nothing checks what a command does: this one runs too, and nobody was asked.
+    await expect(invoke({ action: "command", command: "sudo systemctl restart nginx", description: "Restart" })).resolves.toMatchObject({ exitCode: 0 });
+    expect(ran(own, "sudo systemctl restart nginx")).toBe(true);
+    expect(task.changes.at(-1)).toMatchObject({ status: "completed", decidedHow: "policy" });
+    expect(task.changes.at(-1)?.decidedBy).toBeUndefined();
+
+    // A change card is refused before anything of it is typed: not its check either.
+    const card = invoke({ action: "change", command: "sudo systemctl stop nginx", description: "Stop", check: { command: "systemctl is-enabled nginx", expected: "enabled" }, rollback: "sudo systemctl start nginx" });
+    await expect(card).rejects.toMatchObject({ code: "chat_read_only" });
+    await expect(card).rejects.toThrow(/proposes no change/);
+    expect(ran(own, "sudo systemctl stop nginx")).toBe(false);
+    expect(ran(own, "systemctl is-enabled nginx")).toBe(false);
     expect(task.changes.at(-1)).toMatchObject({ status: "denied", decidedHow: "policy" });
+    // The refusal does not say that anything was rated.
+    await expect(card).rejects.not.toThrow(/classified/);
   });
 
   it("holds an investigator to the fence of the conversation that asked for it", async () => {
@@ -437,7 +454,7 @@ describe("what a chat run may not reach, checked where it is enforced", () => {
     const capability = await hub.broker.issue(task);
     const authorize = (change: AgentChange) => (hub.broker as unknown as { authorize(key: string, task: AgentTask, change: AgentChange, request: unknown): Promise<void> }).authorize(capability.key, task, change, { action: "command" });
     const cases: AgentChange[] = [
-      { id: "c1", kind: "command", target: "db-1", description: "Look", command: "uptime", riskLevel: "safe", targetProfiles: ["srv-db-1"], status: "pending", at: Date.now() },
+      { id: "c1", kind: "command", target: "db-1", description: "Look", command: "uptime", targetProfiles: ["srv-db-1"], status: "pending", at: Date.now() },
       { id: "c2", kind: "setting", target: "sshs3", description: "Loosen the rules", status: "pending", at: Date.now() },
       {
         id: "c3",
@@ -445,7 +462,6 @@ describe("what a chat run may not reach, checked where it is enforced", () => {
         target: "web-1",
         description: "Look",
         command: "uptime",
-        riskLevel: "safe",
         targetKey: JSON.stringify(["person-1", hub.terminals.get("person-1")!.generation]),
         status: "pending",
         at: Date.now(),
@@ -458,7 +474,7 @@ describe("what a chat run may not reach, checked where it is enforced", () => {
     }
   });
 
-  it("keeps the rule of a target that only allows advice, also where the chat may only look", async () => {
+  it("keeps the rule of a target that only allows advice, also where the chat is set to commands only", async () => {
     const { hub, runOf, ran } = await chatHub();
     hub.store.data.safetyPolicy = { ...hub.safetyPolicy(), clusterPolicies: { "web-1": { maxMode: "advice" } } };
     const task = conversation("chat-advice", { chat: origin({ reach: "read" }) });

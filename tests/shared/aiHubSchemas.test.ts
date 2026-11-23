@@ -71,7 +71,6 @@ describe("aiHub shared schemas (Wave 0 additive compatibility)", () => {
       forkedFromMessageId: "msg-2",
       recordingIds: ["rec-1", "rec-2"],
       tainted: true,
-      sessionAllowPrefixes: ["kubectl get", "systemctl status"],
       handoffChain: ["triage", "k8s-ops"],
       sources: [
         {
@@ -186,12 +185,10 @@ describe("aiHub shared schemas (Wave 0 additive compatibility)", () => {
     };
     expect(mcp.toolPolicies?.delete_silence).toBe("deny");
 
+    // The rules are about change cards and file writes. There is none about commands: they are not rated.
     const safety: SafetyPolicyConfig = {
-      autoApproveSafeReadOnly: true,
       requireApprovalOnProdTags: true,
-      blockDestructiveWithoutConfirm: true,
       requirePeerApprovalOnProd: true,
-      commandAllowPrefixes: ["systemctl status", "kubectl get"],
       clusterPolicies: {
         "prod-eu": {
           maxMode: "plan",
@@ -202,6 +199,7 @@ describe("aiHub shared schemas (Wave 0 additive compatibility)", () => {
       },
     };
     expect(safety.clusterPolicies?.["prod-eu"].maxMode).toBe("plan");
+    expect(Object.keys(safety).sort()).toEqual(["clusterPolicies", "requireApprovalOnProdTags", "requirePeerApprovalOnProd"]);
 
     const ticket: WorkTicket = {
       id: "tk-1",
@@ -367,8 +365,9 @@ describe("aiHub shared schemas (Wave 0 additive compatibility)", () => {
               target: "web-01",
               description: "Restart nginx",
               command: "systemctl restart nginx",
+              check: { command: "systemctl is-active nginx", expected: "active" },
+              rollback: { command: "systemctl stop nginx" },
               status: "pending",
-              riskLevel: "modify",
               at: 500,
             },
           ],

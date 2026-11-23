@@ -61,7 +61,6 @@ export interface PeerApprovalItem {
   description: string;
   command?: string;
   target?: string;
-  risk?: CommandRiskLevel;
   /** How many different people have to approve, and who has so far. */
   requiredApprovals: number;
   approvedBy: string[];
@@ -267,15 +266,6 @@ export interface EvalCase {
   updatedAt: number;
 }
 
-export type CommandRiskLevel = "safe" | "modify" | "destructive";
-
-/** How far a change goes, in plain words: the same on the agent bot's chat cards and in the app's lists. */
-export const RISK_LEVEL_TEXT: Record<CommandRiskLevel, string> = {
-  safe: "Low. It only reads.",
-  modify: "It changes something.",
-  destructive: "High. It can remove or overwrite data.",
-};
-
 export interface ClusterSafetyPolicy {
   maxMode?: AgentMode;
   requiredApprovals?: number;
@@ -283,12 +273,15 @@ export interface ClusterSafetyPolicy {
   frozenUntil?: number;
 }
 
+/**
+ * When a change card or a file write waits for a person. A command an agent runs is not covered by
+ * any of this: it is not looked at, and nobody is asked about it.
+ */
 export interface SafetyPolicyConfig {
-  autoApproveSafeReadOnly: boolean;
+  /** On a server tagged as production a change card or a file write waits for a person, in Auto too. */
   requireApprovalOnProdTags: boolean;
-  blockDestructiveWithoutConfirm: boolean;
+  /** On production a change card or a file write needs a second person. */
   requirePeerApprovalOnProd?: boolean;
-  commandAllowPrefixes?: string[];
   clusterPolicies?: Record<string, ClusterSafetyPolicy>;
 }
 
@@ -297,11 +290,11 @@ export interface SafetyPolicyConfig {
  * every account's runs, the administrator's too, and nobody's own rules can loosen them.
  */
 export interface TeamSafetyRules {
-  /** A change to production runs only when a second person has approved it. */
+  /** A change card or a file write on production runs only when a second person has approved it. */
   requirePeerApprovalOnProd?: boolean;
   /**
    * Change freezes. The key is a cluster's name in lower case, or "*" for every server. Until the
-   * time given, nothing that changes anything is run there.
+   * time given, no change card or file write is run there. Commands still run.
    */
   freezes?: Record<string, { until: number; by: string; at: number; why?: string }>;
   changedBy?: string;
@@ -368,9 +361,11 @@ export interface AgentChange {
     | "uncertain";
   output?: string;
   exitCode?: number;
-  riskLevel?: CommandRiskLevel;
-  riskReason?: string;
-  parsedSubcommands?: string[];
+  /**
+   * Not a shell command: a call to a tool of another system (MCP), or an external agent's own action
+   * (an edit, a delete) that it gave no command for. It waits for approval as a change card does.
+   */
+  toolCall?: boolean;
   /** A short name for this command within its conversation (c1, c2 …), so a report can point at it. */
   ref?: string;
   /** Who answered, when a person had to: their name, and when. Kept where the decision is made. */
@@ -380,8 +375,8 @@ export interface AgentChange {
   /** It has gone into the audit log in the state it ended in. */
   audited?: boolean;
   /**
-   * On a change that carries its own proof: the read-only check that shows it
-   * worked, and whether it passed before and after.
+   * On a change that carries its own proof: the check that shows it worked, and
+   * whether it passed before and after.
    */
   /**
    * `before`: whether the check already passed before the change (then passing
@@ -450,6 +445,16 @@ export interface AgentChange {
   partial?: boolean;
   at: number;
 }
+
+/**
+ * A plain command: one an agent runs in a terminal or across a cluster, with no check and no rollback.
+ * It runs at once. Nothing looks at what it does and nobody is asked. Everything else an agent does
+ * waits as the mode and the rules say: a change card (it carries a check and a rollback), a file
+ * write, a settings change, and a call to a tool of another system.
+ */
+export function isPlainCommand(change: Pick<AgentChange, "kind" | "check" | "rollback" | "toolCall">): boolean {
+  return change.kind === "command" && !change.check && !change.rollback && !change.toolCall;
+}
 export interface AgentTask {
   id: string;
   title: string;
@@ -495,9 +500,8 @@ export interface AgentTask {
   recordingId?: string;
   /**
    * The run was asked for from outside sshs3 — by somebody's own agent over
-   * MCP. Nobody is watching it here, so every command it asks for is put to a
-   * person, whatever the command is and whatever the safety policy would
-   * otherwise allow.
+   * MCP. Nobody is watching it here, so everything it asks for is put to a
+   * person: a command too, although a command of any other run is not asked about.
    */
   fromOutside?: boolean;
   /**
@@ -560,8 +564,8 @@ export interface AgentTask {
   /** What might explain the problem at hand, as the agent last recorded it. */
   hypotheses?: AgentHypothesis[];
   /**
-   * Set on an investigator: a read-only run that may also run commands, but
-   * only ones classified as read-only, in a terminal of its own.
+   * Set on an investigator: a run that only looks. It runs commands in a terminal of its own and
+   * is refused a change card and a file write. Nothing checks what its commands do.
    */
   investigator?: boolean;
   /**
@@ -590,8 +594,6 @@ export interface AgentTask {
   recordingIds?: string[];
   /** True when untrusted external input or unverified KB/MCP output has entered this task's context. */
   tainted?: boolean;
-  /** Session-scoped normalized command prefixes explicitly allowed by the user for this task. */
-  sessionAllowPrefixes?: string[];
   /** Ordered list of agent ids/names that handled this task across handoffs (for loop & hop guards). */
   handoffChain?: string[];
   /**
@@ -609,9 +611,9 @@ export interface AgentTask {
 }
 
 /**
- * How far an agent asked from a chat channel may go. "read": only safe
- * read-only commands. "ask": changes, each approved by a person. "plan": a
- * plan first, approved before anything runs.
+ * How far an agent asked from a chat channel may go. "read": it runs commands and proposes no
+ * change (nothing checks what a command does). "ask": commands, and change cards each approved by a
+ * person in the thread. "plan": a plan first, approved before a change card or a file write runs.
  */
 export type ChatReach = "read" | "ask" | "plan";
 
@@ -1000,13 +1002,8 @@ export interface InlineCommandSuggestion {
    * says which, so that a canned check is not taken for an answer.
    */
   source?: "model" | "skill" | "fallback";
-  /** How the command is classified, as any agent's command would be. */
-  riskLevel?: CommandRiskLevel;
-  riskReason?: string;
-  /** More than one line: pasted only, never run with one key. */
+  /** More than one line. */
   multiline?: boolean;
-  /** May run with one key: one line, classified read-only. Anything else is pasted for the person to read. */
-  runnable?: boolean;
 }
 export interface InventoryEntry {
   id: string;
@@ -1444,7 +1441,7 @@ export interface ChatChannelRule {
 /** Direct messages to the agent bot. A linked person's run in their own hub; anybody else's in the chat agent's. */
 export interface ChatDmRule {
   enabled: boolean;
-  /** People who did not link their chat account: answered read only, or not at all. */
+  /** People who did not link their chat account: answered with commands only (reach "read"), or not at all. */
   unlinked: "read" | "off";
   /** What an unlinked person's direct message may reach. */
   servers: string[] | "*";
@@ -1522,7 +1519,6 @@ export interface ChatWaitingItem {
   description: string;
   command?: string;
   target?: string;
-  risk?: AgentChange["riskLevel"];
   requiredApprovals: number;
   approvedBy: string[];
   at: number;
@@ -2466,8 +2462,8 @@ export type HubRequest =
   | { action: "peer-approve"; ownerId: string; taskId: string; changeId: string; approved: boolean; note?: string }
   /**
    * The user's decision on the plan a conversation's agent proposed. Approved:
-   * the agent carries it out, and the plan's listed commands run without
-   * asking again (destructive ones still ask). Not approved: with a note the
+   * the agent carries it out, and the change cards the plan lists run without
+   * asking again. Not approved: with a note the
    * agent revises the plan, without one the plan is simply dropped.
    */
   | {

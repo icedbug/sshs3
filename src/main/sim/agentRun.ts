@@ -27,8 +27,9 @@ export interface ApprovalAsk {
   command: string;
   target: string;
   description: string;
-  risk?: string;
-  reason?: string;
+  /** The check that shows the change worked, and the command that takes it back, when it is a change card. */
+  check?: string;
+  rollback?: string;
 }
 
 export type AgentRunEvent =
@@ -271,7 +272,7 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
       for (const change of task.changes) {
         if (change.status !== "pending" || asked.has(change.id)) continue;
         asked.add(change.id);
-        const ask: ApprovalAsk = { command: change.command ?? change.description, target: change.target, description: change.description, risk: change.riskLevel, reason: change.riskReason };
+        const ask: ApprovalAsk = { command: change.command ?? change.description, target: change.target, description: change.description, ...(change.check ? { check: change.check.command } : {}), ...(change.rollback ? { rollback: change.rollback.command } : {}) };
         const allowed = await decide(ask);
         if (stoppedBy) break;
         if (allowed) allowedCount++;

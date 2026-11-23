@@ -125,12 +125,26 @@ async function hubWithModel(script: (request: FakeModelRequest) => FakeModelStep
   return { hub, model, events, typed, opened, ended };
 }
 
-const PLAN_STEPS = [{ action: "Restart nginx", target: "web-1", command: "sudo systemctl restart nginx", risk: "low", check: "systemctl is-active nginx" }];
+/**
+ * A change card for the restart: what a person is asked about. A plain command would run at once,
+ * with nobody asked. The terminals of these tests print "done" for everything, so that is what the
+ * check expects.
+ */
+const RESTART_CARD = {
+  command: "sudo systemctl restart nginx",
+  description: "Restart the web server",
+  check: { command: "systemctl is-active nginx", expected: "done" },
+  rollback: "sudo systemctl stop nginx",
+};
+/** The plan's one step is that card: with its check, what the check should show, and its rollback. */
+const PLAN_STEPS = [
+  { action: "Restart nginx", target: "web-1", command: RESTART_CARD.command, risk: "low", check: RESTART_CARD.check.command, checkExpected: RESTART_CARD.check.expected, rollback: RESTART_CARD.rollback },
+];
 const APPROVED = "[sshs3] The user approved your plan.";
 
 /**
- * A model that proposes a plan to restart nginx, and once it is approved runs exactly the step's
- * command and then says it is done. Its reviewer looks at the workspace first.
+ * A model that proposes a plan to restart nginx, and once it is approved makes exactly the step's
+ * change card and then says it is done. Its reviewer looks at the workspace first.
  */
 const planModel = (request: FakeModelRequest): FakeModelStep => {
   const text = said(request);
@@ -139,7 +153,7 @@ const planModel = (request: FakeModelRequest): FakeModelStep => {
   if (text.includes(APPROVED))
     return toolAfter(request, APPROVED)
       ? { text: "Done as planned." }
-      : { tool: "terminal_command", args: { command: "sudo systemctl restart nginx", description: "Restart nginx" } };
+      : { tool: "sshs3_change", args: { ...RESTART_CARD, description: "Restart nginx" } };
   if (text.includes("Use reload, not restart")) return { text: "I will propose a reload instead." };
   return text.includes('"role":"tool"')
     ? { text: "Here is the plan. Approve it in the thread." }
@@ -151,7 +165,7 @@ describe("following a chat run without a browser", () => {
     const { hub, events, typed, ended } = await hubWithModel((request) =>
       said(request).includes('"role":"tool"')
         ? { text: "Restarted nginx on web-1. The key in the log was AKIAIOSFODNN7EXAMPLE, rotate it." }
-        : { tool: "terminal_command", args: { command: "sudo systemctl restart nginx", description: "Restart the web server" } },
+        : { tool: "sshs3_change", args: RESTART_CARD },
     );
     // What a listener finds at the moment it is told: the question is out, the answer is written.
     const seen: { waiting?: boolean; pendingAtAnswer?: string[] } = {};
@@ -174,7 +188,12 @@ describe("following a chat run without a browser", () => {
     expect(hub.chatApprovalSubject(task.id, asking.changeId)).toMatchObject({ kind: "change", setting: false, waiting: true, requiredApprovals: 1, targetTags: [] });
     const view = hub.runView(task.id);
     expect(view.status).toBe("waiting");
-    expect(view.pending).toEqual([expect.objectContaining({ id: asking.changeId, command: "sudo systemctl restart nginx", target: "web-1", requiredApprovals: 1 })]);
+    expect(view.pending).toEqual([
+      expect.objectContaining({ id: asking.changeId, command: "sudo systemctl restart nginx", target: "web-1", requiredApprovals: 1, check: RESTART_CARD.check, rollback: RESTART_CARD.rollback }),
+    ]);
+    // Nothing rates the change: what is given to the card carries no risk.
+    expect(view.pending[0]).not.toHaveProperty("riskLevel");
+    expect(view.pending[0]).not.toHaveProperty("riskReason");
     expect(typed.some((d) => d.includes("systemctl restart"))).toBe(false);
     expect(events.some((e) => e.type === "progress")).toBe(true);
 
@@ -204,7 +223,7 @@ describe("following a chat run without a browser", () => {
     expect(done.text).toContain("Restarted nginx on web-1.");
     expect(done.text).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(done.pending).toEqual([]);
-    expect(done.lastStep?.name).toBe("terminal_command");
+    expect(done.lastStep?.name).toBe("sshs3_change");
   }, 30_000);
 
   it("masks every text it gives, and gives no hash of a plan's raw command", async () => {
@@ -224,7 +243,6 @@ describe("following a chat run without a browser", () => {
           target: "web-1",
           description: `Write ${secret} into the config`,
           command: "echo [redacted] > /etc/app.key",
-          riskReason: `It writes ${secret}`,
           blastRadius: `Everything that reads ${secret}`,
           status: "pending",
           at: 1,
@@ -348,7 +366,7 @@ describe("what a button in a thread answers", () => {
         if (text.includes("Plan the restart")) return text.includes('"role":"tool"') ? { text: "Plan ready." } : { tool: "sshs3_plan_propose", args: { goal: "nginx on web-1", steps: PLAN_STEPS } };
         return text.includes('"role":"tool"')
           ? { text: "Not restarted." }
-          : { tool: "terminal_command", args: { command: "sudo systemctl restart postgresql", description: "Restart the database", sessionId: "db-1" } };
+          : { tool: "sshs3_change", args: { command: "sudo systemctl restart postgresql", description: "Restart the database", check: { command: "pg_isready", expected: "done" }, rollback: "sudo systemctl stop postgresql", sessionId: "db-1" } };
       },
       { servers: [prodWeb, db] },
     );
@@ -409,7 +427,7 @@ describe("answers that need two people in a thread", () => {
       (request) =>
         said(request).includes('"role":"tool"')
           ? { text: "Restarted." }
-          : { tool: "terminal_command", args: { command: "sudo systemctl restart nginx", description: "Restart the web server" } },
+          : { tool: "sshs3_change", args: RESTART_CARD },
       { host: shared },
     );
     hub.store.data.safetyPolicy = { ...hub.safetyPolicy(), clusterPolicies: { "web-1": { requiredApprovals: 2 } } };
@@ -431,7 +449,7 @@ describe("answers that need two people in a thread", () => {
     const { hub, events, typed, ended } = await hubWithModel((request) =>
       said(request).includes('"role":"tool"')
         ? { text: "Nobody approved the restart." }
-        : { tool: "terminal_command", args: { command: "sudo systemctl restart nginx", description: "Restart the web server" } },
+        : { tool: "sshs3_change", args: RESTART_CARD },
     );
     // A wait of a little more than a tenth of a second.
     (hub as unknown as { approvalWaitMinutes(): number }).approvalWaitMinutes = () => 0.002;
