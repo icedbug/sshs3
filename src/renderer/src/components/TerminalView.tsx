@@ -1,3 +1,6 @@
+import { writeClipboardText } from '../lib/clipboard';
+import { openLink } from '../lib/openLink';
+import { useOpenHiddenLink } from '../lib/useOpenHiddenLink';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -226,6 +229,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   resizeDebounceMs = 100,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const openHiddenLink = useOpenHiddenLink();
+  const openHiddenLinkRef = useRef(openHiddenLink);
+  openHiddenLinkRef.current = openHiddenLink;
   const viewportRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -633,9 +639,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       scrollback: scrollbackRef.current ?? 5000,
       allowProposedApi: true,
       linkHandler: {
-        activate: (_event, text) => {
-          void window.multissh?.openExternal(text);
-        },
+        // A hyperlink a program printed (OSC 8): its text can hide where it goes, so the address is asked about first.
+        activate: (_event, text) => openHiddenLinkRef.current(text),
       },
     });
     termRef.current = term;
@@ -650,7 +655,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setSearchResults({ index: resultIndex, count: resultCount })
     );
     registerTerminalLinks(term, {
-      openUrl: (url) => void window.multissh.openExternal(url),
+      openUrl: (url) => void openLink(url),
       ...pathHoverRef.current.createLinkHandlers(),
     });
     const outputTracker = new CommandOutputTracker(term);
@@ -745,7 +750,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       if (!copyOnSelectRef.current) return;
       if (!selection || isSearchHighlight) return;
-      navigator.clipboard?.writeText(selection).catch(() => {
+      writeClipboardText(selection).catch(() => {
         // Ignore: clipboard access can be denied (no focus, permissions, etc.)
       });
       settleTimer = setTimeout(() => {
@@ -861,7 +866,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
       const lines = output.split('\n').length;
-      (navigator.clipboard ? navigator.clipboard.writeText(output) : Promise.reject(new Error('no clipboard')))
+      writeClipboardText(output)
         .then(() => {
           if (copyOnSelectRef.current) {
             void window.multissh?.clipboardHistoryAdd(output, hostKeyRef.current, hostLabelRef.current).catch(() => {});
@@ -1604,7 +1609,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   {inlineSuggestion.multiline ? (
                     <button
                       type="button"
-                      onClick={() => void navigator.clipboard?.writeText(inlineSuggestion.command)}
+                      onClick={() => void writeClipboardText(inlineSuggestion.command).catch(() => {})}
                       className="rounded bg-app-surface px-2 py-1 text-[10px] font-medium text-txt-primary hover:bg-app-surface-hover border border-border-subtle"
                     >
                       Copy
@@ -1916,7 +1921,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            void navigator.clipboard?.writeText(block.output).catch(() => {});
+                            void writeClipboardText(block.output).catch(() => {});
                             notify('Block output copied');
                           }}
                           className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 hover:bg-app-surface-hover hover:text-txt-primary"

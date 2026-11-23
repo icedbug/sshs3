@@ -601,7 +601,7 @@ export const TeamProfileTreeList = forwardRef<TeamProfileTreeListHandle, TeamPro
               <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-900/50 bg-amber-950/20 px-3 py-2 text-2xs text-amber-300">
                 <span className="flex items-center gap-1.5">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                  A newer version is available — your unsynced changes here will be lost.
+                  A newer version is available: your unsynced changes here will be lost.
                 </span>
                 <button
                   type="button"

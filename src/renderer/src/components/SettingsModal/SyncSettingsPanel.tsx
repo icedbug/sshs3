@@ -437,7 +437,7 @@ export const SyncSettingsPanel: React.FC = () => {
               <div className="flex items-center gap-1.5 text-amber-400">
                 <Lock className="h-3.5 w-3.5" />
                 <span className="font-medium">Sync locked</span>
-                <span className="text-2xs text-txt-muted">(Profiles & credentials encrypted — unlock below)</span>
+                <span className="text-2xs text-txt-muted">(Profiles & credentials encrypted: unlock below)</span>
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-2">
@@ -523,7 +523,7 @@ export const SyncSettingsPanel: React.FC = () => {
                 >
                   {detectedLibs.map((lib) => (
                     <option key={lib.path} value={lib.path}>
-                      {lib.name} — {lib.path.split(/[\\/]/).pop()}
+                      {lib.name}: {lib.path.split(/[\\/]/).pop()}
                     </option>
                   ))}
                 </select>
@@ -738,7 +738,7 @@ export const SyncSettingsPanel: React.FC = () => {
             <div className="space-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
               <div className="flex items-center gap-1.5 text-amber-300 font-medium text-xs">
                 <ShieldAlert className="h-3.5 w-3.5" />
-                {conflicts.length} known_hosts conflict{conflicts.length > 1 ? 's' : ''} — not applied automatically
+                {conflicts.length} known_hosts conflict{conflicts.length > 1 ? 's' : ''}: not applied automatically
               </div>
               {conflicts.map((c) => (
                 <div key={c.hostPatternField} className="font-mono text-2xs text-amber-200 leading-relaxed">
@@ -748,7 +748,7 @@ export const SyncSettingsPanel: React.FC = () => {
                 </div>
               ))}
               <p className="text-2xs text-amber-200/80 leading-relaxed">
-                This host has a different key locally than on the remote — a possible sign of a rotated or spoofed
+                This host has a different key locally than on the remote: a possible sign of a rotated or spoofed
                 key. Review it yourself (e.g. with <code>ssh-keygen -R</code>) before trusting either one; sync will
                 never overwrite a local known_hosts entry automatically.
               </p>
@@ -790,12 +790,12 @@ export const SyncSettingsPanel: React.FC = () => {
                       <span className="font-mono">{status.target?.name ?? 'the configured target'}</span>.
                     </li>
                     <li>Remove the sync target, master password salts, and any linked smartcard from this device.</li>
-                    <li>Lock sync on this device — you'll need to set it up again to use it here.</li>
+                    <li>Lock sync on this device: you'll need to set it up again to use it here.</li>
                   </ul>
                   <p className="font-medium text-emerald-300/90 pt-1">This will NOT:</p>
                   <ul className="list-disc pl-4 space-y-0.5">
                     <li>Delete or change your local SSH/S3 profiles, dotfile pools, or settings on this device.</li>
-                    <li>Affect any other machine already synced — until it next tries to push or pull.</li>
+                    <li>Affect any other machine already synced, until it next tries to push or pull.</li>
                   </ul>
                 </div>
                 <div className="flex items-center justify-end gap-2 pt-1">
@@ -823,7 +823,7 @@ export const SyncSettingsPanel: React.FC = () => {
 
             {wipeWarnings.length > 0 && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-2xs text-amber-200 leading-relaxed">
-                Sync configuration was cleared on this device, but some remote files could not be deleted — you may
+                Sync configuration was cleared on this device, but some remote files could not be deleted: you may
                 want to remove them manually:
                 <ul className="list-disc pl-4 pt-1 space-y-0.5">
                   {wipeWarnings.map((w, i) => (
@@ -859,7 +859,7 @@ export const SyncSettingsPanel: React.FC = () => {
               variant="secondary"
               onClick={handleSaveTarget}
               disabled={savingTarget}
-              title="Saves only this sync target — it does not save the rest of Settings"
+              title="Saves only this sync target: it does not save the rest of Settings"
             >
               {savingTarget && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               Save Sync Target

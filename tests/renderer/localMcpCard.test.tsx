@@ -62,6 +62,24 @@ describe("letting this person's own agent reach the app", () => {
     expect(screen.queryByTestId("local-mcp")).not.toBeInTheDocument();
   });
 
+  it("asks for a key that never stops working in so many words, and for 30 days when nothing is chosen", async () => {
+    const made = { ...hub(), reply: { mcpKey: { token: "sshs3_mcp_x", key: { id: "k1", name: "Cursor", scopes: ["read"], createdAt: 1 } } } } as unknown as HubSnapshot;
+    const act = vi.fn(async () => made);
+    render(<Settings hub={hub({ localMcp: { enabled: true, address: "http://127.0.0.1:51734/mcp", keys: [] } })} act={act} />);
+    const card = screen.getByTestId("local-mcp");
+    fireEvent.change(await within(card).findByLabelText("What the key is for"), { target: { value: "Cursor" } });
+    fireEvent.keyDown(within(card).getByLabelText("What the key is for"), { key: "Enter" });
+    await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "mcp-key-create", name: "Cursor", expiresInDays: 30 })));
+    expect((act.mock.calls as unknown as [Record<string, unknown>][]).map((c) => c[0]).find((r) => r.action === "mcp-key-create")).not.toHaveProperty("neverExpires");
+
+    act.mockClear();
+    await waitFor(() => expect(within(card).getByLabelText("What the key is for")).toHaveValue(""));
+    fireEvent.change(within(card).getByLabelText("What the key is for"), { target: { value: "Robot" } });
+    fireEvent.change(within(card).getByLabelText("When the key stops working"), { target: { value: "0" } });
+    fireEvent.keyDown(within(card).getByLabelText("What the key is for"), { key: "Enter" });
+    await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "mcp-key-create", name: "Robot", neverExpires: true })));
+  });
+
   it("never nests a <form> inside SettingsView and Enter in key name does not save settings", async () => {
     const act = vi.fn(async () => hub());
     const { container } = render(

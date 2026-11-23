@@ -7,6 +7,7 @@ import '@fontsource/fira-code/700.css'
 import './index.css'
 import { ensureWebClientBridgeInstalled } from './lib/webClientBridge'
 import { WebAuthGate } from './components/WebAuthGate'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { installGlobalErrorLogging } from './lib/log'
 
 let workspaceModule: Promise<typeof import('./App')> | undefined
@@ -40,11 +41,15 @@ const rootElement = document.getElementById('root')
 if (rootElement) {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
-      <WebAuthGate onAuthSubmit={prepareWorkspace}>
-        <React.Suspense fallback={<p role="status">Opening workspace…</p>}>
-          <App />
-        </React.Suspense>
-      </WebAuthGate>
+      {/* The last net: an error nothing closer caught, or the app's own files that could not be loaded
+          (a page left open over an update), shows a message with Reload and not a blank window. */}
+      <ErrorBoundary what="The app" layout="window">
+        <WebAuthGate onAuthSubmit={prepareWorkspace}>
+          <React.Suspense fallback={<p role="status">Opening workspace…</p>}>
+            <App />
+          </React.Suspense>
+        </WebAuthGate>
+      </ErrorBoundary>
     </React.StrictMode>
   )
 }

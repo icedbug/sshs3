@@ -82,7 +82,7 @@ export const FileDiffModal: React.FC<FileDiffModalProps> = ({
       .then(([src, tgt]) => {
         if (cancelled) return;
         if (src.isBinary || tgt.isBinary) {
-          setNotice('One or both files look binary — showing no line diff.');
+          setNotice('One or both files look binary: showing no line diff.');
           return;
         }
         const srcLines = src.content.split('\n');
@@ -92,7 +92,7 @@ export const FileDiffModal: React.FC<FileDiffModalProps> = ({
           return;
         }
         if (src.truncated || tgt.truncated) {
-          setNotice('One or both files were truncated before diffing (very large file) — the diff below may be incomplete.');
+          setNotice('One or both files were truncated before diffing (very large file): the diff below may be incomplete.');
         }
         setOps(diffLines(srcLines, tgtLines));
       })
@@ -157,7 +157,7 @@ export const FileDiffModal: React.FC<FileDiffModalProps> = ({
           )}
           {!loading && !error && ops && !notice && !hasChanges && (
             <div className="rounded-lg border border-border-subtle bg-app-surface p-4 text-center text-txt-muted">
-              No line differences — the files only differ in size/timestamp metadata.
+              No line differences: the files only differ in size/timestamp metadata.
             </div>
           )}
           {!loading && !error && ops && hasChanges && (

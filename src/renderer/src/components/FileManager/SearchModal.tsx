@@ -1,3 +1,4 @@
+import { copyToClipboard } from '../../lib/clipboard';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -199,7 +200,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     const text = warnings
       .map((w) => (w.path ? `${w.path}: ${w.message}` : w.message))
       .join('\n');
-    void navigator.clipboard.writeText(text);
+    void copyToClipboard(text);
     setCopiedWarnings(true);
     setTimeout(() => setCopiedWarnings(false), 2000);
   }, [warnings]);
@@ -264,8 +265,8 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         >
           <div className="flex min-w-0 items-center gap-2">
             <Search className="h-4 w-4 shrink-0 text-sky-400" />
-            <h2 className="truncate text-sm font-semibold text-txt-primary" title={`Search in Files — ${rootPath}`}>
-              Search in Files — <span className="font-mono font-normal text-txt-secondary">{rootPath}</span>
+            <h2 className="truncate text-sm font-semibold text-txt-primary" title={`Search in Files: ${rootPath}`}>
+              Search in Files: <span className="font-mono font-normal text-txt-secondary">{rootPath}</span>
             </h2>
           </div>
           <div className="flex items-center gap-1 shrink-0 ml-2">
@@ -430,7 +431,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
             </div>
             {truncated && (
               <div className="border-b border-amber-900/60 bg-amber-950/30 px-3 py-1 text-xs text-amber-300">
-                Result limit reached — narrow your search to see more.
+                Result limit reached: narrow your search to see more.
               </div>
             )}
             {warnings.length > 0 && !warningsDismissed && (

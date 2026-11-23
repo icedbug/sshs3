@@ -1,3 +1,4 @@
+import { openLink } from './openLink';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import { detectPortsInOutput, type PortDetectionResult } from './portDetection';
@@ -81,7 +82,7 @@ export function usePortDetection({
       if (!isRemoteRef.current || !configRef.current) {
         // Local terminal session: directly open in browser
         const url = `${protocol}://localhost:${port}`;
-        await window.multissh?.openExternal?.(url);
+        openLink(url);
         return;
       }
 
@@ -130,7 +131,7 @@ export function usePortDetection({
       }
 
       const url = `${protocol}://localhost:${targetLocalPort}`;
-      await window.multissh?.openExternal?.(url);
+      openLink(url);
     },
     []
   );

@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../lib/clipboard';
 import React, { useEffect, useState, useRef } from 'react';
 import { Check, Cloud, Copy, Loader2 } from 'lucide-react';
 import type { AwsSsoPromptEvent } from '@shared/types/ipc';
@@ -39,7 +40,7 @@ export const AwsSsoLoginModal: React.FC = () => {
 
   const copyToClipboard = async (kind: 'code' | 'link', value: string) => {
     try {
-      await navigator.clipboard.writeText(value);
+      await writeClipboardText(value);
       setCopied(kind);
     } catch (err) {
       log.error('Failed to copy to clipboard:', err);

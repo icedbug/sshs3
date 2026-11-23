@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../../lib/clipboard';
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AuditEntryView,
@@ -295,7 +296,7 @@ export function AuditLogView({
   const copyMarkdown = async (): Promise<void> => {
     const md = formatAuditMarkdown(shown, verification);
     try {
-      await navigator.clipboard?.writeText(md);
+      await writeClipboardText(md);
       setCopiedMsg("Copied Markdown");
       setTimeout(() => setCopiedMsg(""), 2000);
     } catch (error) {

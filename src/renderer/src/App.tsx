@@ -16,6 +16,8 @@ import { GlobalOverlays } from './components/GlobalOverlays';
 import { LandingView } from './components/LandingView';
 import { PaneTreeView } from './components/PaneTree';
 import { ConfirmProvider, useConfirm } from './components/ConfirmDialog';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { desktopOnlyHere } from './components/ui/DesktopOnly';
 import { DualPaneExplorer } from './components/FileManager/DualPaneExplorer';
 import { DirSyncSavedProfilesModal } from './components/FileManager/DirSyncSavedProfilesModal';
 import { DirectorySyncModal } from './components/FileManager/DirectorySyncModal';
@@ -618,7 +620,10 @@ const AppContent: React.FC = () => {
       newTab: handleNewTab,
       openProfiles: handleOpenProfiles,
       openSettings: handleOpenSettings,
-      newWindow: () => void window.multissh.windowNew(),
+      newWindow: () => {
+        // A browser opens its own windows: the app's "new window" is the desktop's.
+        if (!desktopOnlyHere()) void window.multissh.windowNew();
+      },
       showShortcuts: openShortcutsHelp,
     });
 
@@ -839,22 +844,24 @@ const AppContent: React.FC = () => {
             tabBarFocused={tabBarFocused}
             onSelectTab={handleSelectTab}
             onCloseTab={handleCloseTab}
-            onMoveTab={(id, target) => void moveTab(id, target)}
+            onMoveTab={desktopOnlyHere() ? undefined : (id, target) => void moveTab(id, target)}
             onListWindows={() => window.multissh?.windowList?.() ?? Promise.resolve([])}
             onNewTab={handleNewTab}
             onNewK8sSession={handleNewK8sSession}
             onOpenProfiles={handleOpenProfiles}
             onOpenGlobalSearch={globalSearchEnabled ? handleOpenGlobalSearch : undefined}
             onOpenSettings={handleOpenSettings}
-            onOpenTunnels={handleOpenTunnels}
+            onOpenTunnels={desktopOnlyHere() ? undefined : handleOpenTunnels}
             onOpenDirSyncProfiles={() => openTopLevelModal(() => setDirSyncProfilesOpen(true))}
-            showLockSmartcardButton={settings.smartcardAuthMode === 'agent-global'}
+            showLockSmartcardButton={!desktopOnlyHere() && settings.smartcardAuthMode === 'agent-global'}
             onLockSmartcard={() => window.multissh?.smartcardLockAll() ?? Promise.resolve({ locked: 0 })}
             onUnlockSmartcard={() => window.multissh?.smartcardUnlockNow?.() ?? Promise.resolve({ started: false })}
             onListCachedSmartcards={() => window.multissh?.smartcardListCached() ?? Promise.resolve([])}
             shortcuts={settings.shortcuts}
           />
         </div>
+        {/* Signing in to an SSH certificate authority opens a browser on the computer the app runs on. */}
+        {!desktopOnlyHere() && (
         <button
           type="button"
           data-testid="app-ssh-ca-indicator"
@@ -873,6 +880,7 @@ const AppContent: React.FC = () => {
           <ShieldCheck className="h-3.5 w-3.5" />
           <span>{sshCa.status?.active ? `CA: ${sshCa.status.username || 'Active'}` : 'SSH CA'}</span>
         </button>
+        )}
         <button
           type="button"
           data-testid="topbar-chat-toggle-btn"
@@ -937,6 +945,7 @@ const AppContent: React.FC = () => {
         {!sessionLoaded ? null : (
           <>
         {landingVisible && (
+          <ErrorBoundary what="The start page">
           <LandingView
             recentSSH={recentSSH}
             allSSH={recentSSHProfiles}
@@ -963,6 +972,7 @@ const AppContent: React.FC = () => {
             sshCaStatus={sshCa.status}
             onOpenSettings={() => handleOpenSettings('security')}
           />
+          </ErrorBoundary>
         )}
         {tabs.map((tab) => {
             const isActive = tab.id === activeTabId;
@@ -984,6 +994,8 @@ const AppContent: React.FC = () => {
                 className={`h-full w-full ${isActive ? 'flex flex-1 flex-col' : 'hidden'}`}
                 style={{ display: isActive ? 'flex' : 'none', flexDirection: 'column' }}
               >
+                {/* A tab that fails to draw shows a message in its own place; the other tabs keep working. */}
+                <ErrorBoundary what="This tab">
                 {tab.type === 'terminal' && tab.paneTree ? (
                   <div className="flex flex-1 flex-col h-full w-full overflow-hidden">
                     {/* Top Pane Bar with status and quick "unsplit" action. For a single pane without
@@ -1163,6 +1175,7 @@ const AppContent: React.FC = () => {
                     />
                   </div>
                 )}
+                </ErrorBoundary>
               </div>
             );
           })}
@@ -1254,13 +1267,15 @@ const AppContent: React.FC = () => {
       )}
 
       {/* Settings Modal */}
-      <SettingsModal
-        open={settingsModalOpen}
-        initialCategory={settingsCategory}
-        currentSettings={settings}
-        onSave={handleSaveSettings}
-        onClose={() => setSettingsModalOpen(false)}
-      />
+      <ErrorBoundary what="Settings" layout="notice" resetKey={settingsModalOpen}>
+        <SettingsModal
+          open={settingsModalOpen}
+          initialCategory={settingsCategory}
+          currentSettings={settings}
+          onSave={handleSaveSettings}
+          onClose={() => setSettingsModalOpen(false)}
+        />
+      </ErrorBoundary>
 
       {/* SSH Tunnels Modal (global, across all connections) */}
       <SSHGlobalTunnelsModal open={tunnelsModalOpen} onClose={() => setTunnelsModalOpen(false)} />
@@ -1293,6 +1308,7 @@ const AppContent: React.FC = () => {
           style={aiMode === 'panel' ? { top: mainTop } : undefined}
           data-testid="ai-dock"
         >
+        <ErrorBoundary what="The assistant" layout="notice">
         <AiHubPanel
           mode={aiMode}
           setMode={setAiMode}
@@ -1321,6 +1337,7 @@ const AppContent: React.FC = () => {
             });
           }}
         />
+        </ErrorBoundary>
         </div>
       )}
     </div>

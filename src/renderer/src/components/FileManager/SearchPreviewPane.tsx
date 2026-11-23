@@ -1,3 +1,4 @@
+import { copyToClipboard } from '../../lib/clipboard';
 import React, { useEffect, useState } from 'react';
 import { Check, Copy, FileText, FolderOpen, Loader2 } from 'lucide-react';
 import type { SearchMatch } from '@shared/types/search';
@@ -54,7 +55,7 @@ export const SearchPreviewPane: React.FC<SearchPreviewPaneProps> = ({
 
   const handleCopyPath = () => {
     if (!match) return;
-    void navigator.clipboard.writeText(match.path);
+    void copyToClipboard(match.path);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

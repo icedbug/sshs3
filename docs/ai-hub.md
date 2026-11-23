@@ -2814,7 +2814,52 @@ The chat panel keeps its shared state in `usePanelState`. The terminal hook rece
     and Mattermost" has the two bots: the context bot (`TeamChatCard`) and
     Agent in chat (`AgentInChatCard`). The settings get the panel's last
     error, so the agent bot's card can show a refusal next to the form that
-    failed.
+    failed. The main form keeps only what the person changed
+    (`edits`, `roleEdits`, `prefEdits`): every other field shows the saved
+    value, so a refresh of the snapshot never puts an edit back. When a saved
+    model is chosen for the chat and the agents, the Model fields show and
+    save that saved model (`savedConfigForm`, `profile-save`), because that is
+    what runs use; a kind of work without a saved model is labelled by what
+    it really uses (`roleDefaultLabel`). The settings are not one `<form>`:
+    Enter in a text field of the main form saves it, the profile editor is
+    its own form, and each card answers its own Enter. Closing the settings
+    with edits in them asks first (`closeSettings` in `usePanelState`).
+    Tests: `tests/renderer/settingsUnsavedEdits.test.tsx`,
+    `tests/renderer/panelBetter.test.tsx`.
+  - `InboxView`: its keys act only while the focus is inside the Inbox, and
+    only on the item chosen with `j` or `k`; a key another control already
+    took, and a held key, are ignored. One answer per item is on its way at a
+    time (`send`). A change whose text is longer than twelve lines, or a file
+    change that came without a diff, is shown short: Approve (the button or
+    `a`) first opens all of it, and the next press approves. Replacing or
+    revoking the alert address asks first. Tests:
+    `tests/renderer/inboxFocusAndLock.test.tsx`.
+- A message of the conversation is a memoized row (`MessageRow` in
+  `panel/Timeline.tsx`): it is given one stable `actions` object and its own
+  message, so typing in the composer draws no message again
+  (`tests/renderer/typingRenders.test.tsx`).
+- A part that fails to draw is replaced by a message with "Try again" and
+  "Reload" (`components/ErrorBoundary.tsx`): around the app root, each hub
+  view, the conversation, the settings, the start page, each tab, the
+  settings window and the assistant. When the app's own files could not be
+  loaded (a page left open over an update) it says so and offers Reload
+  (`tests/renderer/errorBoundary.test.tsx`).
+- Links leave the app through `openLink` (`lib/openLink.ts`): http, https and
+  mailto only. The desktop app hands the address to the system; in a browser
+  it opens a new tab, because the server has no browser to open. The desktop
+  window also hands a web or mail address that asks for a new window to the
+  system (`isSystemLink` in `windows/createAppWindow.ts`). A hyperlink a
+  program printed in a terminal (OSC 8) shows its address and asks first
+  (`lib/useOpenHiddenLink.tsx`). Tests: `tests/renderer/openLink.test.tsx`,
+  `tests/main/appWindowLinks.test.ts`.
+- In the web app, controls that need the person's own computer are hidden or
+  drawn disabled with the line "Only in the desktop app."
+  (`components/ui/DesktopOnly.tsx`). They are the ones whose IPC channels the
+  server refuses (`DESKTOP_ONLY_CHANNELS` in `src/main/web/webIpcChannels.ts`).
+  Test: `tests/renderer/desktopOnlyOnWeb.test.tsx`.
+- What a request answers beside the snapshot (`reply`: a new key, an invite
+  code) goes to the caller only: `lib/aiHub.ts` does not keep it in the
+  state the views read (`tests/renderer/hubReplyNotKept.test.tsx`).
 - A conversation that came from a direct message in Slack or Mattermost
   carries a "from Slack" or "from Mattermost" badge (`ChatOriginBadge`) in
   the history list, the sidebar and the bar over the conversation.

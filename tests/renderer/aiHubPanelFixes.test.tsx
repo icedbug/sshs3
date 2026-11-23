@@ -130,6 +130,10 @@ describe("fork and restore", () => {
     ];
     render(<Harness />);
     openTask();
+    // The first click asks, the second does it.
+    fireEvent.click(screen.getByTestId("ai-restore-checkpoint-change-1"));
+    expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ action: "restore-checkpoint" }));
+    expect(screen.getByTestId("ai-restore-checkpoint-change-1")).toHaveTextContent("Put the file back as it was?");
     fireEvent.click(screen.getByTestId("ai-restore-checkpoint-change-1"));
     await waitFor(() => expect(request).toHaveBeenCalled());
     expect(request).toHaveBeenCalledWith({ action: "restore-checkpoint", taskId: "task", changeId: "change-1" });

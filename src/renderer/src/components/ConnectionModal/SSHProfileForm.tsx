@@ -1,3 +1,5 @@
+import { copyToClipboard } from '../../lib/clipboard';
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -450,11 +452,15 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
           onChange={(e) => update('authType', e.target.value as SSHAuthType)}
           className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-sm text-txt-primary outline-none focus:border-sky-500"
         >
-          {AUTH_TYPES.map((t) => (
-            <option key={t.value} value={t.value}>
-              {t.label}
-            </option>
-          ))}
+          {AUTH_TYPES.map((t) => {
+            // In the browser the card reader and the security key would be the server's, not the person's.
+            const elsewhere = desktopOnlyHere() && (t.value === 'smartcard' || t.value === 'fido2') && config.authType !== t.value;
+            return (
+              <option key={t.value} value={t.value} disabled={elsewhere}>
+                {elsewhere ? `${t.label}. ${DESKTOP_ONLY_NOTE}` : t.label}
+              </option>
+            );
+          })}
         </select>
       </label>
 
@@ -630,15 +636,15 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
           {IS_WINDOWS && (
             <p className="text-xs text-txt-muted">
               {config.fido2Resident
-                ? 'Resident credentials cannot be read back on Windows (its OpenSSH build has no working resident-key support). Untick this and use a key file instead — generate one below.'
-                : 'On Windows, use a key file: the key is signed through Windows’ built-in security key support, so you are asked for PIN and touch on each login. Resident credentials are not available here — generate a key file below, or pick an existing one.'}
+                ? 'Resident credentials cannot be read back on Windows (its OpenSSH build has no working resident-key support). Untick this and use a key file instead: generate one below.'
+                : 'On Windows, use a key file: the key is signed through Windows’ built-in security key support, so you are asked for PIN and touch on each login. Resident credentials are not available here: generate a key file below, or pick an existing one.'}
             </p>
           )}
 
           {config.fido2Resident && !IS_WINDOWS ? (
             <div className="flex flex-col gap-2">
               <p className="text-xs text-txt-muted">
-                No key file needed — the app loads whatever resident credentials are on the connected
+                No key file needed: the app loads whatever resident credentials are on the connected
                 security key at connect time. It scans automatically below; re-scan any time you swap
                 keys or after generating a new one.
               </p>
@@ -661,7 +667,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
               {fido2ResidentKeys && fido2ResidentKeys.length === 0 && (
                 <div className="flex flex-col gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
                   <p className="text-xs text-amber-200">
-                    No resident credentials found on this device yet — this is expected the first time
+                    No resident credentials found on this device yet: this is expected the first time
                     you use a security key with sshs3. Generate one below to get started.
                   </p>
                   <button
@@ -820,7 +826,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                       className="rounded border-border-subtle bg-app-input text-sky-600 focus:ring-sky-500 disabled:opacity-40"
                     />
                     <span>
-                      Resident (discoverable) — no file needed to authenticate later
+                      Resident (discoverable): no file needed to authenticate later
                       {IS_WINDOWS && <span className="text-txt-muted"> (not available on Windows)</span>}
                     </span>
                   </label>
@@ -855,7 +861,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                       <div className="flex items-center gap-2">
                         <span className="text-txt-muted">
                           If the on-device credential this pointed to was already deleted, the local
-                          file is just a stale leftover — overwrite it?
+                          file is just a stale leftover: overwrite it?
                         </span>
                         <button
                           type="button"
@@ -887,7 +893,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                       <button
                         aria-label="Copy public key"
                         type="button"
-                        onClick={() => void navigator.clipboard.writeText(fido2GenResult.publicKey)}
+                        onClick={() => void copyToClipboard(fido2GenResult.publicKey)}
                         className="shrink-0 rounded-md border border-border-subtle p-1.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
                         title="Copy public key"
                       >
@@ -1020,7 +1026,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
               }}
               className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-sm text-txt-primary outline-none focus:border-sky-500"
             >
-              <option value="">Not assigned — no sync</option>
+              <option value="">Not assigned: no sync</option>
               {dotfilePools.map((pool) => (
                 <option key={pool.id} value={pool.id}>
                   {pool.name} ({pool.files.length} file{pool.files.length === 1 ? '' : 's'})

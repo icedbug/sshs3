@@ -1,3 +1,4 @@
+import { DESKTOP_ONLY_NOTE, DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle2, Cloud, FolderOpen, KeyRound, Loader2 } from 'lucide-react';
 import type { S3Config } from '@shared/types/storage';
@@ -244,7 +245,9 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
         <button
           type="button"
           onClick={() => setAuthMode('sso')}
-          className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+          disabled={desktopOnlyHere() && authMode !== 'sso'}
+          title={desktopOnlyHere() ? `AWS SSO sign-in. ${DESKTOP_ONLY_NOTE}` : undefined}
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
             authMode === 'sso'
               ? 'bg-sky-600 text-white shadow-sm'
               : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
@@ -254,6 +257,11 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
           AWS SSO
         </button>
       </div>
+      {desktopOnlyHere() && (
+        <p className="text-[11px] text-txt-muted" data-testid="desktop-only-note">
+          AWS SSO: {DESKTOP_ONLY_NOTE}
+        </p>
+      )}
 
       {authMode === 'static' ? (
         <>
@@ -322,7 +330,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
             </label>
           </div>
 
-          <button
+          <DesktopOnly inline><button
             type="button"
             disabled={!config.sso?.startUrl?.trim() || ssoLoggingIn}
             onClick={() => void handleAwsSsoLogin()}
@@ -330,7 +338,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
           >
             {ssoLoggingIn && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             {ssoLoggingIn ? 'Signing in…' : ssoAccessToken ? 'Sign in again' : 'Sign in with AWS SSO'}
-          </button>
+          </button></DesktopOnly>
 
           {ssoError && (
             <p role="alert" className="rounded-lg border border-red-800/60 bg-red-950/40 px-3 py-2 text-red-300">{ssoError}</p>
@@ -461,7 +469,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
         </label>
         {config.serverSideEncryption === 'aws:kms' && (
           <label className="flex flex-col gap-1 text-txt-secondary">
-            KMS Key ID (optional — blank uses the bucket's default key)
+            KMS Key ID (optional: blank uses the bucket's default key)
             <input
               value={config.kmsKeyId ?? ''}
               onChange={(e) => update('kmsKeyId', e.target.value)}

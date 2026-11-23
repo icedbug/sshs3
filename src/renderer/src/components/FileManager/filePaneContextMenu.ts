@@ -1,3 +1,5 @@
+import { copyToClipboard } from '../../lib/clipboard';
+import { openLink } from '../../lib/openLink';
 import {
   Clipboard,
   Copy,
@@ -246,21 +248,21 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
             label: 'Copy Full Path',
             icon: Clipboard,
             disabled: selectedEntries.length !== 1,
-            onSelect: () => void navigator.clipboard.writeText(selectedEntries[0].path),
+            onSelect: () => void copyToClipboard(selectedEntries[0].path),
           },
           {
             key: 'copy-filename',
             label: 'Copy Filename',
             icon: FileText,
             disabled: selectedEntries.length !== 1,
-            onSelect: () => void navigator.clipboard.writeText(selectedEntries[0].name),
+            onSelect: () => void copyToClipboard(selectedEntries[0].name),
           },
           {
             key: 'copy-location',
             label: 'Copy Folder Path',
             icon: FolderOpen,
             disabled: selectedEntries.length !== 1,
-            onSelect: () => void navigator.clipboard.writeText(parentPath(selectedEntries[0].path)),
+            onSelect: () => void copyToClipboard(parentPath(selectedEntries[0].path)),
           },
           ...(sourceType !== 'local'
             ? [
@@ -299,7 +301,7 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                   label: 'Copy S3 URI',
                   icon: Clipboard,
                   disabled: selectedEntries.length !== 1,
-                  onSelect: () => void navigator.clipboard.writeText(`s3:/${selectedEntries[0].path}`),
+                  onSelect: () => void copyToClipboard(`s3:/${selectedEntries[0].path}`),
                 },
                 {
                   key: 'tags',
@@ -365,7 +367,7 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                               icon: ExternalLink,
                               onSelect: () => {
                                 const url = toWebRepoUrl(gitStatus.remoteOriginUrl!);
-                                if (url) void window.multissh.openExternal(url);
+                                if (url) openLink(url);
                               },
                             },
                           ]
@@ -439,7 +441,7 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                               icon: ExternalLink,
                               onSelect: () => {
                                 const url = toWebRepoUrl(gitStatus.remoteOriginUrl!);
-                                if (url) void window.multissh.openExternal(url);
+                                if (url) openLink(url);
                               },
                             },
                           ]

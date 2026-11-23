@@ -50,7 +50,7 @@ function StrengthTooWeakHint({
   if (password.length < 8 || !strength.loaded || strength.score >= MIN_ACCEPTABLE_SCORE) return null;
   return (
     <p className="text-2xs text-red-400">
-      Too easy to guess (common word, pattern, or reused elsewhere) — try something longer or less predictable.
+      Too easy to guess (common word, pattern, or reused elsewhere): try something longer or less predictable.
     </p>
   );
 }
@@ -342,7 +342,7 @@ export const MasterPasswordDialog: React.FC<MasterPasswordDialogProps> = ({
                 <div className="space-y-1.5">
                   <p className="text-xs text-amber-200 leading-relaxed">
                     These passwords are never sent anywhere and never stored. If you lose either one, the data
-                    encrypted with it can <strong>never</strong> be recovered — not by you, and not by us.
+                    encrypted with it can <strong>never</strong> be recovered: not by you, and not by us.
                   </p>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input

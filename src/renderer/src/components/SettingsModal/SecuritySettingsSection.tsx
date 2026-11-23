@@ -1,3 +1,4 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React, { useId, useState } from 'react';
 import { Shield, CheckCircle2, Lock, ShieldAlert, Globe } from 'lucide-react';
 import { IS_WINDOWS } from '../../lib/platform';
@@ -70,7 +71,7 @@ export const SecuritySettingsSection: React.FC<{ form: SettingsForm }> = ({ form
           </label>
           <p className="text-xs text-txt-muted">
             {IS_WINDOWS
-              ? 'Applies to every Smartcard (PKCS#11) profile. FIDO2 security keys are not cached on Windows — they use a key file and ask for PIN and touch on every connection. Cached and per-terminal modes need the Windows OpenSSH Authentication Agent service to be running.'
+              ? 'Applies to every Smartcard (PKCS#11) profile. FIDO2 security keys are not cached on Windows: they use a key file and ask for PIN and touch on every connection. Cached and per-terminal modes need the Windows OpenSSH Authentication Agent service to be running.'
               : 'Applies to every Smartcard (PKCS#11) and FIDO2 resident key profile.'}
           </p>
         </div>
@@ -95,7 +96,7 @@ export const SecuritySettingsSection: React.FC<{ form: SettingsForm }> = ({ form
               <Lock className="h-3.5 w-3.5 text-emerald-400" />
               <span>Always Prompt (Default)</span>
             </div>
-            <span className="text-xs text-txt-muted leading-tight">No caching — every connection prompts for its own PIN.</span>
+            <span className="text-xs text-txt-muted leading-tight">No caching: every connection prompts for its own PIN.</span>
             {expandedCachingMode === 'always-prompt' ? (
               <span className="text-xs text-txt-muted leading-tight">
                 Every connection that needs the {IS_WINDOWS ? 'card' : 'card or security key'} (terminal, dotfiles sync) prompts for its
@@ -139,8 +140,8 @@ export const SecuritySettingsSection: React.FC<{ form: SettingsForm }> = ({ form
             {expandedCachingMode === 'agent-per-session' ? (
               <span className="text-xs text-txt-muted leading-tight">
                 {IS_WINDOWS
-                  ? 'Enter the PIN once; the card is loaded into the Windows ssh-agent service for that terminal tab and its dotfiles sync. It is removed again as soon as that terminal disconnects — logging back in (even in the same app run) asks for the PIN again.'
-                  : 'Enter the PIN once into a private, app-managed ssh-agent shared by that terminal tab and its dotfiles sync. Discarded as soon as that terminal disconnects — logging back in (even in the same app run) asks for the PIN again.'}
+                  ? 'Enter the PIN once; the card is loaded into the Windows ssh-agent service for that terminal tab and its dotfiles sync. It is removed again as soon as that terminal disconnects: logging back in (even in the same app run) asks for the PIN again.'
+                  : 'Enter the PIN once into a private, app-managed ssh-agent shared by that terminal tab and its dotfiles sync. Discarded as soon as that terminal disconnects: logging back in (even in the same app run) asks for the PIN again.'}
               </span>
             ) : (
               <button
@@ -182,8 +183,8 @@ export const SecuritySettingsSection: React.FC<{ form: SettingsForm }> = ({ form
             {expandedCachingMode === 'agent-global' ? (
               <span className="text-xs text-txt-muted leading-tight">
                 Enter the PIN once per {IS_WINDOWS ? 'card' : 'card or key'}, shared by every terminal and profile using it, for as long as
-                the app runs. Most convenient, least strict — anything in the app can use the {IS_WINDOWS ? 'card' : 'card/key'} until
-                you quit or lock it manually below.{IS_WINDOWS ? ' On Windows the card is held by the shared ssh-agent service, so other programs using that agent can use it too.' : ' Everything unlocked lives in one app-wide ssh-agent, which local terminals use (Settings → Terminal → Local Terminal SSH Agent) — also tabs opened before you unlocked.'}
+                the app runs. Most convenient, least strict: anything in the app can use the {IS_WINDOWS ? 'card' : 'card/key'} until
+                you quit or lock it manually below.{IS_WINDOWS ? ' On Windows the card is held by the shared ssh-agent service, so other programs using that agent can use it too.' : ' Everything unlocked lives in one app-wide ssh-agent, which local terminals use (Settings → Terminal → Local Terminal SSH Agent): also tabs opened before you unlocked.'}
               </span>
             ) : (
               <button
@@ -314,7 +315,9 @@ export const SecuritySettingsSection: React.FC<{ form: SettingsForm }> = ({ form
       </div>
 
       {/* SSH Certificate Authorities */}
-      <SshCaSettingsPanel form={form} />
+      <DesktopOnly>
+        <SshCaSettingsPanel form={form} />
+      </DesktopOnly>
     </div>
   );
 };

@@ -1,3 +1,4 @@
+import { externalLinkProps } from "../../lib/openLink";
 import { Component, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -132,11 +133,8 @@ export function RichMarkdownContent({
                 </button>
               );
             }
-            return (
-              <a href={href} target="_blank" rel="noreferrer">
-                {children}
-              </a>
-            );
+            // A link in an answer: the tooltip says where it goes, and it opens outside the app.
+            return <a {...externalLinkProps(href)}>{children}</a>;
           },
           pre({ children }) {
             return <>{children}</>;

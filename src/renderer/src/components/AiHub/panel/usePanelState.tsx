@@ -100,12 +100,29 @@ export function usePanelState({
   const [atIndex, setAtIndex] = useState(0);
   const [atDismissedFor, setAtDismissedFor] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The settings hold edits that are not saved, and the question about closing them is shown.
+  const [settingsUnsaved, setSettingsUnsaved] = useState(false);
+  const [settingsAsking, setSettingsAsking] = useState(false);
+  const settingsState = useRef({ unsaved: false, asking: false });
+  settingsState.current = { unsaved: settingsUnsaved, asking: settingsAsking };
+  /** Closes the settings. With edits that are not saved it asks first: Escape or a click beside the window must not drop them. */
+  const closeSettings = useCallback((dropEdits = false) => {
+    if (!dropEdits && settingsState.current.unsaved) {
+      setSettingsAsking(true);
+      return;
+    }
+    setSettingsAsking(false);
+    setSettingsUnsaved(false);
+    setSettingsOpen(false);
+  }, []);
   const [showDemoPreview, setShowDemoPreview] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [streamingByTask, setStreamingByTask] = useState<Record<string, StreamingTaskState>>({});
   const [dlpWarning, setDlpWarning] = useState<{
     labels: string[];
     prompt: string;
+    /** What the person typed, as it stood in the composer: given back if the message does not go. */
+    typed: string;
     attachments: ContextSource[];
     sessionId?: string;
   } | null>(null);
@@ -700,7 +717,9 @@ export function usePanelState({
     const key = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         event.preventDefault();
-        setSettingsOpen(false);
+        // Escape on the question goes back to the settings; otherwise it closes them, asking first when needed.
+        if (settingsState.current.asking) setSettingsAsking(false);
+        else closeSettings();
       }
       if (event.key === "Tab") {
         const elements = Array.from(
@@ -725,7 +744,7 @@ export function usePanelState({
       document.removeEventListener("keydown", key);
       previous?.focus();
     };
-  }, [settingsOpen, mode]);
+  }, [settingsOpen, mode, closeSettings]);
   // An error shown in the settings is about the settings: it does not stay on the panel once they are closed.
   useEffect(() => {
     if (!settingsOpen) setError("");
@@ -905,6 +924,8 @@ export function usePanelState({
       overridePrompt?: string;
       overrideAttachments?: ContextSource[];
       bypassDlp?: boolean;
+      /** The person's own draft, when what is sent is not it (a masked copy): given back if the message does not go. */
+      draft?: { prompt: string; attachments: ContextSource[] };
     },
   ): Promise<void> {
     const candidateAttachments = opts?.overrideAttachments ?? attachments;
@@ -924,6 +945,7 @@ export function usePanelState({
         setDlpWarning({
           labels: detected,
           prompt: textToSend,
+          typed: rawPrompt,
           attachments: candidateAttachments,
           sessionId,
         });
@@ -964,10 +986,12 @@ export function usePanelState({
       // The conversation this request started: "the newest in the list" may be a background run that began meanwhile.
       if (!task) setTaskId(result.reply?.started?.taskId ?? result.tasks.at(-1)?.id ?? "");
       setConnection(undefined);
-    } else if (opts?.overridePrompt === undefined) {
+    } else {
       // It did not go: what was written is given back, unless something new has been typed meanwhile.
-      setPrompt((now) => now || rawPrompt);
-      setAttachments((now) => (now.length ? now : sentAttachments));
+      // That holds for a message sent past the secret warning too: the draft is kept until it has gone.
+      const back = opts?.draft ?? { prompt: rawPrompt, attachments: sentAttachments };
+      setPrompt((now) => now || back.prompt);
+      setAttachments((now) => (now.length ? now : back.attachments));
     }
   }
   async function submit(): Promise<void> {
@@ -1065,6 +1089,10 @@ export function usePanelState({
     setAtDismissedFor,
     settingsOpen,
     setSettingsOpen,
+    closeSettings,
+    settingsAsking,
+    setSettingsAsking,
+    setSettingsUnsaved,
     showDemoPreview,
     setShowDemoPreview,
     copiedMsgId,

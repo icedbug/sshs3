@@ -10,14 +10,6 @@ import type {
 import { ConfirmButton } from "./ConfirmButton";
 import type { Act } from "./panelShared";
 
-export interface EscalationStep {
-  id: string;
-  tier: number;
-  channelId: string;
-  afterMinutes: number;
-  minSeverity: "all" | "warning" | "critical";
-}
-
 export interface QuietHoursConfig {
   enabled: boolean;
   start: string;
@@ -27,7 +19,6 @@ export interface QuietHoursConfig {
 }
 
 export interface NotificationPolicyConfig {
-  escalationChain: EscalationStep[];
   quietHours: QuietHoursConfig;
 }
 
@@ -37,7 +28,6 @@ type ExtendedNotifySettings = NonNullable<HubSnapshot["notifications"]> &
 const POLICY_STORAGE_KEY = "sshs3.notifyPolicy.v1";
 
 const DEFAULT_POLICY: NotificationPolicyConfig = {
-  escalationChain: [],
   quietHours: {
     enabled: false,
     start: "22:00",
@@ -99,8 +89,6 @@ function loadInitialPolicy(settings: ExtendedNotifySettings): NotificationPolicy
     }
   }
   return {
-    escalationChain:
-      settings.escalationChain ?? stored.escalationChain ?? DEFAULT_POLICY.escalationChain,
     quietHours: {
       ...DEFAULT_POLICY.quietHours,
       ...stored.quietHours,
@@ -276,24 +264,6 @@ export function NotificationsCard({
     });
   };
 
-  const addEscalationStep = (): void => {
-    const nextTier = policy.escalationChain.length + 1;
-    const defaultChannel = settings.channels[0]?.id ?? "";
-    setPolicy((p) => ({
-      ...p,
-      escalationChain: [
-        ...p.escalationChain,
-        {
-          id: `esc-${Date.now()}-${nextTier}`,
-          tier: nextTier,
-          channelId: defaultChannel,
-          afterMinutes: nextTier * 5,
-          minSeverity: "warning",
-        },
-      ],
-    }));
-  };
-
   const savePolicy = async (): Promise<void> => {
     setPolicyStatus("");
     if (typeof window !== "undefined") {
@@ -305,12 +275,11 @@ export function NotificationsCard({
     }
     const payload = {
       action: "notify-settings-save",
-      escalationChain: policy.escalationChain,
       quietHours: policy.quietHours,
     } as unknown as HubRequest;
     const next = await act(payload);
     if (next) {
-      setPolicyStatus("Notification routing policy saved.");
+      setPolicyStatus("Quiet hours saved.");
     }
   };
 
@@ -352,7 +321,7 @@ export function NotificationsCard({
           >
             <div>
               <strong>{c.name}</strong>{" "}
-              <span className="ai-chip">{KINDS[c.kind].label}</span>{" "}
+              <span className="ai-chip">{KINDS[c.kind]?.label ?? c.kind}</span>{" "}
               <small className="ai-muted">{c.host}</small>
               <small>
                 {c.enabled
@@ -622,11 +591,8 @@ export function NotificationsCard({
       >
         <div className="ai-card-head">
           <div>
-            <strong>Who is told next, and quiet hours</strong>
-            <small>
-              Who is told next when an approval or an alert gets no answer, and
-              the hours when only urgent things are sent.
-            </small>
+            <strong>Quiet hours</strong>
+            <small>The hours when only urgent things are sent.</small>
           </div>
           <div className="ai-tags">
             {policy.quietHours.enabled && (
@@ -638,127 +604,6 @@ export function NotificationsCard({
               </span>
             )}
           </div>
-        </div>
-
-        <div data-testid="escalation-chain-config">
-          <div className="ai-section-head">
-            <strong>Who is told next</strong>
-            <button
-              type="button"
-              data-testid="add-escalation-step-btn"
-              onClick={addEscalationStep}
-            >
-              Add a step
-            </button>
-          </div>
-          {policy.escalationChain.length === 0 ? (
-            <small className="ai-muted">
-              No steps yet. Something that gets no answer is sent to your
-              channels once, and reminded about once.
-            </small>
-          ) : (
-            <div className="ai-rows">
-              {policy.escalationChain.map((step, idx) => (
-                <div
-                  key={step.id}
-                  className="ai-row"
-                  data-testid={`escalation-step-${idx + 1}`}
-                >
-                  <div className="ai-form-row">
-                    <span>Step {idx + 1}</span>
-                    <label>
-                      After (min)
-                      <input
-                        type="number"
-                        aria-label={`Step ${idx + 1} minutes to wait`}
-                        min={1}
-                        max={240}
-                        value={step.afterMinutes}
-                        onChange={(e) =>
-                          setPolicy((p) => ({
-                            ...p,
-                            escalationChain: p.escalationChain.map((s) =>
-                              s.id === step.id
-                                ? {
-                                    ...s,
-                                    afterMinutes: Math.max(
-                                      1,
-                                      Number(e.target.value) || 1,
-                                    ),
-                                  }
-                                : s,
-                            ),
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Target channel
-                      <select
-                        aria-label={`Step ${idx + 1} channel`}
-                        value={step.channelId}
-                        onChange={(e) =>
-                          setPolicy((p) => ({
-                            ...p,
-                            escalationChain: p.escalationChain.map((s) =>
-                              s.id === step.id
-                                ? { ...s, channelId: e.target.value }
-                                : s,
-                            ),
-                          }))
-                        }
-                      >
-                        <option value="">All enabled channels</option>
-                        {settings.channels.map((ch) => (
-                          <option key={ch.id} value={ch.id}>
-                            {ch.name} ({KINDS[ch.kind].label})
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Min severity
-                      <select
-                        aria-label={`Step ${idx + 1} severity`}
-                        value={step.minSeverity}
-                        onChange={(e) =>
-                          setPolicy((p) => ({
-                            ...p,
-                            escalationChain: p.escalationChain.map((s) =>
-                              s.id === step.id
-                                ? {
-                                    ...s,
-                                    minSeverity: e.target.value as EscalationStep["minSeverity"],
-                                  }
-                                : s,
-                            ),
-                          }))
-                        }
-                      >
-                        <option value="all">All urgent items</option>
-                        <option value="warning">Warning &amp; Critical</option>
-                        <option value="critical">Critical only</option>
-                      </select>
-                    </label>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label={`Remove step ${idx + 1}`}
-                    onClick={() =>
-                      setPolicy((p) => ({
-                        ...p,
-                        escalationChain: p.escalationChain
-                          .filter((s) => s.id !== step.id)
-                          .map((s, i) => ({ ...s, tier: i + 1 })),
-                      }))
-                    }
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
         <div data-testid="quiet-hours-config">
@@ -866,7 +711,7 @@ export function NotificationsCard({
             data-testid="save-notify-policy-btn"
             onClick={() => void savePolicy()}
           >
-            Save notification policy
+            Save quiet hours
           </button>
           {policyStatus && <small className="ai-ok">{policyStatus}</small>}
         </div>

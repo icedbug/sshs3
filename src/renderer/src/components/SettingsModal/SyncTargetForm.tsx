@@ -949,7 +949,7 @@ export const SyncTargetForm: React.FC<SyncTargetFormProps> = ({ draft, onChange,
             </Field>
           </div>
 
-          <Field label="Endpoint (optional — for MinIO, R2, Wasabi, etc.)">
+          <Field label="Endpoint (optional: for MinIO, R2, Wasabi, etc.)">
             {(id) => (
               <input
                 id={id}

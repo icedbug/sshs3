@@ -1,3 +1,4 @@
+import { isWebBrowserMode } from './webClientBridge';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { K8sWebLoginResult } from '@shared/types/kubernetes';
 import { ELECTRON_IPC_PREFIX } from './format';
@@ -39,7 +40,8 @@ export function useOpenShiftWebLogin(options: UseOpenShiftWebLoginOptions) {
   useEffect(() => {
     const seq = ++probeSeq.current;
     const trimmed = server.trim();
-    if (!enabled || trimmed.length < MIN_SERVER_LENGTH) {
+    // In the web app the browser that would open is the server's: sign-in with a token is the way there.
+    if (!enabled || isWebBrowserMode() || trimmed.length < MIN_SERVER_LENGTH) {
       setSupported(false);
       setChecking(false);
       return;

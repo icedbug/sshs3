@@ -1,3 +1,4 @@
+import { externalLinkProps } from "../../lib/openLink";
 import { useEffect, useRef, useState } from "react";
 import {
   type HubRequest,
@@ -1444,7 +1445,7 @@ export function KnowledgeBaseView({
             )}
             {doc.sourceType === "confluence" && doc.external?.url && (
               <small className="ai-last-run">
-                <a href={doc.external.url} target="_blank" rel="noreferrer noopener">
+                <a {...externalLinkProps(doc.external.url)}>
                   Open in Confluence
                 </a>{" "}
                 · version {doc.external.version}

@@ -204,7 +204,7 @@ describe('TeamVaultListPanel', () => {
       expect(teamVaultSetTarget).not.toHaveBeenCalled();
       expect(teamVaultPull).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole('button', { name: /This is my team — join/i }));
+      fireEvent.click(screen.getByRole('button', { name: /This is my team: join/i }));
 
       await waitFor(() =>
         expect(teamVaultSetTarget).toHaveBeenCalledWith(
@@ -244,7 +244,7 @@ describe('TeamVaultListPanel', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Read invite' }));
       await waitFor(() => expect(screen.getByText('vlt_invited')).toBeInTheDocument());
 
-      fireEvent.click(screen.getByRole('button', { name: /Not my team — discard/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Not my team: discard/i }));
 
       await waitFor(() => expect(screen.queryByText('vlt_invited')).not.toBeInTheDocument());
       expect(screen.getByPlaceholderText(/sshs3 Team Vault invite for/i)).toBeInTheDocument();

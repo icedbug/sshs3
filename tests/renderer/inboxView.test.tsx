@@ -143,7 +143,10 @@ describe("what is waiting for a person", () => {
         onOpenView={openView}
       />,
     );
+    // It asks first: the address stops working for whatever posts to it.
     fireEvent.click(screen.getByRole("button", { name: "Revoke and turn off" }));
+    expect(act).not.toHaveBeenCalledWith({ action: "alert-hook-disable" });
+    fireEvent.click(screen.getByRole("button", { name: "Turn it off? The address stops working." }));
     await waitFor(() => expect(act).toHaveBeenCalledWith({ action: "alert-hook-disable" }));
     await waitFor(() =>
       expect(screen.getByText(/The webhook address is shown once when created/)).toBeVisible(),
@@ -215,7 +218,7 @@ describe("a teammate's change that needs a second person", () => {
     expect(item).not.toHaveProperty("risk");
   });
 
-  it("is answered there, and the answer goes to the teammate's run", () => {
+  it("is answered there, and the answer goes to the teammate's run", async () => {
     const act = vi.fn(async () => hub());
     render(<InboxView hub={teammates} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
     const card = screen.getByTestId("inbox-peer");
@@ -226,6 +229,9 @@ describe("a teammate's change that needs a second person", () => {
     expect(within(card).getByTestId("peer-count-c7")).toHaveTextContent("Approved so far by Omar Lind. 2 different people have to approve.");
     fireEvent.click(within(card).getByRole("button", { name: "Approve" }));
     expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "c7", approved: true });
+    // One answer at a time: the buttons are locked until the first one has landed.
+    expect(within(card).getByRole("button", { name: "Deny" })).toBeDisabled();
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Deny" })).toBeEnabled());
     fireEvent.click(within(card).getByRole("button", { name: "Deny" }));
     expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "c7", approved: false });
   });
@@ -349,7 +355,7 @@ describe("a teammate's plan that needs a second person", () => {
     expect(item.detail).toBe("1. [medium risk] Restart nginx (on web-prod-01)\n   $ sudo systemctl restart nginx\n2. [low risk] Look at the error log");
   });
 
-  it("is approved or not as a plan, and the answer goes to the teammate's conversation", () => {
+  it("is approved or not as a plan, and the answer goes to the teammate's conversation", async () => {
     const act = vi.fn(async () => hub());
     render(<InboxView hub={teammates} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
     const card = screen.getByTestId("inbox-peer");
@@ -358,6 +364,7 @@ describe("a teammate's plan that needs a second person", () => {
     expect(within(card).getByTestId("peer-count-p1")).toHaveTextContent("Approved so far by Omar Lind. 2 different people have to approve.");
     fireEvent.click(within(card).getByRole("button", { name: "Approve the plan" }));
     expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "p1", approved: true });
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Do not approve" })).toBeEnabled());
     fireEvent.click(within(card).getByRole("button", { name: "Do not approve" }));
     expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "p1", approved: false });
   });

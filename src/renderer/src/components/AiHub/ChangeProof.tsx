@@ -131,7 +131,7 @@ export function ChangeProof({
 
   const executeVerifiedRollback = async (): Promise<void> => {
     if (!taskId || !change.id) {
-      setRollbackError("Task context unavailable for rollback execution.");
+      setRollbackError("This rollback cannot be started from here. Open the conversation the change belongs to.");
       return;
     }
     setRollbackBusy(true);

@@ -27,7 +27,11 @@ interface PendingConfirm extends ConfirmOptions {
 
 const ConfirmContext = createContext<((options: ConfirmOptions) => Promise<boolean>) | null>(null);
 
-export const ConfirmProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const ConfirmProvider: React.FC<{
+  children: React.ReactNode;
+  /** The stacking class of the dialog. A window that sits above the rest of the app gives a higher one. */
+  layerClassName?: string;
+}> = ({ children, layerClassName = 'z-[150]' }) => {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   // The request on screen, readable outside render: a second confirm() while one is open must not leave the first
   // promise unresolved for ever (its caller would hang), so it is answered "no" before the new one replaces it.
@@ -72,7 +76,7 @@ export const ConfirmProvider: React.FC<{ children: React.ReactNode }> = ({ child
           aria-label={pending.title ? undefined : 'Confirm'}
           data-testid="confirm-dialog"
           onClick={handleBackdropClick}
-          className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 animate-in fade-in duration-150 p-4"
+          className={`fixed inset-0 ${layerClassName} flex items-center justify-center bg-black/65 animate-in fade-in duration-150 p-4`}
         >
           <div className="w-full max-w-sm rounded-xl border border-border-subtle bg-app-card p-5 shadow-2xl">
             <div className="flex items-start gap-3">
@@ -122,6 +126,12 @@ export const ConfirmProvider: React.FC<{ children: React.ReactNode }> = ({ child
     </ConfirmContext.Provider>
   );
 };
+
+/** The app's question dialog when there is one around, or nothing: for a part that is also drawn on its own. */
+// eslint-disable-next-line react-refresh/only-export-components -- companion hook for context provider in same file
+export function useOptionalConfirm(): ((options: ConfirmOptions) => Promise<boolean>) | null {
+  return useContext(ConfirmContext);
+}
 
 // eslint-disable-next-line react-refresh/only-export-components -- companion hook for context provider in same file
 export function useConfirm(): (options: ConfirmOptions) => Promise<boolean> {

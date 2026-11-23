@@ -270,17 +270,22 @@ describe("tickets in the inbox", () => {
     const act = vi.fn(async () => hub({}));
     const review = hub({ workTickets: [ticket("r", { status: "review", result: "Done." })] });
     const { unmount } = render(<InboxView hub={review} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
-    fireEvent.keyDown(window, { key: "e" });
+    // Nothing is chosen yet: the key answers nothing.
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "e" });
+    expect(screen.queryByTestId("inbox-done-arm")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "j" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "e" });
     expect(act).not.toHaveBeenCalled();
     expect(screen.getByTestId("inbox-done-arm")).toHaveTextContent("Press e again to mark it done");
-    fireEvent.keyDown(window, { key: "e" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "e" });
     expect(act).toHaveBeenCalledWith({ action: "ticket-review", id: "r", approve: true, note: "" });
     expect(screen.queryByTestId("inbox-done-arm")).not.toBeInTheDocument();
     unmount();
 
     act.mockClear();
     render(<InboxView hub={alerts} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
-    fireEvent.keyDown(window, { key: "e" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "j" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "e" });
     expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "ack-inbox", acknowledged: true }));
   });
 
@@ -288,12 +293,12 @@ describe("tickets in the inbox", () => {
     vi.useFakeTimers();
     const act = vi.fn(async () => hub({}));
     render(<InboxView hub={hub({ workTickets: [ticket("r", { status: "review" })] })} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
-    fireEvent.keyDown(window, { key: "e" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "j" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "e" });
     reactAct(() => void vi.advanceTimersByTime(5000));
     expect(screen.getByTestId("inbox-done-arm")).toBeInTheDocument();
     reactAct(() => void vi.advanceTimersByTime(5100));
     expect(screen.queryByTestId("inbox-done-arm")).not.toBeInTheDocument();
-    fireEvent.keyDown(window, { key: "e" });
     expect(act).not.toHaveBeenCalled();
   });
 });

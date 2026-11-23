@@ -1,3 +1,4 @@
+import { externalLinkProps } from "../../../lib/openLink";
 import { Check, Terminal, X } from "lucide-react";
 import { SHELL_KINDS, type ShellKind } from "@shared/types/aiHub";
 import { PlanCard } from "../PlanCard";
@@ -111,7 +112,7 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
                       return task.sources.map((src) =>
                         // What was read in the team's chat opens the thread it came from, unless simulated in the demo lab.
                         src.kind === "chat" && src.link && !hasSimulatedChat ? (
-                          <a key={src.id} className="ai-pill" title={src.text.slice(0, 200)} href={src.link} target="_blank" rel="noreferrer noopener">
+                          <a key={src.id} className="ai-pill" {...externalLinkProps(src.link)} title={src.text.slice(0, 200)}>
                             {src.label}
                           </a>
                         ) : (

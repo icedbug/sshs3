@@ -1,3 +1,4 @@
+import { desktopOnlyHere } from './ui/DesktopOnly';
 import React, { useState, useRef, useEffect } from 'react';
 import { pkcs11LibDisplayName, looksLikeLibraryPath } from '../lib/smartcard';
 import { nextMenuIndex, nextTabIndex } from '../lib/rovingNavigation';
@@ -468,7 +469,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                     Loading...
                   </div>
                 ) : !cachedAgents || cachedAgents.length === 0 ? (
-                  <p className="py-1 text-xs text-txt-muted">Nothing cached — no PIN unlocked right now.</p>
+                  <p className="py-1 text-xs text-txt-muted">Nothing cached: no PIN unlocked right now.</p>
                 ) : (
                   <ul className="space-y-2">
                     {cachedAgents.map((agent) => (
@@ -574,7 +575,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                         onUnlockSmartcard().then(({ started }) => {
                           setIsSmartcardMenuOpen(false);
                           return started
-                            ? 'Unlocking — enter your PIN when asked'
+                            ? 'Unlocking: enter your PIN when asked'
                             : 'Nothing to unlock: already unlocked or being unlocked, or no smartcard/security key found (if several PKCS#11 drivers are installed, pick one in Settings)';
                         }),
                         'Could not start the unlock',
@@ -600,7 +601,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                           setCachedAgents([]);
                           setIsSmartcardMenuOpen(false);
                           return locked > 0
-                            ? `Smartcard cache cleared — ${locked} cached agent${locked === 1 ? '' : 's'} locked`
+                            ? `Smartcard cache cleared: ${locked} cached agent${locked === 1 ? '' : 's'} locked`
                             : 'No cached smartcard agents to clear';
                         }),
                         'Could not lock the smartcards',
@@ -621,7 +622,7 @@ export const TabBar: React.FC<TabBarProps> = ({
             )}
           </div>
         )}
-        <SshCaStatusBadge onOpenSettings={onOpenSettings} />
+        {!desktopOnlyHere() && <SshCaStatusBadge onOpenSettings={onOpenSettings} />}
         <button
           type="button"
           data-testid="quick-profiles-btn"
@@ -632,6 +633,8 @@ export const TabBar: React.FC<TabBarProps> = ({
         >
           <Server className="h-4 w-4" />
         </button>
+        {/* No handler: tunnels are not offered here (the web app, where a tunnel would open a port on the server). */}
+        {onOpenTunnels && (
         <button
           type="button"
           data-testid="quick-tunnels-btn"
@@ -654,6 +657,7 @@ export const TabBar: React.FC<TabBarProps> = ({
         >
           <Cable className="h-4 w-4" />
         </button>
+        )}
         <button
           type="button"
           data-testid="quick-dirsync-profiles-btn"

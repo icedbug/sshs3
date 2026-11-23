@@ -1,13 +1,204 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { GitFork, Pencil, RotateCcw, Terminal } from "lucide-react";
-import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS } from "@shared/types/aiHub";
+import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS, type AgentMessage } from "@shared/types/aiHub";
+import type { FileRef } from "../reportRefs";
 import { AnsiLogView, DiffViewer } from "../DiffViewer";
 import { copyToClipboard, RichMarkdownContent } from "../RichMarkdownContent";
 import { AnswerSources } from "../AnswerSources";
 import { ChangeProof } from "../ChangeProof";
+import { ConfirmButton } from "../ConfirmButton";
 import { ChangeReveal, ChangeSecretInputs } from "../ChangeSecrets";
 import { lastUserMessageId } from "./panelHelpers";
 import type { PanelState } from "./usePanelState";
+
+/** What a message row can ask of the panel. One object for the whole conversation, the same on every render. */
+interface RowActions {
+  edit(text: string): void;
+  retry(): void;
+  fork(messageId: string): void;
+  copy(messageId: string, text: string): void;
+  saveToMemory(text: string): void;
+  followUp(): void;
+  openRef(ref: string): void;
+  openFileRef(ref: FileRef): void;
+  stage(messageId: string, command: string, line: number): void;
+  run(messageId: string, command: string, line: number): void;
+}
+
+interface MessageRowProps {
+  message: AgentMessage;
+  taskId?: string;
+  agentIcon?: string;
+  agentName?: string;
+  running: boolean;
+  /** A request is on its way. Only the row that offers Retry is told. */
+  busy: boolean;
+  copied: boolean;
+  /** The last thing in the conversation: the answer's own buttons are under it. */
+  isLast: boolean;
+  /** The last message a person wrote: it can be asked again. */
+  canRetry: boolean;
+  /** The message a running answer is being written into. */
+  streaming: boolean;
+  /** The short names of this conversation's commands, for an answer that points at them. */
+  refs?: ReadonlySet<string>;
+  /** Only the end of a long message is here: its code blocks cannot be numbered yet. */
+  clipped: boolean;
+  actions: RowActions;
+}
+
+/**
+ * One message of the conversation. It is drawn again only when what it is given changes, so the
+ * markdown of a long conversation is not worked out anew for every key pressed in the composer.
+ */
+export const MessageRow = memo(function MessageRow({
+  message,
+  taskId,
+  agentIcon,
+  agentName,
+  running,
+  busy,
+  copied,
+  isLast,
+  canRetry,
+  streaming,
+  refs,
+  clipped,
+  actions,
+}: MessageRowProps): JSX.Element {
+  const terminalActions = useMemo(
+    () =>
+      clipped
+        ? undefined
+        : {
+            stage: (command: string, line: number) => actions.stage(message.id, command, line),
+            run: (command: string, line: number) => actions.run(message.id, command, line),
+          },
+    [clipped, actions, message.id],
+  );
+  return (
+    <article
+      className={
+        "ai-message ai-message-" +
+        message.role +
+        // What the app told the agent on the user's behalf (a plan decision) is a one-line note.
+        (message.text.startsWith("[sshs3]") ? " ai-message-note" : "")
+      }
+    >
+      <div className="ai-message-header">
+        <small className="ai-message-author">
+          <span className="ai-avatar-badge">{message.role === "user" ? "Y" : agentIcon || "A"}</span>
+          <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Assistant" : "sshs3"}</span>
+          {message.role === "assistant" && agentName && <span className="ai-pill">{agentName}</span>}
+        </small>
+        <span className="ai-message-meta">
+          {message.at > 0 && (
+            <span>
+              {new Date(message.at).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          )}
+          {message.role === "user" && !running && (
+            <>
+              <button
+                type="button"
+                className="ai-code-btn"
+                title="Edit prompt in composer"
+                onClick={() => actions.edit(message.text)}
+              >
+                <Pencil size={11} /> Edit
+              </button>
+              {/* Asking again answers the last question anew: the question is not posted a second time. */}
+              {canRetry && (
+                <button
+                  type="button"
+                  className="ai-code-btn"
+                  data-testid="ai-message-retry"
+                  title="Ask again. The answer below is replaced by the new one."
+                  disabled={busy}
+                  onClick={() => actions.retry()}
+                >
+                  <RotateCcw size={11} /> Retry
+                </button>
+              )}
+            </>
+          )}
+          {taskId && (
+            <button
+              type="button"
+              className="ai-code-btn"
+              title="Start a new conversation from a copy of this one, up to this message"
+              onClick={() => actions.fork(message.id)}
+            >
+              <GitFork size={11} /> Branch off here
+            </button>
+          )}
+          {message.role === "assistant" && (
+            <button
+              type="button"
+              className="ai-code-btn"
+              title="Copy the whole answer"
+              onClick={() => actions.copy(message.id, message.text)}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          )}
+        </span>
+      </div>
+      {message.images && message.images.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            marginBottom: "8px",
+          }}
+        >
+          {message.images.map((img, imgIdx) => (
+            <img
+              key={imgIdx}
+              src={img.dataUrl}
+              alt={img.label}
+              title={img.label}
+              style={{
+                maxWidth: "240px",
+                maxHeight: "160px",
+                borderRadius: "8px",
+                border: "1px solid rgba(255,255,255,0.14)",
+                objectFit: "cover",
+              }}
+            />
+          ))}
+        </div>
+      )}
+      <RichMarkdownContent
+        text={message.text.startsWith(CONTEXT_NOTE_PREFIX) ? message.text.slice(CONTEXT_NOTE_PREFIX.length) : message.text}
+        refs={refs}
+        onOpenRef={actions.openRef}
+        terminalActions={terminalActions}
+        onOpenFileRef={actions.openFileRef}
+      />
+      {message.role === "assistant" && taskId && (
+        <AnswerSources key={`${taskId}:${message.id}`} taskId={taskId} messageId={message.id} count={message.sourceCallCount} streaming={streaming} />
+      )}
+      {message.role === "assistant" && isLast && !running && (
+        <div className="ai-message-footer">
+          <button type="button" className="ai-msg-action-btn" onClick={() => actions.copy(message.id, message.text)}>
+            {copied ? "Copied" : "Copy answer"}
+          </button>
+          <button type="button" className="ai-msg-action-btn" onClick={() => actions.saveToMemory(message.text)}>
+            Save to team memory
+          </button>
+          <button type="button" className="ai-msg-action-btn" onClick={() => actions.followUp()}>
+            Follow up
+          </button>
+        </div>
+      )}
+    </article>
+  );
+});
 
 /**
  * The conversation itself: each message, and each change an agent made or asked for, in the order they happened.
@@ -24,21 +215,82 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
     activeAgent,
     task,
     running,
-    setPrompt,
-    composer,
     busy,
     act,
-    terminal,
-    handleForkTask,
-    copyMessage,
     copiedMsgId,
-    terminalHandoff,
     showingMessageTail,
-    handleOpenFileRef,
     handleRestoreCheckpoint,
     approvalNotes,
     setApprovalNotes,
   } = p;
+  // The rows ask the panel through this one object, which is the same on every render: it reads the
+  // panel's state when it is used. So a row is drawn again only when its own message changes, and
+  // typing in the composer draws no message again.
+  const live = useRef(p);
+  live.current = p;
+  const actions = useMemo<RowActions>(
+    () => ({
+      edit(text) {
+        live.current.setPrompt(text);
+        setTimeout(() => live.current.composer.current?.focus(), 20);
+      },
+      retry() {
+        const { task: now, terminal: at, act: send } = live.current;
+        if (!now) return;
+        void send({
+          action: "reply",
+          taskId: now.id,
+          text: "",
+          retry: true,
+          sessionId: at && at.state !== "disconnected" ? at.id : undefined,
+        });
+      },
+      fork(messageId) {
+        void live.current.handleForkTask(messageId);
+      },
+      copy(messageId, text) {
+        void live.current.copyMessage(messageId, text);
+      },
+      saveToMemory(text) {
+        void live.current.act({
+          action: "memory-save",
+          entry: {
+            kind: "memory",
+            scope: "workspace",
+            title: live.current.task?.title?.slice(0, 60) || "From an AI conversation",
+            text: text.slice(0, 1200),
+          },
+        });
+      },
+      followUp() {
+        live.current.setPrompt("Keep investigating and propose the next concrete verification step.");
+        setTimeout(() => live.current.composer.current?.focus(), 20);
+      },
+      openRef(ref) {
+        const el = document.querySelector<HTMLDetailsElement>(`[data-ref="${ref}"]`);
+        if (!el) return;
+        el.open = true;
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+        el.classList.add("ai-change-flash");
+        setTimeout(() => el.classList.remove("ai-change-flash"), 1600);
+      },
+      openFileRef(ref) {
+        live.current.handleOpenFileRef(ref);
+      },
+      stage(messageId, command, line) {
+        live.current.terminalHandoff.forMessage(messageId)?.stage(command, line);
+      },
+      run(messageId, command, line) {
+        live.current.terminalHandoff.forMessage(messageId)?.run(command, line);
+      },
+    }),
+    [],
+  );
+  // The short names of this conversation's commands, as one set that changes only when a name is added.
+  const refNames = (task?.changes ?? []).flatMap((c) => (c.ref ? [c.ref] : [])).join(" ");
+  const refs = useMemo(() => new Set(refNames.split(" ").filter(Boolean)), [refNames]);
+  const lastUserId = lastUserMessageId(task);
+  const lastMessageId = task?.messages.at(-1)?.id;
   // What was typed for a change that no longer waits (answered elsewhere, stopped, timed out) is dropped.
   const waitingIds = (task?.changes ?? []).filter((c) => c.status === "pending").map((c) => c.id).join(" ");
   useEffect(() => {
@@ -49,200 +301,22 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
     <>
                 {timeline.map((item, idx) =>
                   item.message ? (
-                    <article
-                      className={
-                        "ai-message ai-message-" +
-                        item.message.role +
-                        // What the app told the agent on the user's behalf (a plan decision) is a one-line note.
-                        (item.message.text.startsWith("[sshs3]") ? " ai-message-note" : "")
-                      }
+                    <MessageRow
                       key={item.message.id}
-                    >
-                      <div className="ai-message-header">
-                        <small className="ai-message-author">
-                          <span className="ai-avatar-badge">
-                            {item.message.role === "user"
-                              ? "Y"
-                              : activeAgent?.icon || "A"}
-                          </span>
-                          <span>
-                            {item.message.role === "user"
-                              ? "You"
-                              : item.message.role === "assistant"
-                                ? "Assistant"
-                                : "sshs3"}
-                          </span>
-                          {item.message.role === "assistant" &&
-                            (task?.agentName || activeAgent?.name) && (
-                              <span className="ai-pill">
-                                {task?.agentName || activeAgent?.name}
-                              </span>
-                            )}
-                        </small>
-                        <span className="ai-message-meta">
-                          {item.message.at > 0 && (
-                            <span>
-                              {new Date(item.message.at).toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </span>
-                          )}
-                          {item.message.role === "user" && !running && (
-                            <>
-                              <button
-                                type="button"
-                                className="ai-code-btn"
-                                title="Edit prompt in composer"
-                                onClick={() => {
-                                  setPrompt(item.message!.text);
-                                  setTimeout(() => composer.current?.focus(), 20);
-                                }}
-                              >
-                                <Pencil size={11} /> Edit
-                              </button>
-                              {/* Asking again answers the last question anew: the question is not posted a second time. */}
-                              {task && item.message.id === lastUserMessageId(task) && (
-                                <button
-                                  type="button"
-                                  className="ai-code-btn"
-                                  data-testid="ai-message-retry"
-                                  title="Ask again. The answer below is replaced by the new one."
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void act({
-                                      action: "reply",
-                                      taskId: task.id,
-                                      text: "",
-                                      retry: true,
-                                      sessionId: terminal && terminal.state !== "disconnected" ? terminal.id : undefined,
-                                    })
-                                  }
-                                >
-                                  <RotateCcw size={11} /> Retry
-                                </button>
-                              )}
-                            </>
-                          )}
-                          {task && (
-                            <button
-                              type="button"
-                              className="ai-code-btn"
-                              title="Start a new conversation from a copy of this one, up to this message"
-                              onClick={() => void handleForkTask(item.message!.id)}
-                            >
-                              <GitFork size={11} /> Branch off here
-                            </button>
-                          )}
-                          {item.message.role === "assistant" && (
-                            <button
-                              type="button"
-                              className="ai-code-btn"
-                              title="Copy the whole answer"
-                              onClick={() => void copyMessage(item.message!.id, item.message!.text)}
-                            >
-                              {copiedMsgId === item.message.id
-                                ? "Copied"
-                                : "Copy"}
-                            </button>
-                          )}
-                        </span>
-                      </div>
-                      {item.message.images && item.message.images.length > 0 && (
-                        <div
-                          style={{
-                            display: "flex",
-                            flexWrap: "wrap",
-                            gap: "8px",
-                            marginBottom: "8px",
-                          }}
-                        >
-                          {item.message.images.map((img, imgIdx) => (
-                            <img
-                              key={imgIdx}
-                              src={img.dataUrl}
-                              alt={img.label}
-                              title={img.label}
-                              style={{
-                                maxWidth: "240px",
-                                maxHeight: "160px",
-                                borderRadius: "8px",
-                                border: "1px solid rgba(255,255,255,0.14)",
-                                objectFit: "cover",
-                              }}
-                            />
-                          ))}
-                        </div>
-                      )}
-                      <RichMarkdownContent
-                        text={item.message.text.startsWith(CONTEXT_NOTE_PREFIX) ? item.message.text.slice(CONTEXT_NOTE_PREFIX.length) : item.message.text}
-                        refs={
-                          item.message.role === "assistant" && task
-                            ? new Set(task.changes.flatMap((c) => (c.ref ? [c.ref] : [])))
-                            : undefined
-                        }
-                        onOpenRef={(ref) => {
-                          const el = document.querySelector<HTMLDetailsElement>(`[data-ref="${ref}"]`);
-                          if (!el) return;
-                          el.open = true;
-                          el.scrollIntoView({ block: "center", behavior: "smooth" });
-                          el.classList.add("ai-change-flash");
-                          setTimeout(() => el.classList.remove("ai-change-flash"), 1600);
-                        }}
-                        terminalActions={terminalHandoff.forMessage(showingMessageTail && item.message.text.length >= SNAPSHOT_TAIL_CHARS ? undefined : item.message.id)}
-                        onOpenFileRef={handleOpenFileRef}
-                      />
-                      {item.message.role === "assistant" && task && (
-                        <AnswerSources key={`${task.id}:${item.message.id}`} taskId={task.id} messageId={item.message.id}
-                          count={item.message.sourceCallCount} streaming={running && item.message.id === task.messages.at(-1)?.id} />
-                      )}
-                      {item.message.role === "assistant" &&
-                        idx === timeline.length - 1 &&
-                        !running && (
-                          <div className="ai-message-footer">
-                            <button
-                              type="button"
-                              className="ai-msg-action-btn"
-                              onClick={() => void copyMessage(item.message!.id, item.message!.text)}
-                            >
-                              {copiedMsgId === item.message.id
-                                ? "Copied"
-                                : "Copy answer"}
-                            </button>
-                            <button
-                              type="button"
-                              className="ai-msg-action-btn"
-                              onClick={() => {
-                                void act({
-                                  action: "memory-save",
-                                  entry: {
-                                    kind: "memory",
-                                    scope: "workspace",
-                                    title:
-                                      task?.title?.slice(0, 60) ||
-                                      "From an AI conversation",
-                                    text: item.message!.text.slice(0, 1200),
-                                  },
-                                });
-                              }}
-                            >
-                              Save to team memory
-                            </button>
-                            <button
-                              type="button"
-                              className="ai-msg-action-btn"
-                              onClick={() => {
-                                setPrompt(
-                                  "Keep investigating and propose the next concrete verification step.",
-                                );
-                                setTimeout(() => composer.current?.focus(), 20);
-                              }}
-                            >
-                              Follow up
-                            </button>
-                          </div>
-                        )}
-                    </article>
+                      message={item.message}
+                      taskId={task?.id}
+                      agentIcon={activeAgent?.icon}
+                      agentName={task?.agentName || activeAgent?.name}
+                      running={running}
+                      busy={busy && item.message.id === lastUserId}
+                      copied={copiedMsgId === item.message.id}
+                      isLast={idx === timeline.length - 1}
+                      canRetry={Boolean(task) && item.message.id === lastUserId}
+                      streaming={running && item.message.id === lastMessageId}
+                      refs={item.message.role === "assistant" && task ? refs : undefined}
+                      clipped={showingMessageTail && item.message.text.length >= SNAPSHOT_TAIL_CHARS}
+                      actions={actions}
+                    />
                   ) : item.change && task ? (
                     <details
                       className={"ai-change ai-change-" + item.change.status}
@@ -271,7 +345,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                             : item.change.status}
                         </small>
                       </summary>
-                      <ChangeProof change={item.change} />
+                      <ChangeProof change={item.change} taskId={task.id} />
                       {item.change.command && (
                         <div className="ai-code-block" style={{ marginTop: "8px" }}>
                           <div className="ai-code-header">
@@ -326,12 +400,14 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                             return null;
                           }
                           return (
-                            <button
-                              type="button"
+                            // It overwrites the file on the server with its earlier content: it asks first.
+                            <ConfirmButton
+                              label="Restore Checkpoint"
+                              confirmLabel="Put the file back as it was?"
                               className="ai-mini-btn"
-                              data-testid={`ai-restore-checkpoint-${item.change!.id}`}
+                              testId={`ai-restore-checkpoint-${item.change!.id}`}
                               disabled={busy}
-                              onClick={() => {
+                              onConfirm={() => {
                                 if (checkpointId) {
                                   // The hub finds the checkpoint by the change it belongs to.
                                   void handleRestoreCheckpoint(item.change!.id);
@@ -343,10 +419,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                                   });
                                 }
                               }}
-                            >
-                              <RotateCcw size={11} />
-                              Restore Checkpoint
-                            </button>
+                            />
                           );
                         })()}
                       </div>

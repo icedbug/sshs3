@@ -1,3 +1,4 @@
+import { externalLinkProps } from "../../lib/openLink";
 import { useState } from "react";
 import type { ChatConnectionView, ChatServiceName, ChatThreadView, HubSnapshot } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
@@ -202,7 +203,7 @@ export function ChatThread({
           hit.link && (
             <>
               {" · "}
-              <a href={hit.link} target="_blank" rel="noreferrer noopener">
+              <a {...externalLinkProps(hit.link)}>
                 Open in {NAME[hit.service]}
               </a>
             </>

@@ -119,7 +119,7 @@ export const BucketPolicyModal: React.FC<BucketPolicyModalProps> = ({
         <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3">
           <div className="flex items-center gap-2">
             <FileJson className="h-4 w-4 text-sky-400" />
-            <h2 className="text-sm font-semibold text-txt-primary">Bucket Policy &amp; CORS — {bucketName}</h2>
+            <h2 className="text-sm font-semibold text-txt-primary">Bucket Policy &amp; CORS: {bucketName}</h2>
           </div>
           <button aria-label="Close" title="Close" type="button" onClick={onClose} className="rounded-lg p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors">
             <X className="h-4 w-4" />

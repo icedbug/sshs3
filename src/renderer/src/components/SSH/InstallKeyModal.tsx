@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../../lib/clipboard';
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   Check,
@@ -218,7 +219,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
         const cmd = await window.multissh.buildInstallCommand(lines);
         setCommand(cmd);
         if (copy) {
-          await navigator.clipboard.writeText(cmd);
+          await writeClipboardText(cmd);
           setCopied(true);
           setTimeout(() => setCopied(false), 2000);
         }
@@ -240,7 +241,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
     try {
       const keysContent = selectedKeys.map((k) => k.line.trim()).join('\r\n');
       const ps = `if (!(Test-Path $HOME\\.ssh)) { New-Item -ItemType Directory -Path $HOME\\.ssh }; @'\r\n${keysContent}\r\n'@ | Out-File -Append -Encoding ascii -FilePath $HOME\\.ssh\\authorized_keys`;
-      await navigator.clipboard.writeText(ps);
+      await writeClipboardText(ps);
       setCopiedPowerShell(true);
       setTimeout(() => setCopiedPowerShell(false), 2000);
     } catch (err) {
@@ -250,7 +251,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
 
   const copyKeyOnly = async (key: LocalPublicKey) => {
     try {
-      await navigator.clipboard.writeText(key.line);
+      await writeClipboardText(key.line);
       setCopiedKeyId(key.id);
       setTimeout(() => {
         setCopiedKeyId((current) => (current === key.id ? null : current));

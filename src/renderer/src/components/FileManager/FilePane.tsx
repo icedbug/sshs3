@@ -411,7 +411,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
         .then((summary) => {
           if (controller.signal.aborted) return;
           const notes: string[] = [];
-          if (summary.truncated) notes.push(`limit reached (${RECURSIVE_MAX_RESULTS} hits / folder cap) — narrow the filter`);
+          if (summary.truncated) notes.push(`limit reached (${RECURSIVE_MAX_RESULTS} hits / folder cap): narrow the filter`);
           if (summary.skippedDirs > 0) notes.push(`${summary.skippedDirs} folder(s) unreadable`);
           setRecursiveNote(notes.length > 0 ? notes.join(' · ') : null);
         })

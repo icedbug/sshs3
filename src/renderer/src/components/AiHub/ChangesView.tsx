@@ -11,6 +11,7 @@ import { hubRequest } from "../../lib/aiHub";
 import { useFullTask } from "../../lib/aiHubTasks";
 import { AuditLogView } from "./AuditLogView";
 import { ChangeProof } from "./ChangeProof";
+import { ConfirmButton } from "./ConfirmButton";
 import { AnsiLogView, DiffViewer } from "./DiffViewer";
 import { RecordingPlayer } from "./RecordingPlayer";
 
@@ -559,16 +560,16 @@ export function ChangesView({
               )}
               <div className="ai-card-actions">
                 {restorable && e.taskId && c && (
-                  <button
-                    type="button"
-                    data-testid={`restore-checkpoint-${c.id}`}
+                  <ConfirmButton
+                    label={entryRestore?.busy ? "Restoring…" : "Restore Checkpoint"}
+                    confirmLabel="Put the file back as it was?"
+                    className=""
+                    testId={`restore-checkpoint-${c.id}`}
                     disabled={entryRestore?.busy}
-                    onClick={() =>
+                    onConfirm={() =>
                       void restoreCheckpoint(entryRestoreKey, e.taskId!, c.id)
                     }
-                  >
-                    {entryRestore?.busy ? "Restoring…" : "Restore Checkpoint"}
-                  </button>
+                  />
                 )}
                 {entryRestore?.error && e.taskId && c && (
                   <button
@@ -831,20 +832,20 @@ export function ChangesView({
                         </span>
                       )}
                       {group.taskId && group.restorableChangeId && (
-                        <button
-                          type="button"
-                          data-testid={`rewind-task-${group.taskId}`}
+                        <ConfirmButton
+                          label={setRestore?.busy ? "Rewinding…" : "Rewind Task"}
+                          confirmLabel="Put the files back as they were?"
+                          className=""
+                          testId={`rewind-task-${group.taskId}`}
                           disabled={setRestore?.busy}
-                          onClick={() =>
+                          onConfirm={() =>
                             void restoreCheckpoint(
                               setRestoreKey,
                               group.taskId!,
                               group.restorableChangeId!,
                             )
                           }
-                        >
-                          {setRestore?.busy ? "Rewinding…" : "Rewind Task"}
-                        </button>
+                        />
                       )}
                       {group.taskId && (
                         <button

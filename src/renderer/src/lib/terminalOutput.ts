@@ -1,3 +1,4 @@
+import { writeClipboardText } from './clipboard';
 import type { IMarker, Terminal } from '@xterm/xterm';
 import {
   PROMPT_TERMINATOR_CLASS,
@@ -735,10 +736,8 @@ export async function copyCleanOutputToClipboard(
   const info = tracker.getCleanOutput();
   if (!info) return null;
   try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(info.text);
-      return info;
-    }
+    await writeClipboardText(info.text);
+    return info;
   } catch {
     // Clipboard permission denied or document not focused
   }

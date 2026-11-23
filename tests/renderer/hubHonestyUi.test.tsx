@@ -154,8 +154,8 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
     const serverIdInput = within(webMcp).getByLabelText("The one server it may run on");
     expect(serverIdInput).not.toHaveAttribute("required");
     expect(serverIdInput).toHaveAttribute("aria-required", "true");
-    const form = webMcp.closest("form")!;
-    expect(form.checkValidity()).toBe(true);
+    // The settings are not one form any more: a field of a card cannot hold the settings' Save back.
+    expect(webMcp.closest("form")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "configure" })));
 

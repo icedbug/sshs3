@@ -1,3 +1,4 @@
+import { externalLinkProps } from "../../lib/openLink";
 import { useState } from "react";
 import type { HubSnapshot, KbPage } from "@shared/types/aiHub";
 import { AtlassianCard } from "./AtlassianCard";
@@ -132,7 +133,7 @@ export function PublishToConfluence({
             onConfirm={() => void publish({})}
           />
           <small className="ai-muted" data-testid={`kb-published-${page.id}`}>
-            <a href={published.url} target="_blank" rel="noreferrer noopener">
+            <a {...externalLinkProps(published.url)}>
               In Confluence
             </a>
             {published.revision === page.revision ? ", up to date" : `, at revision ${published.revision} of ${page.revision}`} · by {published.by}

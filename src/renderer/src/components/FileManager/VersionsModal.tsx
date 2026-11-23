@@ -131,7 +131,7 @@ export const VersionsModal: React.FC<VersionsModalProps> = ({
           <div className="flex items-center gap-2">
             <History className="h-4 w-4 text-sky-400" />
             <h2 className="text-sm font-semibold text-txt-primary">
-              {mode === 'bucket' ? 'Bucket Versioning' : 'Object Versions'} — {targetName}
+              {mode === 'bucket' ? 'Bucket Versioning' : 'Object Versions'}: {targetName}
             </h2>
           </div>
           <button aria-label="Close" title="Close" type="button" onClick={onClose} className="rounded-lg p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors">

@@ -50,10 +50,10 @@ export function formatSyncError(err: unknown, fallback = 'Something went wrong.'
     return { kind: 'smartcard', message };
   }
   if (/ECONNREFUSED/.test(message)) {
-    return { kind: 'network', message: 'Could not connect to the sync server — check the host, port, and that it is reachable.' };
+    return { kind: 'network', message: 'Could not connect to the sync server: check the host, port, and that it is reachable.' };
   }
   if (/ENOTFOUND|EAI_AGAIN/.test(message)) {
-    return { kind: 'network', message: 'Could not resolve the sync server\'s address — check the hostname.' };
+    return { kind: 'network', message: 'Could not resolve the sync server\'s address: check the hostname.' };
   }
   if (/ETIMEDOUT|timed out/i.test(message)) {
     return { kind: 'network', message: 'Connection to the sync server timed out.' };
@@ -61,7 +61,7 @@ export function formatSyncError(err: unknown, fallback = 'Something went wrong.'
   if (/all configured authentication methods failed|authentication failed/i.test(message)) {
     return {
       kind: 'network',
-      message: 'Could not authenticate to the sync server — check its username/password/key under "Change target".',
+      message: 'Could not authenticate to the sync server: check its username/password/key under "Change target".',
     };
   }
 

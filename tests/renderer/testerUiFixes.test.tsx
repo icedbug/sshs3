@@ -106,8 +106,8 @@ describe("settings: the name in the team's activity", () => {
 describe("settings: the save bar is not over the scrolling part", () => {
   it("keeps the save bar outside the scrolling area, with every section inside it", () => {
     const { container } = render(<Settings hub={makeHub()} act={vi.fn()} />);
-    const scroll = container.querySelector("form > .ai-scroll");
-    const bar = container.querySelector("form > .ai-set-save");
+    const scroll = container.querySelector(".ai-settings-form > .ai-scroll");
+    const bar = container.querySelector(".ai-settings-form > .ai-set-save");
     expect(scroll).not.toBeNull();
     expect(bar).not.toBeNull();
     expect(bar).toContainElement(screen.getByRole("button", { name: "Save settings" }));
@@ -124,7 +124,8 @@ describe("notification channels: Enter adds the channel", () => {
   // What a browser does with Enter in a field of a form, unless the key was handled.
   const pressEnter = (field: HTMLElement): void => {
     const notHandled = fireEvent.keyDown(field, { key: "Enter" });
-    if (notHandled) fireEvent.submit(field.closest("form")!);
+    const form = field.closest("form");
+    if (notHandled && form) fireEvent.submit(form);
   };
 
   it("adds the channel and does not save the settings", async () => {

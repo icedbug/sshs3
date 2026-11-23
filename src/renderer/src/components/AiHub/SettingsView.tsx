@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   type HubPreferences,
   type HubSnapshot,
@@ -54,6 +54,8 @@ export interface SettingsProps {
   onToggleLabs?: (enabled: boolean) => void;
   /** The last request that failed, as the settings show it at the top: a card can show it next to what was pressed. */
   error?: string;
+  /** Told when the main form starts or stops holding edits that are not saved, so closing can ask first. */
+  onUnsavedChange?: (unsaved: boolean) => void;
 }
 
 const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
@@ -105,6 +107,77 @@ interface ProfileDraft {
   activeRole: "" | AiProfileRole;
 }
 
+/** What the main form holds of the AI settings, by field. */
+export interface ConfigForm {
+  enabled: boolean;
+  provider: AiProvider;
+  model: string;
+  apiProtocol: ApiProtocol;
+  url: string;
+  embeddingModel: string;
+  fastModel: string;
+  actorName: string;
+  egressPolicy: AiEgressPolicy;
+  zdrConfirmed: boolean;
+  piiScrubbing: AiPiiScrubbingMode;
+  contextWindowTokens: number;
+  terminalContextChars: number;
+  maxOutputTokens: number;
+  maxToolTurns: number;
+  reasoningEffort: AiReasoningEffort;
+  temperature: number;
+}
+
+/** The fields that are the main model's own: a saved model's when one is chosen for the chat and the agents. */
+const MAIN_MODEL_FIELDS: readonly (keyof ConfigForm)[] = ["provider", "model", "apiProtocol", "url", "reasoningEffort", "zdrConfirmed"];
+
+/**
+ * The saved values the main form starts from. Runs use the saved model chosen for the chat and the
+ * agents when there is one, so its fields are the main model's fields; otherwise the settings' own are.
+ */
+export function savedConfigForm(config: HubSnapshot["config"], mainProfile: ProviderProfile | undefined): ConfigForm {
+  return {
+    enabled: config.enabled,
+    provider: mainProfile?.provider ?? config.provider,
+    model: mainProfile?.model ?? config.model,
+    apiProtocol: (mainProfile ? mainProfile.apiProtocol : config.apiProtocol) ?? "auto",
+    url: (mainProfile ? mainProfile.baseUrl : config.baseUrl) ?? "",
+    embeddingModel: config.embeddingModel ?? "",
+    fastModel: config.fastModel ?? "",
+    actorName: config.actorName ?? "",
+    egressPolicy: config.egressPolicy ?? "standard",
+    zdrConfirmed: Boolean(mainProfile?.zdrConfirmed ?? config.zdrConfirmed),
+    piiScrubbing: config.piiScrubbing ?? "standard",
+    contextWindowTokens: config.contextWindowTokens ?? 128000,
+    terminalContextChars: config.terminalContextChars ?? 8000,
+    maxOutputTokens: config.maxOutputTokens ?? 8192,
+    maxToolTurns: config.maxToolTurns ?? 20,
+    reasoningEffort: mainProfile?.reasoningEffort ?? config.reasoningEffort ?? "medium",
+    temperature: config.temperature ?? 0.2,
+  };
+}
+
+/** Whether a field holds what is saved. An empty text and a value that was never set are the same. */
+function sameValue(a: unknown, b: unknown): boolean {
+  return Object.is(a, b) || ((a === undefined || a === "") && (b === undefined || b === ""));
+}
+
+/** What a kind of work uses when no saved model is chosen for it, as the list says it. */
+export function roleDefaultLabel(
+  role: AiProfileRole,
+  main: { provider: AiProvider; model: string; fastModel: string; embeddingModel: string; mainProfileName?: string },
+): string {
+  const mainModel = main.model.trim() || "not set";
+  if (role === "primary") return "No saved model: the fields under Model";
+  if (role === "embedding") {
+    return main.provider === "openai-compatible" && main.embeddingModel.trim()
+      ? `The embedding model under Model (${main.embeddingModel.trim()})`
+      : "No model: the search matches words only";
+  }
+  if (main.fastModel.trim()) return `The model for background work (${main.fastModel.trim()})`;
+  return main.mainProfileName ? `Same as the main model: ${main.mainProfileName} (${mainModel})` : `Same as the main model (${mainModel})`;
+}
+
 function readStoredLabsEnabled(): boolean {
   try {
     if (typeof window === "undefined" || !window.localStorage) return false;
@@ -134,6 +207,7 @@ export function Settings({
   labsEnabled: controlledLabs,
   onToggleLabs,
   error,
+  onUnsavedChange,
 }: SettingsProps): JSX.Element {
   // The keys panel is written against the team server's HTTP API; on this app the same
   // calls are the hub's own requests.
@@ -144,6 +218,7 @@ export function Settings({
         scopes: string[];
         serverId?: string;
         expiresInDays?: number;
+        neverExpires?: boolean;
         tools?: string[];
       };
       const next = await act({
@@ -152,6 +227,8 @@ export function Settings({
         scopes: body.scopes,
         serverId: body.serverId,
         expiresInDays: body.expiresInDays,
+        // A key that never stops working is asked for in so many words: left unsaid, it gets 30 days.
+        ...(body.neverExpires ? { neverExpires: true } : {}),
         tools: body.tools,
       });
       const made = next?.reply?.mcpKey;
@@ -180,37 +257,92 @@ export function Settings({
     return data as T;
   };
 
-  const [provider, setProvider] = useState(hub.config.provider);
-  const [model, setModel] = useState(hub.config.model);
-  const [customModelMode, setCustomModelMode] = useState(false);
-  const [apiProtocol, setApiProtocol] = useState<ApiProtocol>(hub.config.apiProtocol ?? "auto");
-  const [url, setUrl] = useState(hub.config.baseUrl ?? "");
-  const [embeddingModel, setEmbeddingModel] = useState(hub.config.embeddingModel ?? "");
-  const [fastModel, setFastModel] = useState(hub.config.fastModel ?? "");
+  const profiles: ProviderProfile[] = useMemo(() => hub.config.profiles ?? [], [hub.config.profiles]);
+
+  // The main form holds only what the person changed. Every other field shows the saved value, so a
+  // refresh of the app's state (they come all the time) never puts an edit back, and a value saved
+  // elsewhere shows up in the fields the person has not touched.
+  const [edits, setEdits] = useState<Partial<ConfigForm>>({});
+  const [roleEdits, setRoleEdits] = useState<Partial<Record<AiProfileRole, string>>>({});
+  const [prefEdits, setPrefEdits] = useState<Partial<HubPreferences>>({});
   const [key, setKey] = useState("");
-  const [actorName, setActorName] = useState(hub.config.actorName ?? "");
-  const sharing = sharingText({ server: isWebBrowserMode(), bucket: Boolean(hub.s3Workspace?.configured), demo: hub.demoMode === true });
-  const [enabled, setEnabled] = useState(hub.config.enabled);
-  const [egressPolicy, setEgressPolicy] = useState<AiEgressPolicy>(hub.config.egressPolicy ?? "standard");
-  const [zdrConfirmed, setZdrConfirmed] = useState<boolean>(Boolean(hub.config.zdrConfirmed));
-  const [piiScrubbing, setPiiScrubbing] = useState<AiPiiScrubbingMode>(hub.config.piiScrubbing ?? "standard");
-  const [activeProfileByRole, setActiveProfileByRole] = useState<AiActiveProfileByRole>(
-    hub.config.activeProfileByRole ?? {},
-  );
+  const [customModelMode, setCustomModelMode] = useState(false);
+
+  const savedRoles = hub.config.activeProfileByRole;
+  const activeProfileByRole = useMemo(() => {
+    const next: AiActiveProfileByRole = {};
+    for (const { role } of PROFILE_ROLES) {
+      const edit = roleEdits[role];
+      // A choice of a saved model that has been deleted since is dropped.
+      const id = edit !== undefined && (edit === "" || profiles.some((p) => p.id === edit)) ? edit : (savedRoles?.[role] ?? "");
+      if (id) next[role] = id;
+    }
+    return next;
+  }, [roleEdits, savedRoles, profiles]);
+
+  // Runs use the saved model chosen for the chat and the agents, when there is one. The Model fields
+  // then show and change that saved model, not the older fields of the settings themselves.
+  const mainProfile = profiles.find((p) => p.id === activeProfileByRole.primary);
+  const saved = savedConfigForm(hub.config, mainProfile);
+  const form: ConfigForm = { ...saved, ...edits };
+  const {
+    enabled, provider, model, apiProtocol, url, embeddingModel, fastModel, actorName, egressPolicy, zdrConfirmed,
+    piiScrubbing, contextWindowTokens, terminalContextChars, maxOutputTokens, maxToolTurns, reasoningEffort, temperature,
+  } = form;
+  const setField = <K extends keyof ConfigForm>(field: K, value: ConfigForm[K]): void => {
+    setEdits((all) => ({ ...all, [field]: value }));
+    setSavedNotice(false);
+  };
+  const setProvider = (v: AiProvider): void => setField("provider", v);
+  const setModel = (v: string): void => setField("model", v);
+  const setApiProtocol = (v: ApiProtocol): void => setField("apiProtocol", v);
+  const setUrl = (v: string): void => setField("url", v);
+  const setEmbeddingModel = (v: string): void => setField("embeddingModel", v);
+  const setFastModel = (v: string): void => setField("fastModel", v);
+  const setActorName = (v: string): void => setField("actorName", v);
+  const setEnabled = (v: boolean): void => setField("enabled", v);
+  const setEgressPolicy = (v: AiEgressPolicy): void => setField("egressPolicy", v);
+  const setZdrConfirmed = (v: boolean): void => setField("zdrConfirmed", v);
+  const setPiiScrubbing = (v: AiPiiScrubbingMode): void => setField("piiScrubbing", v);
+  const setContextWindowTokens = (v: number): void => setField("contextWindowTokens", v);
+  const setTerminalContextChars = (v: number): void => setField("terminalContextChars", v);
+  const setMaxOutputTokens = (v: number): void => setField("maxOutputTokens", v);
+  const setReasoningEffort = (v: AiReasoningEffort): void => setField("reasoningEffort", v);
+  const setTemperature = (v: number): void => setField("temperature", v);
+  const changed = (field: keyof ConfigForm): boolean => field in edits && !sameValue(edits[field], saved[field]);
+
+  const prefs: HubPreferences = useMemo(() => ({ ...hub.preferences, ...prefEdits }), [hub.preferences, prefEdits]);
+  const setPrefs = (next: HubPreferences): void => {
+    const differs: Partial<HubPreferences> = {};
+    for (const name of Object.keys(next) as (keyof HubPreferences)[]) {
+      if (!sameValue(next[name], hub.preferences[name])) (differs as Record<string, unknown>)[name] = next[name];
+    }
+    setPrefEdits(differs);
+    setSavedNotice(false);
+  };
+
+  /** Chooses the saved model a kind of work uses. Another main model brings its own fields with it. */
+  const chooseRoleProfile = (role: AiProfileRole, id: string): void => {
+    setRoleEdits((all) => ({ ...all, [role]: id }));
+    if (role === "primary") {
+      // What was typed for the old main model is not carried over to the new one.
+      setEdits((all) => Object.fromEntries(Object.entries(all).filter(([name]) => !MAIN_MODEL_FIELDS.includes(name as keyof ConfigForm))));
+      setKey("");
+      setCustomModelMode(false);
+    }
+    setSavedNotice(false);
+  };
+
   const [profileDraft, setProfileDraft] = useState<ProfileDraft | undefined>();
-  const [contextWindowTokens, setContextWindowTokens] = useState(hub.config.contextWindowTokens ?? 128000);
-  const [terminalContextChars, setTerminalContextChars] = useState(hub.config.terminalContextChars ?? 8000);
-  const [maxOutputTokens, setMaxOutputTokens] = useState(hub.config.maxOutputTokens ?? 8192);
-  const [maxToolTurns, setMaxToolTurns] = useState(hub.config.maxToolTurns ?? 20);
-  const [reasoningEffort, setReasoningEffort] = useState<AiReasoningEffort>(hub.config.reasoningEffort ?? "medium");
-  const [temperature, setTemperature] = useState(hub.config.temperature ?? 0.2);
-  const [prefs, setPrefs] = useState<HubPreferences>(hub.preferences);
   const [internalLabs, setInternalLabs] = useState<boolean>(() => readStoredLabsEnabled());
   const [savedNotice, setSavedNotice] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [saving, setSaving] = useState(false);
   const [restoreStatus, setRestoreStatus] = useState("");
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<{ ok: boolean; detail: string }>();
   const modelInputRef = useRef<HTMLInputElement>(null);
+  const sharing = sharingText({ server: isWebBrowserMode(), bucket: Boolean(hub.s3Workspace?.configured), demo: hub.demoMode === true });
 
   const labsEnabled = controlledLabs ?? internalLabs;
   const setLabsEnabled = (next: boolean): void => {
@@ -219,50 +351,132 @@ export function Settings({
     onToggleLabs?.(next);
   };
 
+  const rolesChanged = PROFILE_ROLES.some(({ role }) => (activeProfileByRole[role] ?? "") !== (savedRoles?.[role] ?? ""));
+  const unsaved =
+    key !== "" ||
+    rolesChanged ||
+    Object.keys(prefEdits).length > 0 ||
+    (Object.keys(edits) as (keyof ConfigForm)[]).some(changed) ||
+    profileDraft !== undefined;
   useEffect(() => {
-    setProvider(hub.config.provider);
-    setModel(hub.config.model);
-    setCustomModelMode(false);
-    setUrl(hub.config.baseUrl ?? "");
-    setApiProtocol(hub.config.apiProtocol ?? "auto");
-    setEmbeddingModel(hub.config.embeddingModel ?? "");
-    setFastModel(hub.config.fastModel ?? "");
-    setActorName(hub.config.actorName ?? "");
-    setEnabled(hub.config.enabled);
-    setEgressPolicy(hub.config.egressPolicy ?? "standard");
-    setZdrConfirmed(Boolean(hub.config.zdrConfirmed));
-    setPiiScrubbing(hub.config.piiScrubbing ?? "standard");
-    setActiveProfileByRole(hub.config.activeProfileByRole ?? {});
-    setContextWindowTokens(hub.config.contextWindowTokens ?? 128000);
-    setTerminalContextChars(hub.config.terminalContextChars ?? 8000);
-    setMaxOutputTokens(hub.config.maxOutputTokens ?? 8192);
-    setMaxToolTurns(hub.config.maxToolTurns ?? 20);
-    setReasoningEffort(hub.config.reasoningEffort ?? "medium");
-    setTemperature(hub.config.temperature ?? 0.2);
-  }, [
-    hub.config.provider,
-    hub.config.model,
-    hub.config.baseUrl,
-    hub.config.apiProtocol,
-    hub.config.embeddingModel,
-    hub.config.fastModel,
-    hub.config.actorName,
-    hub.config.enabled,
-    hub.config.egressPolicy,
-    hub.config.zdrConfirmed,
-    hub.config.piiScrubbing,
-    hub.config.activeProfileByRole,
-    hub.config.contextWindowTokens,
-    hub.config.terminalContextChars,
-    hub.config.maxOutputTokens,
-    hub.config.maxToolTurns,
-    hub.config.reasoningEffort,
-    hub.config.temperature,
-  ]);
+    onUnsavedChange?.(unsaved);
+  }, [unsaved, onUnsavedChange]);
+  // Closed with edits still in it: nothing is left to ask about.
+  useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
 
-  useEffect(() => {
-    setPrefs(hub.preferences);
-  }, [hub.preferences]);
+  /** Saves the main form. With a saved model as the main model, its fields are saved to that saved model. */
+  const save = async (): Promise<void> => {
+    if (saving) return;
+    setSavedNotice(false);
+    setSaveError("");
+    if (!model.trim()) {
+      setSaveError("Enter a model ID first.");
+      modelInputRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    try {
+      if (mainProfile && (key !== "" || MAIN_MODEL_FIELDS.some(changed))) {
+        const { hasApiKey: _hasApiKey, keyStorage: _keyStorage, ...kept } = mainProfile;
+        const savedProfile = await act({
+          action: "profile-save",
+          profile: {
+            ...kept,
+            provider,
+            model: model.trim(),
+            baseUrl: provider === "openai-codex" ? undefined : url.trim() || undefined,
+            apiProtocol: provider === "openai-compatible" ? apiProtocol : undefined,
+            // Only what the person changed: a value the saved model never had is not written into it.
+            ...(changed("reasoningEffort") ? { reasoningEffort } : {}),
+            ...(changed("zdrConfirmed") ? { zdrConfirmed } : {}),
+          },
+          ...(key ? { apiKey: key } : {}),
+        });
+        if (!savedProfile) return;
+      }
+      const result = await act({
+        action: "configure",
+        config: {
+          enabled,
+          // With a saved model as the main model these are left out: the app then copies them from it.
+          ...(mainProfile
+            ? {}
+            : {
+                provider,
+                model: model.trim(),
+                ...(provider === "openai-compatible" ? { apiProtocol } : {}),
+                baseUrl: provider === "openai-codex" ? "" : url.trim(),
+                zdrConfirmed,
+                reasoningEffort,
+                ...(key ? { apiKey: key } : {}),
+              }),
+          embeddingModel: provider === "openai-compatible" ? embeddingModel.trim() : "",
+          fastModel: fastModel.trim(),
+          actorName,
+          useHermes: false,
+          egressPolicy,
+          piiScrubbing,
+          activeProfileByRole,
+          contextWindowTokens,
+          terminalContextChars,
+          maxOutputTokens,
+          maxToolTurns,
+          temperature,
+        },
+        preferences: prefs,
+      });
+      if (result) {
+        // Saved: every field follows the saved values again.
+        setEdits({});
+        setRoleEdits({});
+        setPrefEdits({});
+        setKey("");
+        setSavedNotice(true);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Enter in a text field of the main form saves it. A card inside the settings answers its own Enter. */
+  const saveOnEnter = (event: ReactKeyboardEvent<HTMLElement>): void => {
+    if (event.key !== "Enter" || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    const field = event.target;
+    if (!(field instanceof HTMLInputElement) || !["text", "password", "number", "url", "search", ""].includes(field.type)) return;
+    event.preventDefault();
+    void save();
+  };
+
+  const saveProfileDraft = (): void => {
+    if (!profileDraft) return;
+    const name = profileDraft.name.trim();
+    const pModel = profileDraft.model.trim();
+    if (!name || !pModel) return;
+    void act({
+      action: "profile-save",
+      profile: {
+        id: profileDraft.id,
+        name,
+        provider: profileDraft.provider,
+        model: pModel,
+        ...(profileDraft.provider === "openai-compatible" ? { apiProtocol: profileDraft.apiProtocol ?? "auto" } : {}),
+        baseUrl: profileDraft.baseUrl.trim() || undefined,
+        egressPolicy: profileDraft.egressPolicy,
+        zdrConfirmed: profileDraft.zdrConfirmed,
+        reasoningEffort: profileDraft.reasoningEffort,
+      },
+      ...(profileDraft.apiKey ? { apiKey: profileDraft.apiKey } : {}),
+      ...(profileDraft.activeRole ? { activeRole: profileDraft.activeRole } : {}),
+    }).then((next) => {
+      if (next) setProfileDraft(undefined);
+    });
+  };
+
+  // The key the main model uses: the saved model's own, or the settings' key.
+  const mainHasKey = mainProfile
+    ? Boolean(mainProfile.hasApiKey) || (mainProfile.id === savedRoles?.primary && hub.config.hasApiKey)
+    : hub.config.hasApiKey;
+  const mainKeyStorage = mainProfile?.keyStorage ?? hub.config.keyStorage;
 
   const presetModels =
     provider === "openai-codex"
@@ -270,8 +484,6 @@ export function Settings({
         ? hub.config.codexModels
         : DEFAULT_PROVIDER_MODELS["openai-codex"]
       : DEFAULT_PROVIDER_MODELS[provider] ?? [];
-
-  const profiles: ProviderProfile[] = hub.config.profiles ?? [];
 
   const dataFlow = useMemo(
     () =>
@@ -290,44 +502,8 @@ export function Settings({
   );
 
   return (
-    <form
-      className="ai-settings-form"
-      onSubmit={(e) => {
-        e.preventDefault();
-        setSavedNotice(false);
-        void act({
-          action: "configure",
-          config: {
-            enabled,
-            provider,
-            model: model.trim(),
-            ...(provider === "openai-compatible" ? { apiProtocol } : {}),
-            baseUrl: provider === "openai-codex" ? "" : url.trim(),
-            embeddingModel: provider === "openai-compatible" ? embeddingModel.trim() : "",
-            fastModel: fastModel.trim(),
-            actorName,
-            useHermes: false,
-            egressPolicy,
-            zdrConfirmed,
-            piiScrubbing,
-            activeProfileByRole,
-            contextWindowTokens,
-            terminalContextChars,
-            maxOutputTokens,
-            maxToolTurns,
-            reasoningEffort,
-            temperature,
-            ...(key ? { apiKey: key } : {}),
-          },
-          preferences: prefs,
-        }).then((result) => {
-          if (result) {
-            setKey("");
-            setSavedNotice(true);
-          }
-        });
-      }}
-    >
+    // Not a form: the cards inside it have fields of their own, and Enter in one of them must not save this.
+    <div className="ai-settings-form">
       {/* Only this part scrolls. The save bar sits under it, so it never covers a control. */}
       <div className="ai-scroll ai-form">
       <header className="ai-view-head">
@@ -338,8 +514,14 @@ export function Settings({
         </p>
       </header>
 
-      <section className="ai-set">
+      <section className="ai-set" onKeyDown={saveOnEnter}>
         <h3>Model</h3>
+        {mainProfile && (
+          <p className="ai-hint" data-testid="ai-main-profile-note">
+            The chat and the agents use the saved model &ldquo;{mainProfile.name}&rdquo;. The provider, model, address
+            and key here are that saved model&apos;s. Saving changes it.
+          </p>
+        )}
         <label className="ai-check">
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           <span>
@@ -378,7 +560,7 @@ export function Settings({
                 // brings its saved model back; no known default leaves the field empty, with its placeholder.
                 const fits =
                   DEFAULT_PROVIDER_MODELS[next].includes(model) || (next === "anthropic" && model.startsWith("claude-"));
-                if (!fits) setModel(next === hub.config.provider ? hub.config.model : DEFAULT_AI_MODELS[next]);
+                if (!fits) setModel(next === saved.provider ? saved.model : DEFAULT_AI_MODELS[next]);
               }
             }}
           >
@@ -430,7 +612,7 @@ export function Settings({
             Model ID
             <input
               ref={modelInputRef}
-              required
+              aria-required="true"
               value={model}
               onChange={(e) => {
                 setModel(e.target.value);
@@ -465,7 +647,7 @@ export function Settings({
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
                 placeholder={
-                  hub.config.hasApiKey
+                  mainHasKey
                     ? "A key is saved · leave blank to keep it"
                     : provider === "anthropic"
                       ? "sk-ant-… (needed)"
@@ -473,19 +655,27 @@ export function Settings({
                 }
               />
               <small>
-                {hub.config.keyStorage === "session"
+                {mainKeyStorage === "session"
                   ? "This key is in memory. Enter it again after the app or server restarts."
                   : isWebBrowserMode()
                     ? "Saved keys are encrypted on the app server with its credential key."
                     : "Saved keys are encrypted with help from the operating system. If secure storage is unavailable, the key stays in memory."}
               </small>
             </label>
-            {hub.config.hasApiKey && (
+            {mainHasKey && (
               <ConfirmButton
                 label="Remove the saved key"
                 confirmLabel="Remove the key?"
                 className=""
-                onConfirm={() => void act({ action: "configure", config: { apiKey: null } })}
+                onConfirm={() => {
+                  // The key that is used: the saved model's own when it has one, otherwise the settings' key.
+                  if (mainProfile?.hasApiKey) {
+                    const { hasApiKey: _hasApiKey, keyStorage: _keyStorage, ...kept } = mainProfile;
+                    void act({ action: "profile-save", profile: kept, apiKey: null });
+                  } else {
+                    void act({ action: "configure", config: { apiKey: null } });
+                  }
+                }}
               />
             )}
           </>
@@ -558,7 +748,14 @@ export function Settings({
         </div>
 
         {profileDraft && (
-          <div className="ai-card ai-form" data-testid="profile-form">
+          <form
+            className="ai-card ai-form"
+            data-testid="profile-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveProfileDraft();
+            }}
+          >
             <strong>{profileDraft.id ? "Edit provider profile" : "New provider profile"}</strong>
             <div className="ai-form-row">
               <label>
@@ -665,40 +862,14 @@ export function Settings({
               <span>Zero Data Retention (ZDR) confirmed for this profile</span>
             </label>
             <div className="ai-card-actions">
-              <button
-                type="button"
-                className="ai-btn-emerald"
-                onClick={() => {
-                  const name = profileDraft.name.trim();
-                  const pModel = profileDraft.model.trim();
-                  if (!name || !pModel) return;
-                  void act({
-                    action: "profile-save",
-                    profile: {
-                      id: profileDraft.id,
-                      name,
-                      provider: profileDraft.provider,
-                      model: pModel,
-                      ...(profileDraft.provider === "openai-compatible" ? { apiProtocol: profileDraft.apiProtocol ?? "auto" } : {}),
-                      baseUrl: profileDraft.baseUrl.trim() || undefined,
-                      egressPolicy: profileDraft.egressPolicy,
-                      zdrConfirmed: profileDraft.zdrConfirmed,
-                      reasoningEffort: profileDraft.reasoningEffort,
-                    },
-                    ...(profileDraft.apiKey ? { apiKey: profileDraft.apiKey } : {}),
-                    ...(profileDraft.activeRole ? { activeRole: profileDraft.activeRole } : {}),
-                  }).then((next) => {
-                    if (next) setProfileDraft(undefined);
-                  });
-                }}
-              >
+              <button type="submit" className="ai-btn-emerald">
                 Save profile
               </button>
               <button type="button" onClick={() => setProfileDraft(undefined)}>
                 Cancel
               </button>
             </div>
-          </div>
+          </form>
         )}
 
         {profiles.length > 0 && (
@@ -770,18 +941,11 @@ export function Settings({
                 aria-label={label}
                 data-testid={`role-select-${role}`}
                 value={activeProfileByRole[role] ?? ""}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setActiveProfileByRole((prev) => {
-                    const next = { ...prev };
-                    if (value) next[role] = value;
-                    else delete next[role];
-                    return next;
-                  });
-                  setSavedNotice(false);
-                }}
+                onChange={(e) => chooseRoleProfile(role, e.target.value)}
               >
-                <option value="">Default ({model || "configured model"})</option>
+                <option value="">
+                  {roleDefaultLabel(role, { provider, model, fastModel, embeddingModel, mainProfileName: mainProfile?.name })}
+                </option>
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id} disabled={role === "embedding" && p.provider !== "openai-compatible"}>
                     {p.name} ({p.model})
@@ -794,7 +958,7 @@ export function Settings({
         </div>
       </section>
 
-      <section className="ai-set" data-testid="privacy-residency-section">
+      <section className="ai-set" data-testid="privacy-residency-section" onKeyDown={saveOnEnter}>
         <h3>Where your data may go</h3>
         <div className="ai-form-row">
           <label>
@@ -908,7 +1072,7 @@ export function Settings({
         </article>
       </section>
 
-      <section className="ai-set">
+      <section className="ai-set" onKeyDown={saveOnEnter}>
         <h3>You and the team</h3>
         <label>
           Your name in the team&apos;s activity
@@ -1096,7 +1260,7 @@ export function Settings({
         </section>
       )}
 
-      <details className="ai-fold ai-set-fold">
+      <details className="ai-fold ai-set-fold" onKeyDown={saveOnEnter}>
         <summary>Limits and model parameters</summary>
         <div className="ai-form">
           <div className="ai-form-row">
@@ -1174,7 +1338,7 @@ export function Settings({
         </div>
       </details>
 
-      <section className="ai-set">
+      <section className="ai-set" onKeyDown={saveOnEnter}>
         <h3>App</h3>
         {!isWebBrowserMode() && (
           <>
@@ -1283,7 +1447,7 @@ export function Settings({
       </div>
 
       <div className="ai-set-save">
-        <button type="submit" className="ai-btn-emerald">
+        <button type="button" className="ai-btn-emerald" disabled={saving} onClick={() => void save()}>
           Save settings
         </button>
         <button
@@ -1304,6 +1468,11 @@ export function Settings({
           {probing ? "Testing…" : "Test connection"}
         </button>
         {savedNotice && <small role="status">Settings saved.</small>}
+        {saveError && (
+          <small role="alert" className="ai-error" data-testid="ai-settings-save-error">
+            {saveError}
+          </small>
+        )}
         {probe && (
           <small
             data-testid="ai-test-connection-result"
@@ -1314,7 +1483,7 @@ export function Settings({
           </small>
         )}
       </div>
-    </form>
+    </div>
   );
 }
 

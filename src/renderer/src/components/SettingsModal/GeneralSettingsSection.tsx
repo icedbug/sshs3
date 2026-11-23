@@ -1,3 +1,6 @@
+import { writeClipboardText } from '../../lib/clipboard';
+import { DesktopOnly } from '../ui/DesktopOnly';
+import { openLink } from '../../lib/openLink';
 import React, { useState } from 'react';
 import { Terminal, Monitor, Moon, Sun, Sliders, FolderTree } from 'lucide-react';
 import type { SettingsForm } from './useSettingsForm';
@@ -26,7 +29,7 @@ export const GeneralSettingsSection: React.FC<{ form: SettingsForm }> = ({ form 
   const copyDiagnostics = async (): Promise<void> => {
     try {
       const text = await window.multissh?.getDiagnostics();
-      if (text) await navigator.clipboard.writeText(text);
+      if (text) await writeClipboardText(text);
       setDiagnosticsCopied(true);
       window.setTimeout(() => setDiagnosticsCopied(false), 2000);
     } catch {
@@ -218,13 +221,14 @@ export const GeneralSettingsSection: React.FC<{ form: SettingsForm }> = ({ form 
             <button
               type="button"
               onClick={() =>
-                void window.multissh?.openExternal('https://github.com/alun-hub/sshs3/releases/latest')
+                void openLink('https://github.com/alun-hub/sshs3/releases/latest')
               }
               className="rounded border border-border-subtle px-2 py-0.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary disabled:opacity-50"
             >
               Open releases
             </button>
           )}
+          <DesktopOnly inline>
           {updateState?.status === 'available' && (
             <button type="button" onClick={() => void window.multissh?.downloadUpdate()} className="rounded border border-border-subtle px-2 py-0.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary disabled:opacity-50">
               Download
@@ -248,6 +252,7 @@ export const GeneralSettingsSection: React.FC<{ form: SettingsForm }> = ({ form 
                 Check now
               </button>
             )}
+          </DesktopOnly>
         </div>
       </div>
 
@@ -268,6 +273,7 @@ export const GeneralSettingsSection: React.FC<{ form: SettingsForm }> = ({ form 
             <option value="info">Normal</option>
             <option value="debug">Debug (verbose)</option>
           </select>
+          <DesktopOnly inline>
           <button
             type="button"
             onClick={() => void window.multissh?.openLogFolder()}
@@ -282,6 +288,7 @@ export const GeneralSettingsSection: React.FC<{ form: SettingsForm }> = ({ form 
           >
             {diagnosticsCopied ? 'Copied' : 'Copy diagnostics'}
           </button>
+          </DesktopOnly>
         </div>
         <p className="text-xs text-txt-muted">
           Logs are stored locally and PINs, passwords and keys are never written. Use Debug while reproducing a

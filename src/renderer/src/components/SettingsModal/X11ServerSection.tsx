@@ -134,14 +134,14 @@ export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => 
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-medium text-sky-300">
               <CheckCircle2 className="h-4 w-4 text-sky-400 shrink-0" />
-              <span>Linux system detected — Native display support active</span>
+              <span>Linux system detected: Native display support active</span>
             </div>
             <span className="text-2xs uppercase font-semibold tracking-wider text-sky-400 bg-sky-500/20 px-2 py-0.5 rounded border border-sky-500/30">
               Native Display
             </span>
           </div>
           <p className="text-xs text-txt-secondary leading-relaxed">
-            Your system uses native X11 / Wayland display forwarding ({x11Status?.display || ':0'}). External X servers (such as VcXsrv or Xming) and their launch settings are only required on Windows — no background daemon or extra configuration is needed on Linux.
+            Your system uses native X11 / Wayland display forwarding ({x11Status?.display || ':0'}). External X servers (such as VcXsrv or Xming) and their launch settings are only required on Windows: no background daemon or extra configuration is needed on Linux.
           </p>
           <div className="pt-1 border-t border-sky-500/20 text-xs">
             {x11Status?.running ? (

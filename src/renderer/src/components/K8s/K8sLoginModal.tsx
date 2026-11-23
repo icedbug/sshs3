@@ -1,3 +1,4 @@
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Eye,
@@ -241,7 +242,9 @@ export const K8sLoginModal: React.FC<K8sLoginModalProps> = ({ open, onClose, onS
             </div>
             {!webLogin.supported && (
               <p className="px-1 text-xs text-txt-muted" role="status">
-                {webLogin.checking
+                {desktopOnlyHere()
+                  ? `Browser sign-in: ${DESKTOP_ONLY_NOTE}`
+                  : webLogin.checking
                   ? 'Checking whether this cluster supports browser sign-in…'
                   : server.trim().length < 4
                     ? 'Enter the server URL to check whether browser sign-in is available.'

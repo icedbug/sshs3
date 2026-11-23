@@ -23,6 +23,8 @@ export interface ConfirmButtonProps {
   disabled?: boolean;
   /** How long (ms) the pending confirm state stays armed before resetting. Defaults to 10000ms. */
   confirmTimeoutMs?: number;
+  /** A test id for the button itself. */
+  testId?: string;
 }
 
 /** A button for something that cannot be undone: the first click asks, the second does it. */
@@ -35,6 +37,7 @@ export function ConfirmButton({
   shortcutHint,
   disabled = false,
   confirmTimeoutMs = 10_000,
+  testId,
 }: ConfirmButtonProps): JSX.Element {
   const [asking, setAsking] = useState(false);
   const [remainingMs, setRemainingMs] = useState(confirmTimeoutMs);
@@ -101,6 +104,7 @@ export function ConfirmButton({
         className={className + (asking ? " ai-btn-confirming" : "")}
         aria-label={asking ? confirmLabel : (ariaLabel ?? label)}
         data-confirming={asking ? "true" : undefined}
+        data-testid={testId}
         onClick={() => {
           if (disabled) return;
           if (!asking) return arm();

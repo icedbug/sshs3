@@ -1,3 +1,4 @@
+import { openLink } from '../../lib/openLink';
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ExternalLink, FolderPlus, GitBranch, Loader2, RefreshCw } from 'lucide-react';
 import type { GitRepoStatus } from '@shared/types/git';
@@ -114,7 +115,7 @@ export const GitStatusMenu: React.FC<GitStatusMenuProps> = ({
                   onClick={() => {
                     setGitMenuOpen(false);
                     const url = toWebRepoUrl(gitStatus.remoteOriginUrl!);
-                    if (url) void window.multissh.openExternal(url);
+                    if (url) openLink(url);
                   }}
                   className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-txt-primary hover:bg-app-surface hover:text-sky-400 transition-colors text-left"
                 >

@@ -199,6 +199,9 @@ describe("ChangesView overhaul", () => {
     ).toBeInTheDocument();
 
     // Per-change Restore Checkpoint
+    // The first click asks, the second does it.
+    fireEvent.click(screen.getByTestId("restore-checkpoint-chg-file-1"));
+    expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ action: "restore-checkpoint" }));
     fireEvent.click(screen.getByTestId("restore-checkpoint-chg-file-1"));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith({
@@ -209,6 +212,9 @@ describe("ChangesView overhaul", () => {
     );
 
     // Task-level Rewind Task
+    request.mockClear();
+    fireEvent.click(screen.getByTestId("rewind-task-task-1"));
+    expect(request).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("rewind-task-task-1"));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith({
@@ -608,7 +614,7 @@ describe("SchedulesView overhaul", () => {
 });
 
 describe("NotificationsCard overhaul", () => {
-  it("evaluates quiet hours accurately and lets users configure escalation chain and quiet hours, with no answers from a notification", async () => {
+  it("evaluates quiet hours accurately and lets users configure quiet hours, with no answers from a notification", async () => {
     expect(
       isInQuietHours(
         {
@@ -637,12 +643,12 @@ describe("NotificationsCard overhaul", () => {
     const act = vi.fn(async () => makeHub());
     render(<NotificationsCard hub={makeHub()} act={act} />);
 
-    // Add escalation step
-    fireEvent.click(screen.getByTestId("add-escalation-step-btn"));
-    expect(screen.getByTestId("escalation-step-1")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Step 1 minutes to wait"), {
-      target: { value: "10" },
-    });
+    // Steps for who is told next were never saved or used by the app: there is no editor for them,
+    // and the card says nothing about them.
+    expect(screen.queryByTestId("escalation-chain-config")).toBeNull();
+    expect(screen.queryByTestId("add-escalation-step-btn")).toBeNull();
+    expect(screen.getByTestId("notify-policy-section")).not.toHaveTextContent(/told next|step/i);
+    expect(screen.getByTestId("save-notify-policy-btn")).toHaveTextContent("Save quiet hours");
 
     // Enable quiet hours
     fireEvent.click(screen.getByLabelText("Enable quiet hours"));
@@ -670,6 +676,26 @@ describe("NotificationsCard overhaul", () => {
       ),
     );
     expect(JSON.stringify(act.mock.calls)).not.toContain("chatOps");
+    // Only what the app saves is sent.
+    expect(JSON.stringify(act.mock.calls)).not.toContain("escalationChain");
+  });
+
+  it("drops steps kept in this browser from before, and does not send them", async () => {
+    window.localStorage.setItem(
+      "sshs3.notifyPolicy.v1",
+      JSON.stringify({ escalationChain: [{ id: "esc-1", tier: 1, channelId: "", afterMinutes: 5, minSeverity: "warning" }] }),
+    );
+    try {
+      const act = vi.fn(async () => makeHub());
+      render(<NotificationsCard hub={makeHub()} act={act} />);
+      expect(screen.queryByTestId("escalation-step-1")).toBeNull();
+      fireEvent.click(screen.getByTestId("save-notify-policy-btn"));
+      await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "notify-settings-save" })));
+      expect(JSON.stringify(act.mock.calls)).not.toContain("escalationChain");
+      expect(window.localStorage.getItem("sshs3.notifyPolicy.v1")).not.toContain("escalationChain");
+    } finally {
+      window.localStorage.removeItem("sshs3.notifyPolicy.v1");
+    }
   });
 
   it("loads a policy kept from before, with answers from chat in it, and saves it without them", async () => {

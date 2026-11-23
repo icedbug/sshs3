@@ -331,7 +331,7 @@ describe('TabBar Component', () => {
       fireEvent.click(await screen.findByTestId('smartcard-unlock-now-btn'));
       expect(screen.queryByTestId('smartcard-lock-all-btn')).not.toBeInTheDocument();
       expect(onUnlockSmartcard).toHaveBeenCalledTimes(1);
-      expect(await screen.findByText('Unlocking — enter your PIN when asked')).toBeInTheDocument();
+      expect(await screen.findByText('Unlocking: enter your PIN when asked')).toBeInTheDocument();
       unmount();
 
       renderWithSmartcard({

@@ -30,7 +30,13 @@ let refreshAgain = false;
 const take = (n: number, next: HubSnapshot): boolean => {
   if (n < shown) return false;
   shown = n;
-  snapshot = next;
+  // What a request answers beside the state (a new key, an invite code, a link code) is for whoever asked,
+  // once. It is not kept in the state every view of this window reads until the next request replaces it.
+  if (next?.reply === undefined) snapshot = next;
+  else {
+    const { reply: _reply, ...state } = next;
+    snapshot = state;
+  }
   return true;
 };
 const listeners = new Set<() => void>();

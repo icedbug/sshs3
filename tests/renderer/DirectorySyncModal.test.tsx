@@ -116,11 +116,11 @@ describe('DirectorySyncModal', () => {
     expect(screen.getByText('Kept (safe sync)')).toBeInTheDocument();
 
     // Check table headers and action badges
-    expect(screen.getByText(/New on source \(2\) — select all to copy/)).toBeInTheDocument();
+    expect(screen.getByText(/New on source \(2\): select all to copy/)).toBeInTheDocument();
     expect(screen.getAllByText('+ Copy to target')).toHaveLength(2);
-    expect(screen.getByText(/Modified on source \(1\) — select all to overwrite/)).toBeInTheDocument();
+    expect(screen.getByText(/Modified on source \(1\): select all to overwrite/)).toBeInTheDocument();
     expect(screen.getByText('↻ Overwrite target')).toBeInTheDocument();
-    expect(screen.getByText(/Only in target \(1\) — preserved in target \(safe sync\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Only in target \(1\): preserved in target \(safe sync\)/)).toBeInTheDocument();
     expect(screen.getByText('Kept in target')).toBeInTheDocument();
 
     // Check Run sync button shows exact count (2 new + 1 modified = 3 to copy)
@@ -156,11 +156,11 @@ describe('DirectorySyncModal', () => {
     expect(screen.getByText('Deletes if selected')).toBeInTheDocument();
 
     // Category header should now allow selecting files to delete
-    expect(screen.getByText(/Only in target \(1\) — select all to delete/)).toBeInTheDocument();
+    expect(screen.getByText(/Only in target \(1\): select all to delete/)).toBeInTheDocument();
 
     // Check the only-target entry checkbox (relative path: old-backup.tar.gz)
     const selectAllOnlyTargetBtn = screen.getByRole('button', {
-      name: /Only in target \(1\) — select all to delete/,
+      name: /Only in target \(1\): select all to delete/,
     });
     fireEvent.click(selectAllOnlyTargetBtn);
 
@@ -201,7 +201,7 @@ describe('DirectorySyncModal', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText(/File and folder with the same name \(1\) — skipped/)).toBeInTheDocument();
+      expect(screen.getByText(/File and folder with the same name \(1\): skipped/)).toBeInTheDocument();
     });
     expect(screen.getByRole('alert')).toHaveTextContent(/1 path is a file on one side and a folder on the other/);
     expect(screen.getByText('Skipped (type conflict)')).toBeInTheDocument();

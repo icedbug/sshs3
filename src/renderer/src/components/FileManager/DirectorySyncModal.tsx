@@ -870,7 +870,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
                             <td colSpan={3} className="px-2 py-1.5">
                               <span className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
                                 <AlertTriangle className="h-3.5 w-3.5" />
-                                File and folder with the same name ({grouped.conflict.length}) — skipped
+                                File and folder with the same name ({grouped.conflict.length}): skipped
                               </span>
                             </td>
                           </tr>
@@ -937,16 +937,16 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
                                       <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
                                     )}
                                     {status === 'new' && (
-                                      <span>New on source ({entries.length}) — select all to copy</span>
+                                      <span>New on source ({entries.length}): select all to copy</span>
                                     )}
                                     {status === 'changed' && (
-                                      <span>Modified on source ({entries.length}) — select all to overwrite</span>
+                                      <span>Modified on source ({entries.length}): select all to overwrite</span>
                                     )}
                                     {status === 'only-target' && (
                                       <span>
                                         {deleteExtraneous
-                                          ? `Only in target (${entries.length}) — select all to delete`
-                                          : `Only in target (${entries.length}) — preserved in target (safe sync)`}
+                                          ? `Only in target (${entries.length}): select all to delete`
+                                          : `Only in target (${entries.length}): preserved in target (safe sync)`}
                                       </span>
                                     )}
                                   </button>
@@ -994,7 +994,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
                                           </span>{' '}
                                           {change.target}
                                           {change.targetIsNewer && (
-                                            <span className="font-medium"> — newer, will be overwritten</span>
+                                            <span className="font-medium">: newer, will be overwritten</span>
                                           )}
                                         </div>
                                       </div>

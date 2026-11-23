@@ -1,3 +1,5 @@
+import { openLink } from '../lib/openLink';
+import { useOpenHiddenLink } from '../lib/useOpenHiddenLink';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -52,6 +54,9 @@ export const K8sLogView: React.FC<K8sLogViewProps> = ({
   fontFamily = 'Menlo, Monaco, "Courier New", monospace, Consolas',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const openHiddenLink = useOpenHiddenLink();
+  const openHiddenLinkRef = useRef(openHiddenLink);
+  openHiddenLinkRef.current = openHiddenLink;
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -443,9 +448,8 @@ export const K8sLogView: React.FC<K8sLogViewProps> = ({
       fontFamily,
       theme: { background: '#0f172a', foreground: '#f8fafc' },
       linkHandler: {
-        activate: (_event, text) => {
-          void window.multissh?.openExternal(text);
-        },
+        // A hyperlink in the log (OSC 8): its text can hide where it goes, so the address is asked about first.
+        activate: (_event, text) => openHiddenLinkRef.current(text),
       },
     });
     const fitAddon = new FitAddon();
@@ -455,7 +459,7 @@ export const K8sLogView: React.FC<K8sLogViewProps> = ({
     term.loadAddon(fitAddon);
     term.loadAddon(searchAddon);
     searchAddonRef.current = searchAddon;
-    registerTerminalLinks(term, { openUrl: (url) => void window.multissh.openExternal(url) });
+    registerTerminalLinks(term, { openUrl: (url) => void openLink(url) });
     term.open(container);
     try {
       fitAddon.fit();

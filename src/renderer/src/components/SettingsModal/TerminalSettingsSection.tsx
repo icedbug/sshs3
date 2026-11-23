@@ -1,3 +1,4 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React from 'react';
 import { X, Terminal, RotateCcw } from 'lucide-react';
 import { FONT_PRESETS } from './settingsConstants';
@@ -438,7 +439,9 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
         )}
       </div>
 
-      <X11ServerSection form={form} />
+      <DesktopOnly>
+        <X11ServerSection form={form} />
+      </DesktopOnly>
     </div>
   );
 };

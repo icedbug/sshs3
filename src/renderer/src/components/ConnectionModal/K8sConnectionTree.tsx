@@ -1,3 +1,4 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
@@ -535,6 +536,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
             OpenShift Login
           </button>
         )}
+        <DesktopOnly inline>
         <button
           type="button"
           onClick={() => {
@@ -552,6 +554,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
             </span>
           )}
         </button>
+        </DesktopOnly>
         <button
           type="button"
           onClick={handleRefresh}

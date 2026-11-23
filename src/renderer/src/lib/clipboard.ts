@@ -26,3 +26,13 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Copies text and throws when it could not be copied: the same promise as `navigator.clipboard.writeText`,
+ * for callers that show "copied" when it resolves. Unlike it, this also works on a page served over plain
+ * http, where the browser gives pages no clipboard: `copyToClipboard` then copies through a hidden field.
+ */
+export async function writeClipboardText(text: string): Promise<void> {
+  if (!text) return;
+  if (!(await copyToClipboard(text))) throw new Error("Could not copy to the clipboard.");
+}

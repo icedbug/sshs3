@@ -1,3 +1,5 @@
+import { writeClipboardText } from '../../lib/clipboard';
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Check,
@@ -195,7 +197,7 @@ export const TeamVaultListPanel: React.FC = () => {
   const handleCopyJoinInfo = async () => {
     if (!myRecipient || !selfRecipientId.trim()) return;
     try {
-      await navigator.clipboard.writeText(buildTeamVaultJoinInfo(selfRecipientId.trim(), myRecipient.recipient));
+      await writeClipboardText(buildTeamVaultJoinInfo(selfRecipientId.trim(), myRecipient.recipient));
       setJoinInfoCopied(true);
       setTimeout(() => setJoinInfoCopied(false), 3000);
     } catch {
@@ -206,7 +208,7 @@ export const TeamVaultListPanel: React.FC = () => {
   const handleCopyRecovery = async () => {
     if (!recoveryIdentity) return;
     try {
-      await navigator.clipboard.writeText(recoveryIdentity);
+      await writeClipboardText(recoveryIdentity);
       setRecoveryCopied(true);
       setTimeout(() => setRecoveryCopied(false), 3000);
     } catch {
@@ -225,7 +227,7 @@ export const TeamVaultListPanel: React.FC = () => {
   const handleJoinExistingVault = async () => {
     const vaultId = joinVaultId.trim();
     if (!vaultId) {
-      setJoinTargetError("The team's Team ID is required (ask its admin — see their Team Vault detail view).");
+      setJoinTargetError("The team's Team ID is required (ask its admin: see their Team Vault detail view).");
       return;
     }
     if (joinTargetDraft.type !== 's3') {
@@ -248,7 +250,7 @@ export const TeamVaultListPanel: React.FC = () => {
       await window.multissh.teamVaultSetTarget(vaultId, target, joinTargetDraft.remoteBasePath);
       const hasRemote = await window.multissh.teamVaultHasRemoteVault(vaultId);
       if (!hasRemote) {
-        setJoinTargetError('No Team Vault found at that location — check the Team ID, bucket/prefix, and credentials.');
+        setJoinTargetError('No Team Vault found at that location: check the Team ID, bucket/prefix, and credentials.');
         return;
       }
       const status = await window.multissh.teamVaultPull(vaultId);
@@ -286,7 +288,7 @@ export const TeamVaultListPanel: React.FC = () => {
       setJoinTargetError(
         describeIpcError(
           err,
-          'Could not read this invite — check it was pasted completely, or that it matches your identity.'
+          'Could not read this invite: check it was pasted completely, or that it matches your identity.'
         )
       );
     } finally {
@@ -307,7 +309,7 @@ export const TeamVaultListPanel: React.FC = () => {
       await window.multissh.teamVaultSetTarget(vaultId, target, remoteBasePath);
       const hasRemote = await window.multissh.teamVaultHasRemoteVault(vaultId);
       if (!hasRemote) {
-        setJoinTargetError('No Team Vault found at that location — check the invite with your admin.');
+        setJoinTargetError('No Team Vault found at that location: check the invite with your admin.');
         return;
       }
       await window.multissh.teamVaultPull(vaultId);
@@ -563,7 +565,7 @@ export const TeamVaultListPanel: React.FC = () => {
             </button>
           </div>
 
-          <button
+          <DesktopOnly inline><button
             type="button"
             onClick={() => void handleEnroll()}
             disabled={enrolling}
@@ -571,7 +573,7 @@ export const TeamVaultListPanel: React.FC = () => {
           >
             {enrolling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Fingerprint className="h-3.5 w-3.5 text-sky-400" />}
             Generate my Team Vault ID
-          </button>
+          </button></DesktopOnly>
 
           {myRecipient && (
             <div className="space-y-2 rounded-lg border border-emerald-900/50 bg-emerald-950/20 p-3">
@@ -631,9 +633,9 @@ export const TeamVaultListPanel: React.FC = () => {
 
           <div className="space-y-2">
             <p className="text-xs text-txt-secondary">
-              Step 1 — generate your recipient and send it to that team's admin.
+              Step 1: generate your recipient and send it to that team's admin.
             </p>
-            <button
+            <DesktopOnly inline><button
               type="button"
               onClick={() => void handleEnroll()}
               disabled={enrolling}
@@ -641,7 +643,7 @@ export const TeamVaultListPanel: React.FC = () => {
             >
               {enrolling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Fingerprint className="h-3.5 w-3.5 text-sky-400" />}
               Generate my Team Vault ID
-            </button>
+            </button></DesktopOnly>
             {myRecipient && (
               <div className="space-y-2 rounded-lg border border-emerald-900/50 bg-emerald-950/20 p-3">
                 <p className="break-all text-xs text-emerald-300">{myRecipient.recipient}</p>
@@ -672,7 +674,7 @@ export const TeamVaultListPanel: React.FC = () => {
 
           <div className="space-y-2 border-t border-border-subtle pt-3">
             <p className="text-xs text-txt-secondary">
-              Step 2 — once their admin has added you as a member, ask them for an{' '}
+              Step 2: once their admin has added you as a member, ask them for an{' '}
               <strong>invite</strong> (copied from their Team Vault detail view's "Copy invite"
               next to your name) and paste it below. It carries the team's S3 target, so you don't
               need to type it in by hand.
@@ -685,7 +687,7 @@ export const TeamVaultListPanel: React.FC = () => {
             {decodedInvite ? (
               <div className="space-y-2 rounded-lg border border-amber-900/50 bg-amber-950/20 p-3">
                 <p className="text-xs font-medium text-amber-200">
-                  Check this matches the team your admin told you about before continuing — this
+                  Check this matches the team your admin told you about before continuing: this
                   invite was readable with your identity, but that only proves who it's addressed
                   to, not who sent it.
                 </p>
@@ -721,7 +723,7 @@ export const TeamVaultListPanel: React.FC = () => {
                     className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
                   >
                     {joining ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
-                    This is my team — join
+                    This is my team: join
                   </button>
                   <button
                     type="button"
@@ -729,7 +731,7 @@ export const TeamVaultListPanel: React.FC = () => {
                     disabled={joining}
                     className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover disabled:opacity-50"
                   >
-                    Not my team — discard
+                    Not my team: discard
                   </button>
                 </div>
               </div>
@@ -747,7 +749,7 @@ export const TeamVaultListPanel: React.FC = () => {
                     className="w-full rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 font-mono text-xs text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted disabled:opacity-50"
                   />
                 </div>
-                <button
+                <DesktopOnly inline><button
                   type="button"
                   onClick={() => void handleDecodeInvite()}
                   disabled={decoding || !myRecipient || !selfRecipientId.trim() || !inviteText.trim()}
@@ -758,7 +760,7 @@ export const TeamVaultListPanel: React.FC = () => {
                 >
                   {decoding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
                   Read invite
-                </button>
+                </button></DesktopOnly>
               </>
             )}
 
@@ -818,9 +820,9 @@ export const TeamVaultListPanel: React.FC = () => {
               <h4 className="text-sm font-semibold">Save your recovery key now</h4>
             </div>
             <p className="text-xs text-txt-secondary">
-              This is the Team Vault's recovery identity. It is shown <strong>once</strong> and
-              never saved by the app — print it and store it somewhere safe (e.g. a safe), per
-              docs/team-vault-plan.md §4.1. Anyone who recovers this text can decrypt the vault.
+              This is the Team Vault's recovery key. It is shown <strong>once</strong> and never saved by the
+              app. Print it and keep it somewhere safe, for example in a safe. Anyone who has this text can
+              open the vault.
             </p>
             <div className="relative">
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border-subtle bg-app-input p-3 pr-20 text-xs text-txt-primary">

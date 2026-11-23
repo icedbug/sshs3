@@ -10,20 +10,20 @@ export const KNOWN_ERROR_HINTS: Array<{ match: RegExp; hint: string }> = [
   {
     match: /ECONNREFUSED/,
     hint:
-      "Connection refused — the cluster's API server is unreachable at this address. Check that any required port-forward, VPN or proxy is running.",
+      "Connection refused: the cluster's API server is unreachable at this address. Check that any required port-forward, VPN or proxy is running.",
   },
   {
     match: /ENOTFOUND|EAI_AGAIN/,
-    hint: "Host not found — check the cluster's API server address in your kubeconfig.",
+    hint: "Host not found: check the cluster's API server address in your kubeconfig.",
   },
   {
     match: /certificate|x509|self[- ]signed/i,
     hint:
-      'TLS certificate problem — this app does not trust the certificate presented by the cluster. Check your kubeconfig\'s certificate authority, or enable "Skip TLS verification" if you trust this cluster.',
+      'TLS certificate problem: this app does not trust the certificate presented by the cluster. Check your kubeconfig\'s certificate authority, or enable "Skip TLS verification" if you trust this cluster.',
   },
   {
     match: /\b401\b|unauthorized/i,
-    hint: 'Not authorized — your credentials for this context have expired or are invalid. Try logging in again.',
+    hint: 'Not authorized: your credentials for this context have expired or are invalid. Try logging in again.',
   },
 ];
 
@@ -41,7 +41,7 @@ export function describeError(err: unknown): string {
     parts.push(cause.message);
     cause = (cause as { cause?: unknown }).cause;
   }
-  const raw = parts.join(' — caused by: ').replace(ELECTRON_IPC_PREFIX, '');
+  const raw = parts.join('. Caused by: ').replace(ELECTRON_IPC_PREFIX, '');
   const known = KNOWN_ERROR_HINTS.find((h) => h.match.test(raw));
   return known ? known.hint : raw;
 }

@@ -1,3 +1,4 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   ArrowRight,
@@ -158,6 +159,8 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {/* A port is opened on the computer the app runs on: in the browser that would be the server. */}
+          <DesktopOnly innerClassName="space-y-5">
           {error && (
             <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
               <XCircle className="h-4 w-4 shrink-0" />
@@ -313,6 +316,7 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
               )}
             </div>
           )}
+          </DesktopOnly>
         </div>
 
         {/* Footer */}

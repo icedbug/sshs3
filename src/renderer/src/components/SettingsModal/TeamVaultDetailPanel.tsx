@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../../lib/clipboard';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
@@ -194,7 +195,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
     setError(null);
     try {
       const invite = await window.multissh.teamVaultBuildInvite(vaultId, recipientId);
-      await navigator.clipboard.writeText(invite);
+      await writeClipboardText(invite);
       setCopiedInviteFor(recipientId);
       setTimeout(() => setCopiedInviteFor((prev) => (prev === recipientId ? null : prev)), 3000);
     } catch (err) {
@@ -316,7 +317,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
     if (!(await confirm({
       title: 'Remove vault from this machine',
       message:
-        'This forgets the Team Vault on this machine only — the remote S3 copy (if any) is not touched, and other members keep their access. You can get it back later by joining again if a remote copy exists.',
+        'This forgets the Team Vault on this machine only: the remote S3 copy (if any) is not touched, and other members keep their access. You can get it back later by joining again if a remote copy exists.',
     }))) {
       return;
     }
@@ -447,7 +448,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
   const handleCopyVaultId = async () => {
     if (!status?.vaultId) return;
     try {
-      await navigator.clipboard.writeText(status.vaultId);
+      await writeClipboardText(status.vaultId);
       setVaultIdCopied(true);
       setTimeout(() => setVaultIdCopied(false), 3000);
     } catch {
@@ -549,7 +550,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
                 <button
                   type="button"
                   onClick={() => void handleCopyVaultId()}
-                  title="Copy — share with anyone joining this team"
+                  title="Copy: share with anyone joining this team"
                   className="shrink-0 text-txt-muted hover:text-txt-secondary"
                 >
                   {vaultIdCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
@@ -843,7 +844,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
                         !status.unlocked
                           ? 'Unlock the vault first'
                           : m.role === 'admin' && (status.adminCount ?? 0) <= 1
-                            ? "Can't demote the last admin — promote another member first"
+                            ? "Can't demote the last admin: promote another member first"
                             : undefined
                       }
                       className="rounded-lg border border-border-subtle px-2 py-1 text-txt-secondary hover:bg-app-surface-hover disabled:opacity-50"
@@ -883,7 +884,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
             />
             {joinInfoPaste.trim() && !newAgeRecipient && (
               <p className="text-xs text-amber-300">
-                That doesn't look like a join-info blob — make sure you pasted everything they
+                That doesn't look like a join-info blob: make sure you pasted everything they
                 copied from their own "Generate my Team Vault ID" step.
               </p>
             )}
@@ -948,7 +949,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-txt-muted">Status</span>
                         {syncPreview.remoteChanged ? (
-                          <span className="text-amber-400">Remote has a newer version — pull first</span>
+                          <span className="text-amber-400">Remote has a newer version: pull first</span>
                         ) : syncPreview.hasUnpushedLocalChanges ? (
                           <span className="text-sky-400">Local changes not pushed</span>
                         ) : (
@@ -974,7 +975,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
                         type="button"
                         onClick={() => void handlePull()}
                         disabled={pulling || !status.unlocked}
-                        title={!status.unlocked ? 'Unlock the Team Vault first — pulling needs the Vault Key to verify the update' : undefined}
+                        title={!status.unlocked ? 'Unlock the Team Vault first: pulling needs the Vault Key to verify the update' : undefined}
                         className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 disabled:opacity-50 ${
                           syncPreview?.remoteChanged
                             ? 'border-amber-500 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'

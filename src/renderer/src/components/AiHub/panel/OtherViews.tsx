@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import type { PanelState } from "./usePanelState";
 import { hubRequest, selectAiTerminal } from "../../../lib/aiHub";
+import { ErrorBoundary } from "../../ErrorBoundary";
 const Memory = lazy(() => import("../MemoryView").then((m) => ({ default: m.Memory })));
 const Schedules = lazy(() => import("../SchedulesView").then((m) => ({ default: m.Schedules })));
 const ChangesView = lazy(() => import("../ChangesView").then((m) => ({ default: m.ChangesView })));
@@ -39,6 +40,9 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
     task,
   } = p;
   return (
+    // A view that fails to draw, or whose files could not be loaded, leaves the rest of the panel working.
+    // Choosing another view draws afresh.
+    <ErrorBoundary what="This view" resetKey={activeView}>
     <Suspense fallback={<p role="status">Opening view…</p>}>
           {activeView === "Inbox" && (
             <InboxView
@@ -121,6 +125,8 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               }}
               onRunRunbook={(doc) => {
                 const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+                // A new conversation first: opening one empties the composer, so what goes into it comes after.
+                chooseTask("");
                 setAttachments((old) => [
                   ...old.filter((x) => x.label !== `@kb:${slug}`).slice(-9),
                   {
@@ -130,7 +136,6 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
                     observedAt: Date.now(),
                   },
                 ]);
-                chooseTask("");
                 setPrompt(
                   `Follow our runbook "${doc.title}" (${doc.collection || "general"}) step by step. Start with read-only checks and summarise the state.`,
                 );
@@ -164,13 +169,14 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               }}
               onAsk={(text, attach, sessionId) => {
                 if (sessionId) selectAiTerminal(sessionId);
+                // A new conversation first: opening one empties the composer, so what goes into it comes after.
+                chooseTask("");
                 if (attach)
                   setAttachments((old) => [
                     ...old.filter((x) => x.label !== attach.label).slice(-9),
                     { id: crypto.randomUUID(), observedAt: Date.now(), ...attach },
                   ]);
                 if (text) setPrompt(text);
-                chooseTask("");
                 setView("Work");
               }}
             />
@@ -213,5 +219,6 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
             />
           )}
     </Suspense>
+    </ErrorBoundary>
   );
 }

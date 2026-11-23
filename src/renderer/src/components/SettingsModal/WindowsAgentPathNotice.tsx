@@ -72,7 +72,7 @@ export const WindowsAgentPathNotice: React.FC<WindowsAgentPathNoticeProps> = ({ 
     return (
       <div className="flex items-center gap-1.5 text-xs text-emerald-300">
         <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-        Done — the Windows ssh-agent was restarted and can now load this driver.
+        Done: the Windows ssh-agent was restarted and can now load this driver.
       </div>
     );
   }

@@ -452,7 +452,7 @@ describe('SettingsModal', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /Security/ }));
 
-    expect(screen.getByText('No caching — every connection prompts for its own PIN.')).toBeInTheDocument();
+    expect(screen.getByText('No caching: every connection prompts for its own PIN.')).toBeInTheDocument();
     expect(screen.queryByText(/Use this if your organization requires re-authentication/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Learn more' })[0]);

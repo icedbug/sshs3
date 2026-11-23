@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../../lib/clipboard';
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import {
   AlertTriangle,
@@ -119,7 +120,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
 
   const handleCopyYaml = () => {
     if (!pod?.yaml) return;
-    navigator.clipboard.writeText(pod.yaml).then(() => {
+    writeClipboardText(pod.yaml).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });

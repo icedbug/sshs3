@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Clock, HelpCircle, Search } from "lucide-react";
 import {
   filterInboxItems,
@@ -9,9 +9,11 @@ import {
   type InboxKind,
   type InboxPriorityBucket,
 } from "@shared/aiHubInbox";
-import type { HubSnapshot } from "@shared/types/aiHub";
+import type { AgentChange, HubRequest, HubSnapshot } from "@shared/types/aiHub";
 import { copyToClipboard } from "../../lib/clipboard";
 import { ChangeProof } from "./ChangeProof";
+import { ConfirmButton } from "./ConfirmButton";
+import { DiffViewer } from "./DiffViewer";
 import { SECRETS_ELSEWHERE, takesSecrets } from "./ChangeSecrets";
 import { ChatWaitingList } from "./AgentInChatCard";
 import { TABULAR_NUMS_CLASS, TABULAR_NUMS_STYLE, type Act } from "./panelShared";
@@ -102,6 +104,30 @@ function isTypingElement(target: EventTarget | null): boolean {
   return Boolean(target.closest("[contenteditable='true']"));
 }
 
+/** How many lines of a waiting change the Inbox shows before the person asks for the rest. */
+const PEEK_LINES = 12;
+
+/**
+ * What the Inbox shows of a waiting change at first, and whether that is all of it. A long command or diff
+ * is cut to its first lines, and a file change that came without a diff shows its content only when opened.
+ */
+export function waitingChangeText(
+  detail: string | undefined,
+  change: Pick<AgentChange, "kind" | "diff" | "before" | "after"> | undefined,
+): { peek: string; lineCount: number; fileContent: boolean; long: boolean } {
+  const lines = (detail ?? "").split("\n");
+  const cut = lines.length > PEEK_LINES;
+  const fileContent = Boolean(
+    change && change.kind === "file" && !change.diff && (change.before !== undefined || change.after !== undefined),
+  );
+  return {
+    peek: cut ? `${lines.slice(0, PEEK_LINES).join("\n")}\n…` : (detail ?? ""),
+    lineCount: lines.length,
+    fileContent,
+    long: cut || fileContent,
+  };
+}
+
 function matchesQuery(item: InboxItem, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
@@ -139,9 +165,19 @@ export function InboxView({
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [armedDoneId, setArmedDoneId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // Waiting changes whose whole text the person opened, and the one that was opened by pressing Approve.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [readFirstId, setReadFirstId] = useState<string | null>(null);
+  // Items with a request on its way. The ref answers at once: a double click arrives before the next render.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const inFlight = useRef(new Set<string>());
 
   const focused = useRef<HTMLElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLElement | null>>({});
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // The item this person last answered, and whether the focus was in the Inbox when they did.
+  const actedOn = useRef<string | null>(null);
+  const keepFocus = useRef(false);
 
   const chatWaiting = hub.chatAnswering?.waiting ?? [];
   const allItems = useMemo(
@@ -215,10 +251,25 @@ export function InboxView({
   }, [focusPresent, focusItemId]);
 
   useEffect(() => {
-    if (selectedId && !visibleItems.some((i) => i.id === selectedId)) {
-      setSelectedId(visibleItems[0]?.id ?? null);
-    }
+    if (!selectedId || visibleItems.some((i) => i.id === selectedId)) return;
+    // The selected item is gone. After this person's own answer the selection moves on, so they can keep
+    // going. When it went away by itself (answered elsewhere, the agent stopped, a filter), nothing is
+    // selected: the next key must not land on an item the person never chose.
+    const mine = actedOn.current === selectedId;
+    actedOn.current = null;
+    setSelectedId(mine ? (visibleItems[0]?.id ?? null) : null);
   }, [visibleItems, selectedId]);
+
+  useEffect(() => {
+    // The button that was pressed went away with its item: the focus stays in the Inbox.
+    if (!keepFocus.current) return;
+    const root = rootRef.current;
+    const at = document.activeElement;
+    if (root && (!at || at === document.body)) {
+      keepFocus.current = false;
+      root.focus({ preventScroll: true });
+    }
+  }, [visibleItems]);
 
   const intake = hub.alertIntake;
   const agents = hub.agents ?? [];
@@ -249,21 +300,66 @@ export function InboxView({
     [onOpenTask, onOpenTicket, onOpenView],
   );
 
+  /**
+   * Sends one answer for an item. While it is on its way a second one for the same item is dropped, so a
+   * double click or a held key cannot approve twice.
+   */
+  const send = useCallback(
+    async (itemId: string, request: HubRequest): Promise<HubSnapshot | undefined> => {
+      if (inFlight.current.has(itemId)) return undefined;
+      inFlight.current.add(itemId);
+      setBusyIds(new Set(inFlight.current));
+      actedOn.current = itemId;
+      keepFocus.current = Boolean(rootRef.current?.contains(document.activeElement));
+      try {
+        return await dispatch(request);
+      } finally {
+        inFlight.current.delete(itemId);
+        setBusyIds(new Set(inFlight.current));
+      }
+    },
+    [dispatch],
+  );
+
+  const changeOf = useCallback(
+    (item: InboxItem): AgentChange | undefined =>
+      hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId),
+    [hub.tasks],
+  );
+
+  /**
+   * Approves a waiting change. The person approves what they have read: when the Inbox shows only the
+   * start of it, the first press opens all of it and the next one approves.
+   */
+  const approveChange = (item: InboxItem, extra?: { adminException: true; note: string }): void => {
+    if (!item.taskId || !item.changeId) return;
+    const change = changeOf(item);
+    // A setting that takes a token is answered on its own card, where the token is typed.
+    if (takesSecrets(change)) return;
+    if (waitingChangeText(item.detail, change).long && !expanded[item.id]) {
+      setExpanded((all) => ({ ...all, [item.id]: true }));
+      setReadFirstId(item.id);
+      return;
+    }
+    setReadFirstId(null);
+    void send(item.id, { action: "approve", taskId: item.taskId, changeId: item.changeId, approved: true, ...extra });
+  };
+
   const resolveOrArchiveItem = useCallback(
     (item: InboxItem): void => {
       switch (item.kind) {
         case "health":
-          void dispatch({ action: "facts-problem-dismiss", serverId: item.serverId! });
+          void send(item.id, { action: "facts-problem-dismiss", serverId: item.serverId! });
           break;
         case "knowledge":
-          void dispatch({ action: "kb-finding-dismiss", id: item.findingId! });
+          void send(item.id, { action: "kb-finding-dismiss", id: item.findingId! });
           break;
         case "report":
-          void dispatch({ action: "daily-report-read" });
+          void send(item.id, { action: "daily-report-read" });
           break;
         case "review":
         case "blocked":
-          void dispatch({
+          void send(item.id, {
             action: "ticket-review",
             id: item.ticketId!,
             approve: true,
@@ -271,25 +367,25 @@ export function InboxView({
           });
           break;
         default:
-          void dispatch({ action: "ack-inbox", itemId: item.id, acknowledged: true });
+          void send(item.id, { action: "ack-inbox", itemId: item.id, acknowledged: true });
           break;
       }
     },
-    [dispatch, note],
+    [send, note],
   );
 
   const snoozeItem = useCallback(
     (item: InboxItem, preset: "1h" | "4h" | "tomorrow"): void => {
       const currentNow = Date.now();
       if (preset === "1h") {
-        void dispatch({
+        void send(item.id, {
           action: "snooze-inbox",
           itemId: item.id,
           durationMinutes: 60,
           until: currentNow + 60 * 60_000,
         });
       } else if (preset === "4h") {
-        void dispatch({
+        void send(item.id, {
           action: "snooze-inbox",
           itemId: item.id,
           durationMinutes: 240,
@@ -298,7 +394,7 @@ export function InboxView({
       } else {
         const until = tomorrowMorningMs(currentNow);
         const durationMinutes = Math.max(1, Math.round((until - currentNow) / 60_000));
-        void dispatch({
+        void send(item.id, {
           action: "snooze-inbox",
           itemId: item.id,
           durationMinutes,
@@ -307,128 +403,166 @@ export function InboxView({
       }
       setSnoozeMenuId(null);
     },
-    [dispatch],
+    [send],
   );
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
-      if (isTypingElement(event.target)) return;
+  // The keys act only while the focus is inside the Inbox. A letter typed in a terminal, a file list or a
+  // dialog elsewhere in the window is not an answer to what waits here.
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    // Another control already took this key (a list's type-ahead, a menu).
+    if (event.defaultPrevented) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (isTypingElement(event.target)) return;
 
-      if (event.key === "?") {
+    if (event.key === "?") {
+      event.preventDefault();
+      setShowShortcuts((open) => !open);
+      return;
+    }
+
+    if (event.key === "Escape") {
+      if (showShortcuts || snoozeMenuId || armedDoneId) {
         event.preventDefault();
-        setShowShortcuts((open) => !open);
-        return;
-      }
-
-      if (event.key === "Escape") {
-        if (showShortcuts || snoozeMenuId || armedDoneId) {
-          event.preventDefault();
-          setShowShortcuts(false);
-          setSnoozeMenuId(null);
-          setArmedDoneId(null);
-        }
-        return;
-      }
-
-      if (visibleItems.length === 0) return;
-
-      const currentIdx = selectedId ? visibleItems.findIndex((i) => i.id === selectedId) : -1;
-
-      if (event.key === "j") {
-        event.preventDefault();
-        const nextIdx = currentIdx < 0 ? 0 : Math.min(visibleItems.length - 1, currentIdx + 1);
-        const next = visibleItems[nextIdx];
-        if (next) {
-          setSelectedId(next.id);
-          setArmedDoneId(null);
-          itemRefs.current[next.id]?.scrollIntoView?.({ block: "nearest" });
-        }
-        return;
-      }
-
-      if (event.key === "k") {
-        event.preventDefault();
-        const prevIdx = currentIdx <= 0 ? 0 : currentIdx - 1;
-        const prev = visibleItems[prevIdx];
-        if (prev) {
-          setSelectedId(prev.id);
-          setArmedDoneId(null);
-          itemRefs.current[prev.id]?.scrollIntoView?.({ block: "nearest" });
-        }
-        return;
-      }
-
-      const active = (currentIdx >= 0 ? visibleItems[currentIdx] : visibleItems[0]) ?? null;
-      if (!active) return;
-
-      if (event.key === "o" || event.key === "Enter") {
-        if (
-          event.key === "Enter" &&
-          event.target instanceof HTMLElement &&
-          Boolean(event.target.closest("button, a, summary"))
-        ) {
-          return;
-        }
-        event.preventDefault();
-        openItem(active);
-        return;
-      }
-
-      if (event.key === "e") {
-        event.preventDefault();
-        // One stray key must not close a ticket: the first press asks, the second does it.
-        const isTicket = active.kind === "review" || active.kind === "blocked";
-        if (isTicket && armedDoneId !== active.id) {
-          setSelectedId(active.id);
-          setArmedDoneId(active.id);
-          return;
-        }
+        setShowShortcuts(false);
+        setSnoozeMenuId(null);
         setArmedDoneId(null);
-        resolveOrArchiveItem(active);
+      }
+      return;
+    }
+
+    if (visibleItems.length === 0) return;
+
+    const currentIdx = selectedId ? visibleItems.findIndex((i) => i.id === selectedId) : -1;
+
+    if (event.key === "j") {
+      event.preventDefault();
+      const nextIdx = currentIdx < 0 ? 0 : Math.min(visibleItems.length - 1, currentIdx + 1);
+      const next = visibleItems[nextIdx];
+      if (next) {
+        setSelectedId(next.id);
+        setArmedDoneId(null);
+        itemRefs.current[next.id]?.scrollIntoView?.({ block: "nearest" });
+      }
+      return;
+    }
+
+    if (event.key === "k") {
+      event.preventDefault();
+      const prevIdx = currentIdx <= 0 ? 0 : currentIdx - 1;
+      const prev = visibleItems[prevIdx];
+      if (prev) {
+        setSelectedId(prev.id);
+        setArmedDoneId(null);
+        itemRefs.current[prev.id]?.scrollIntoView?.({ block: "nearest" });
+      }
+      return;
+    }
+
+    // Every other key answers the selected item. With nothing selected there is nothing to answer:
+    // it never falls back to the first item in the list. A held key answers once, not once per repeat.
+    const active = currentIdx >= 0 ? visibleItems[currentIdx] : undefined;
+    if (!active || event.repeat) return;
+
+    if (event.key === "o" || event.key === "Enter") {
+      if (
+        event.key === "Enter" &&
+        event.target instanceof HTMLElement &&
+        Boolean(event.target.closest("button, a, summary"))
+      ) {
         return;
       }
+      event.preventDefault();
+      openItem(active);
+      return;
+    }
 
-      if (event.key === "h") {
+    if (event.key === "e") {
+      event.preventDefault();
+      // One stray key must not close a ticket: the first press asks, the second does it.
+      const isTicket = active.kind === "review" || active.kind === "blocked";
+      if (isTicket && armedDoneId !== active.id) {
+        setArmedDoneId(active.id);
+        return;
+      }
+      setArmedDoneId(null);
+      resolveOrArchiveItem(active);
+      return;
+    }
+
+    if (event.key === "h") {
+      event.preventDefault();
+      setSnoozeMenuId((prev) => (prev === active.id ? null : active.id));
+      return;
+    }
+
+    if (event.key === "a") {
+      if (active.kind === "approval" && active.taskId && active.changeId) {
         event.preventDefault();
-        setSelectedId(active.id);
-        setSnoozeMenuId((prev) => (prev === active.id ? null : active.id));
-        return;
+        // The key does what the button does, and nothing the button does not offer.
+        approveChange(active);
+      } else if (active.kind === "plan" && active.taskId) {
+        event.preventDefault();
+        void send(active.id, { action: "plan-decide", taskId: active.taskId, approved: true });
       }
+    }
+  };
 
-      if (event.key === "a") {
-        if (active.kind === "approval" && active.taskId && active.changeId) {
-          event.preventDefault();
-          // A setting that takes a token is answered on its own card: the key does what the button does not offer.
-          if (takesSecrets(hub.tasks.find((t) => t.id === active.taskId)?.changes.find((c) => c.id === active.changeId))) return;
-          void dispatch({
-            action: "approve",
-            taskId: active.taskId,
-            changeId: active.changeId,
-            approved: true,
-          });
-        } else if (active.kind === "plan" && active.taskId) {
-          event.preventDefault();
-          void dispatch({ action: "plan-decide", taskId: active.taskId, approved: true });
-        }
+  const createAlertAddress = (): void => {
+    setCopiedAddress(false);
+    setCopyAddressFailed(false);
+    setHookStatus("");
+    void dispatch({ action: "alert-hook-create" }).then((snap) => {
+      const path = snap?.reply?.alertHook?.path;
+      if (path) {
+        setAddress(`${window.location.origin}${path}`);
+        setHookStatus("Webhook address created. Copy it now because it is shown once.");
       }
-    };
+    });
+  };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    armedDoneId,
-    dispatch,
-    hub.tasks,
-    openItem,
-    resolveOrArchiveItem,
-    selectedId,
-    showShortcuts,
-    snoozeMenuId,
-    visibleItems,
-  ]);
+  /** What a waiting change does, with its check and its way back: short at first when it is long. */
+  const approvalBody = (item: InboxItem): JSX.Element | null => {
+    const change = changeOf(item);
+    if (!item.detail && !change) return null;
+    const text = waitingChangeText(item.detail, change);
+    const open = !text.long || Boolean(expanded[item.id]);
+    return (
+      <>
+        {item.detail && (
+          <pre className="ai-terminal-peek" data-testid={`inbox-change-text-${item.changeId}`}>
+            {open ? item.detail : text.peek}
+          </pre>
+        )}
+        {text.fileContent && open && change && (
+          <div className="ai-diff">
+            <DiffViewer before={change.before ?? ""} after={change.after ?? ""} filePath={change.target} />
+          </div>
+        )}
+        {text.long && (
+          <button
+            type="button"
+            className="ai-mini-btn"
+            aria-expanded={open}
+            data-testid={`inbox-change-toggle-${item.changeId}`}
+            onClick={() => {
+              setExpanded((all) => ({ ...all, [item.id]: !open }));
+              if (open) setReadFirstId(null);
+            }}
+          >
+            {open
+              ? "Show less"
+              : text.fileContent
+                ? "Show what changes in the file"
+                : `Show all ${text.lineCount} lines`}
+          </button>
+        )}
+        {change && <ChangeProof change={change} taskId={item.taskId} />}
+      </>
+    );
+  };
 
   const actions = (item: InboxItem): JSX.Element => {
+    const busy = busyIds.has(item.id);
     const snoozed = isInboxItemSnoozed(item, now);
     const snoozeControls = (
       <div className="ai-inbox-snooze-wrap" style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
@@ -436,7 +570,7 @@ export function InboxView({
           <button
             type="button"
             data-testid={`inbox-unsnooze-btn-${item.id}`}
-            onClick={() => void dispatch({ action: "snooze-inbox", itemId: item.id, until: 0 })}
+            onClick={() => void send(item.id, { action: "snooze-inbox", itemId: item.id, until: 0 })}
           >
             Show now
           </button>
@@ -475,7 +609,7 @@ export function InboxView({
     switch (item.kind) {
       case "approval": {
         // A setting that needs a token is approved on its own card, where the token is typed.
-        const needsSecrets = takesSecrets(hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId));
+        const needsSecrets = takesSecrets(changeOf(item));
         return (
           <>
             {needsSecrets ? (
@@ -483,26 +617,16 @@ export function InboxView({
                 {SECRETS_ELSEWHERE}
               </small>
             ) : (
-              <button
-                type="button"
-                className="ai-btn-emerald"
-                onClick={() =>
-                  void dispatch({
-                    action: "approve",
-                    taskId: item.taskId!,
-                    changeId: item.changeId!,
-                    approved: true,
-                  })
-                }
-              >
+              <button type="button" className="ai-btn-emerald" disabled={busy} onClick={() => approveChange(item)}>
                 Approve
               </button>
             )}
             <button
               type="button"
               className="ai-btn-danger"
+              disabled={busy}
               onClick={() =>
-                void dispatch({
+                void send(item.id, {
                   action: "approve",
                   taskId: item.taskId!,
                   changeId: item.changeId!,
@@ -515,15 +639,20 @@ export function InboxView({
             <button type="button" onClick={() => onOpenTask(item.taskId!)}>
               Open
             </button>
+            {readFirstId === item.id && expanded[item.id] && (
+              <small className="ai-hint" role="status" data-testid="inbox-read-first">
+                This is the whole change. Read it, then press Approve again.
+              </small>
+            )}
             {(() => {
               // A change that needs two people: who has approved, and that somebody else is being asked.
-              const change = hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId);
+              const change = changeOf(item);
               const needs = change?.requiredApprovals ?? 1;
               if (change?.adminExceptionAvailable) {
                 const reason = exceptionReasons[item.id] ?? "";
                 return <label>Reason for approving alone
                   <input value={reason} maxLength={1000} onChange={(event) => setExceptionReasons({ ...exceptionReasons, [item.id]: event.target.value })} />
-                  <button type="button" disabled={!reason.trim()} onClick={() => void dispatch({ action: "approve", taskId: item.taskId!, changeId: item.changeId!, approved: true, adminException: true, note: reason.trim() })}>Approve this change alone</button>
+                  <button type="button" disabled={busy || !reason.trim()} onClick={() => approveChange(item, { adminException: true, note: reason.trim() })}>Approve this change alone</button>
                 </label>;
               }
               if (needs < 2) return null;
@@ -544,13 +673,13 @@ export function InboxView({
         // Another member's change: the answer goes to their run, and counts as this member's.
         const waiting = hub.peerApprovals?.find((p) => p.ownerId === item.ownerId && p.changeId === item.changeId);
         const answer = (approved: boolean): void =>
-          void dispatch({ action: "peer-approve", ownerId: item.ownerId!, taskId: item.taskId!, changeId: item.changeId!, approved });
+          void send(item.id, { action: "peer-approve", ownerId: item.ownerId!, taskId: item.taskId!, changeId: item.changeId!, approved });
         return (
           <>
-            <button type="button" className="ai-btn-emerald" data-testid={`peer-approve-${item.changeId}`} onClick={() => answer(true)}>
+            <button type="button" className="ai-btn-emerald" disabled={busy} data-testid={`peer-approve-${item.changeId}`} onClick={() => answer(true)}>
               {waiting?.plan ? "Approve the plan" : "Approve"}
             </button>
-            <button type="button" className="ai-btn-danger" data-testid={`peer-deny-${item.changeId}`} onClick={() => answer(false)}>
+            <button type="button" className="ai-btn-danger" disabled={busy} data-testid={`peer-deny-${item.changeId}`} onClick={() => answer(false)}>
               {waiting?.plan ? "Do not approve" : "Deny"}
             </button>
             {waiting && (
@@ -574,7 +703,8 @@ export function InboxView({
               <button
                 type="button"
                 className="ai-btn-emerald"
-                onClick={() => void dispatch({ action: "plan-decide", taskId: item.taskId!, approved: true })}
+                disabled={busy}
+                onClick={() => void send(item.id, { action: "plan-decide", taskId: item.taskId!, approved: true })}
               >
                 Approve the plan
               </button>
@@ -608,8 +738,9 @@ export function InboxView({
             <button
               type="button"
               className="ai-btn-emerald"
+              disabled={busy}
               onClick={() =>
-                void dispatch({
+                void send(item.id, {
                   action: "ticket-review",
                   id: item.ticketId!,
                   approve: true,
@@ -621,9 +752,9 @@ export function InboxView({
             </button>
             <button
               type="button"
-              disabled={item.kind === "review" && !note(item.id).trim()}
+              disabled={busy || (item.kind === "review" && !note(item.id).trim())}
               onClick={() =>
-                void dispatch({
+                void send(item.id, {
                   action: "ticket-review",
                   id: item.ticketId!,
                   approve: false,
@@ -660,7 +791,7 @@ export function InboxView({
               <button
                 type="button"
                 data-testid={`inbox-ack-btn-${item.id}`}
-                onClick={() => void dispatch({ action: "ack-inbox", itemId: item.id, acknowledged: true })}
+                onClick={() => void send(item.id, { action: "ack-inbox", itemId: item.id, acknowledged: true })}
               >
                 Acknowledge
               </button>
@@ -677,7 +808,7 @@ export function InboxView({
             </button>
             <button
               type="button"
-              onClick={() => void dispatch({ action: "facts-problem-dismiss", serverId: item.serverId! })}
+              onClick={() => void send(item.id, { action: "facts-problem-dismiss", serverId: item.serverId! })}
             >
               Dismiss
             </button>
@@ -692,7 +823,7 @@ export function InboxView({
             </button>
             <button
               type="button"
-              onClick={() => void dispatch({ action: "kb-finding-dismiss", id: item.findingId! })}
+              onClick={() => void send(item.id, { action: "kb-finding-dismiss", id: item.findingId! })}
             >
               Dismiss
             </button>
@@ -702,7 +833,7 @@ export function InboxView({
       case "report":
         return (
           <>
-            <button type="button" onClick={() => void dispatch({ action: "daily-report-read" })}>
+            <button type="button" onClick={() => void send(item.id, { action: "daily-report-read" })}>
               Mark read
             </button>
             {snoozeControls}
@@ -712,7 +843,8 @@ export function InboxView({
   };
 
   return (
-    <div className="ai-scroll" data-testid="inbox-view">
+    // It takes the focus on a click anywhere in it, so the keys work after the person points at the Inbox.
+    <div className="ai-scroll ai-inbox-view" data-testid="inbox-view" ref={rootRef} tabIndex={-1} onKeyDown={onKeyDown}>
       <header className="ai-view-head">
         <div className="ai-card-head">
           <h2>Inbox</h2>
@@ -737,14 +869,18 @@ export function InboxView({
           data-testid="inbox-shortcuts"
           aria-label="Inbox keyboard shortcuts"
         >
-          <strong>Keyboard triage</strong>
+          <strong>Keyboard shortcuts</strong>
+          <p className="ai-hint">
+            The keys work while the Inbox has the focus: click in the Inbox or move to it with Tab. Choose an item
+            with <kbd>j</kbd> or <kbd>k</kbd> first. The other keys answer the chosen item only.
+          </p>
           <div className="ai-inbox-shortcut-grid" style={{ display: "flex", flexWrap: "wrap", gap: "8px 14px", marginTop: 6 }}>
-            <span><kbd>j</kbd> / <kbd>k</kbd> Navigate</span>
+            <span><kbd>j</kbd> / <kbd>k</kbd> Next, previous</span>
             <span><kbd>o</kbd> / <kbd>Enter</kbd> Open</span>
-            <span><kbd>a</kbd> Approve</span>
+            <span><kbd>a</kbd> Approve (a long change opens first; press again to approve)</span>
             <span><kbd>e</kbd> Acknowledge, or mark a ticket done (press twice)</span>
             <span><kbd>h</kbd> Later</span>
-            <span><kbd>?</kbd> Toggle cheatsheet</span>
+            <span><kbd>?</kbd> Show or hide this list</span>
           </div>
         </section>
       )}
@@ -894,16 +1030,8 @@ export function InboxView({
                     </div>
                     {item.kind === "peer" && item.detail ? (
                       <pre className="ai-terminal-peek">{item.detail}</pre>
-                    ) : item.kind === "approval" && item.detail ? (
-                      <>
-                        <pre className="ai-terminal-peek">{item.detail}</pre>
-                        {(() => {
-                          const change = hub.tasks
-                            .find((t) => t.id === item.taskId)
-                            ?.changes.find((c) => c.id === item.changeId);
-                          return change ? <ChangeProof change={change} /> : null;
-                        })()}
-                      </>
+                    ) : item.kind === "approval" ? (
+                      approvalBody(item)
                     ) : item.kind === "report" && hub.dailyReport ? (
                       <div className="ai-doc-body">
                         <RichMarkdownContent text={hub.dailyReport.text} />
@@ -941,29 +1069,25 @@ export function InboxView({
           {intake?.canReceive ? (
             <>
               <div className="ai-card-actions">
-                <button
-                  type="button"
-                  className="ai-btn-accent"
-                  onClick={() => {
-                    setCopiedAddress(false);
-                    setCopyAddressFailed(false);
-                    setHookStatus("");
-                    void dispatch({ action: "alert-hook-create" }).then((snap) => {
-                      const path = snap?.reply?.alertHook?.path;
-                      if (path) {
-                        setAddress(`${window.location.origin}${path}`);
-                        setHookStatus("Webhook address created. Copy it now because it is shown once.");
-                      }
-                    });
-                  }}
-                >
-                  {intake.enabled ? "Replace the address" : "Create an address to post to"}
-                </button>
+                {intake.enabled ? (
+                  // The old address stops working at once: whatever posts to it has to be given the new one.
+                  <ConfirmButton
+                    label="Replace the address"
+                    confirmLabel="Replace it? The old address stops working."
+                    className="ai-btn-accent"
+                    onConfirm={createAlertAddress}
+                  />
+                ) : (
+                  <button type="button" className="ai-btn-accent" onClick={createAlertAddress}>
+                    Create an address to post to
+                  </button>
+                )}
                 {intake.enabled && (
-                  <button
-                    type="button"
-                    title="Revokes the webhook secret and turns incoming alert webhooks off"
-                    onClick={() => {
+                  <ConfirmButton
+                    label="Revoke and turn off"
+                    confirmLabel="Turn it off? The address stops working."
+                    className=""
+                    onConfirm={() => {
                       setHookStatus("");
                       void dispatch({ action: "alert-hook-disable" }).then((snap) => {
                         setAddress("");
@@ -973,9 +1097,7 @@ export function InboxView({
                         setHookStatus(notes || "Webhook address revoked and turned off.");
                       });
                     }}
-                  >
-                    Revoke and turn off
-                  </button>
+                  />
                 )}
               </div>
               {hookStatus && (
@@ -1030,8 +1152,8 @@ export function InboxView({
             </>
           ) : (
             <p className="ai-hint">
-              The desktop app has no address a monitoring system can reach. Run sshS3 as a server
-              (docs/workforce-server.md) to receive alerts; here you can paste one.
+              The desktop app has no address a monitoring system can reach. To receive alerts, run sshS3 as a
+              server. Here you can paste one.
             </p>
           )}
           <fieldset className="ai-checks ai-alert-rules">

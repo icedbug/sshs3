@@ -1,3 +1,4 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   Boxes,
@@ -1059,7 +1060,8 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                           Folder
                         </button>
 
-                        {/* Import / Export Menu */}
+                        {/* Import / Export Menu. It reads and writes files on the computer the app runs on. */}
+                        <DesktopOnly inline>
                         <div className="relative">
                           <button
                             type="button"
@@ -1102,6 +1104,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                             </div>
                           )}
                         </div>
+                        </DesktopOnly>
                       </>
                     )}
                   </div>
@@ -1219,7 +1222,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                             {adHocTarget.port ? `:${adHocTarget.port}` : ''}
                           </div>
                           <div className="text-xs text-txt-muted">
-                            One-off connection — nothing is saved unless you choose to
+                            One-off connection: nothing is saved unless you choose to
                           </div>
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">

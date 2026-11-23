@@ -12,8 +12,6 @@ export interface PlanCardProps {
   /** The agent is still working: the decision waits until it has stopped. */
   busy: boolean;
   act: Act;
-  /** Optional callback invoked when the user saves an in-progress feedback draft locally. */
-  onSaveDraft?: (note: string) => void;
 }
 
 // How the line under a plan starts: alone, your yes starts the agent. Where two people are needed, it does not.
@@ -38,11 +36,9 @@ export function PlanCard({
   plan,
   busy,
   act,
-  onSaveDraft,
 }: PlanCardProps): JSX.Element | null {
   const [note, setNote] = useState("");
   const [editing, setEditing] = useState(false);
-  const [draftSaved, setDraftSaved] = useState(false);
   const [sending, setSending] = useState(false);
   /** Explicit per-step approval toggle; never silently flipped by writing feedback. */
   const [askChoice, setAskChoice] = useState<boolean | undefined>(undefined);
@@ -69,17 +65,9 @@ export function PlanCard({
       ...(approved && askChoice !== undefined && !promised ? { askEach: askChoice } : {}),
     })
       .then(() => {
-        if (!approved) {
-          setEditing(false);
-          setDraftSaved(false);
-        }
+        if (!approved) setEditing(false);
       })
       .finally(() => setSending(false));
-  };
-
-  const handleSaveDraft = (): void => {
-    setDraftSaved(true);
-    onSaveDraft?.(note);
   };
 
   const body = (
@@ -245,11 +233,6 @@ export function PlanCard({
             <Pencil size={13} aria-hidden="true" />
             Edit Plan
           </button>
-          {draftSaved && !editing && (
-            <span className="ai-badge" data-testid="plan-draft-badge">
-              Draft saved
-            </span>
-          )}
         </div>
 
         {editing && (
@@ -258,10 +241,7 @@ export function PlanCard({
               rows={2}
               aria-label="Note to the agent"
               value={note}
-              onChange={(e) => {
-                setNote(e.target.value);
-                if (draftSaved) setDraftSaved(false);
-              }}
+              onChange={(e) => setNote(e.target.value)}
               placeholder="Describe what to change in this plan…"
               disabled={sending || busy}
             />
@@ -274,14 +254,6 @@ export function PlanCard({
                 onClick={() => decide(false)}
               >
                 Send Revision
-              </button>
-              <button
-                type="button"
-                data-testid="plan-save-draft-btn"
-                disabled={sending || busy}
-                onClick={handleSaveDraft}
-              >
-                Save Draft
               </button>
               <button
                 type="button"
@@ -299,11 +271,6 @@ export function PlanCard({
               >
                 Cancel
               </button>
-              {draftSaved && (
-                <span className="ai-badge" role="status" data-testid="plan-draft-badge">
-                  Draft saved
-                </span>
-              )}
             </div>
           </div>
         )}

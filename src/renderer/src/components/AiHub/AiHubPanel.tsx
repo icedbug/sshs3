@@ -16,6 +16,7 @@ import { ComposerInput } from "./panel/ComposerInput";
 import { ComposerFooter } from "./panel/ComposerFooter";
 import { OtherViews } from "./panel/OtherViews";
 import { SettingsOverlay } from "./panel/SettingsOverlay";
+import { ErrorBoundary } from "../ErrorBoundary";
 
 export interface AiHubPanelProps {
   mode: "closed" | "panel" | "hub";
@@ -67,7 +68,24 @@ export function AiHubPanel(props: AiHubPanelProps): JSX.Element {
       {mode === "panel" && onResizeWidth && (
         <div
           className="ai-hub-resize-handle"
-          title="Drag to resize AI panel"
+          title="Drag to resize the AI panel, or use the arrow keys"
+          // With the keyboard: Left makes the panel wider, Right narrower (it sits at the right edge).
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Width of the AI panel"
+          aria-valuemin={300}
+          aria-valuemax={900}
+          aria-valuenow={width ?? 420}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            const step = e.shiftKey ? 64 : 16;
+            const now = width ?? 420;
+            const next =
+              e.key === "ArrowLeft" ? now + step : e.key === "ArrowRight" ? now - step : e.key === "Home" ? 300 : e.key === "End" ? 900 : undefined;
+            if (next === undefined) return;
+            e.preventDefault();
+            onResizeWidth(Math.min(900, Math.max(300, next)));
+          }}
           onMouseDown={(e) => {
             e.preventDefault();
             const startX = e.clientX;
@@ -97,6 +115,8 @@ export function AiHubPanel(props: AiHubPanelProps): JSX.Element {
       ) : (
         <>
           {activeView === "Work" && (
+            // One conversation that cannot be drawn leaves the panel's navigation working: another one can be opened.
+            <ErrorBoundary what="This conversation" resetKey={p.taskId}>
             <div className="ai-work-layout">
               <WorkSidebar p={p} hub={hub} />
               <div className="ai-chat-body">
@@ -123,6 +143,7 @@ export function AiHubPanel(props: AiHubPanelProps): JSX.Element {
               </div>
             </div>
             </div>
+            </ErrorBoundary>
           )}
           <OtherViews p={p} hub={hub} />
         </>

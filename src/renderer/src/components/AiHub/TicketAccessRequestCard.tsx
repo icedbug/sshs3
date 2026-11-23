@@ -1,7 +1,7 @@
+import { openLink } from "../../lib/openLink";
 import { useState } from "react";
 import { accessRequestUrl, validatedAccessRequest } from "@shared/ticketAccessRequest";
 import type { WorkTicket } from "@shared/types/aiHub";
-import { isWebBrowserMode } from "../../lib/webClientBridge";
 import type { Act } from "./panelShared";
 
 function localTime(at?: number): string {
@@ -42,9 +42,8 @@ export function TicketAccessRequestCard({ ticket, act }: { ticket: WorkTicket; a
       {record && (
         <div className="ai-hint">
           {href && <a href={href} title={href} target="_blank" rel="noopener noreferrer" onClick={event => {
-            if (isWebBrowserMode()) return;
             event.preventDefault();
-            void window.multissh.openExternal(href).catch(() => setError("Could not open the access request."));
+            if (!openLink(href)) setError("Could not open the access request.");
           }}>Open access request</a>}
           <div>Resource · {record.resource}</div>
           <div>Reviewer · {record.reviewer}</div>

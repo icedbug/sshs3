@@ -336,6 +336,7 @@ describe("Shell Integration Overhaul", () => {
       expect(screen.getByTestId("ai-restore-checkpoint-chg-1")).toBeInTheDocument();
 
       fireEvent.click(screen.getByTestId("ai-restore-checkpoint-chg-1"));
+      fireEvent.click(screen.getByTestId("ai-restore-checkpoint-chg-1"));
       await waitFor(() =>
         expect(mockState.hubRequest).toHaveBeenCalledWith({
           action: "restore-checkpoint",

@@ -81,6 +81,7 @@ export function AboveComposer({ p }: { p: PanelState }): JSX.Element {
                             overridePrompt: maskedPrompt,
                             overrideAttachments: maskedAttachments,
                             bypassDlp: true,
+                            draft: { prompt: dlpWarning.typed, attachments: dlpWarning.attachments },
                           });
                         }}
                       >
@@ -95,6 +96,7 @@ export function AboveComposer({ p }: { p: PanelState }): JSX.Element {
                             overridePrompt: dlpWarning.prompt,
                             overrideAttachments: dlpWarning.attachments,
                             bypassDlp: true,
+                            draft: { prompt: dlpWarning.typed, attachments: dlpWarning.attachments },
                           });
                         }}
                       >

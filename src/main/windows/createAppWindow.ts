@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeImage, screen } from 'electron';
+import { app, BrowserWindow, nativeImage, screen, shell } from 'electron';
 import { DEFAULT_WINDOW_SIZE, minimumSizeFor, type Rect } from './windowBounds';
 
 export interface AppWindowOptions {
@@ -11,6 +11,16 @@ export interface AppWindowOptions {
   /** Vite dev server URL in development; otherwise `htmlPath` is loaded from disk. */
   devServerUrl?: string;
   htmlPath: string;
+}
+
+/** Whether an address may be handed to the system to open: http, https and mailto only. */
+export function isSystemLink(url: string): boolean {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -47,7 +57,12 @@ export function createAppWindow(options: AppWindowOptions): BrowserWindow {
     win.maximize();
   }
 
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // The app never opens a window of its own for a link. A web or mail address is handed to the system
+  // (its browser, its mail program); anything else is dropped.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSystemLink(url)) void shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
 
   // The application menu is removed (see initializeApp), which also removes its DevTools
   // accelerators — give unpackaged builds F12 / Ctrl+Shift+I back so a renderer problem can be

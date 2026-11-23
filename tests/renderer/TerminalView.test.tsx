@@ -4,6 +4,7 @@ import { render, screen, cleanup, act, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
 import { TerminalView } from '../../src/renderer/src/components/TerminalView';
+import { ConfirmProvider } from '../../src/renderer/src/components/ConfirmDialog';
 import * as terminalLinksModule from '../../src/renderer/src/lib/terminalLinks';
 
 // Polyfill ResizeObserver and matchMedia for JSDOM
@@ -389,7 +390,7 @@ describe('TerminalView Component', () => {
     expect(container).toBeInTheDocument();
   });
 
-  it('configures linkHandler to open external URLs via window.multissh.openExternal', async () => {
+  it('a hyperlink a program printed shows its address and opens only after a yes', async () => {
     const mockOpenExternal = vi.fn();
     window.multissh.openExternal = mockOpenExternal;
 
@@ -400,13 +401,25 @@ describe('TerminalView Component', () => {
       return openSpy.getMockImplementation() ? undefined : (openSpy as any)(element);
     });
 
-    render(<TerminalView config={sampleConfig} />);
+    render(
+      <ConfirmProvider>
+        <TerminalView config={sampleConfig} />
+      </ConfirmProvider>
+    );
     await act(async () => {
       await Promise.resolve();
     });
 
     expect(capturedLinkHandler).toBeDefined();
-    capturedLinkHandler.activate({} as any, 'https://github.com/remotion-dev/remotion');
+    // The text of such a link can say anything: the address is asked about before it is opened.
+    act(() => capturedLinkHandler.activate({} as any, 'https://github.com/remotion-dev/remotion'));
+    expect(mockOpenExternal).not.toHaveBeenCalled();
+    const dialog = await screen.findByTestId('confirm-dialog');
+    expect(dialog).toHaveTextContent('https://github.com/remotion-dev/remotion');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open link' }));
+      await Promise.resolve();
+    });
     expect(mockOpenExternal).toHaveBeenCalledWith('https://github.com/remotion-dev/remotion');
 
     openSpy.mockRestore();

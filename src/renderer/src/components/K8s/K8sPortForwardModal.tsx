@@ -1,3 +1,5 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
+import { openLink } from '../../lib/openLink';
 import React, { useEffect, useState, useRef } from 'react';
 import {
   ArrowRight,
@@ -231,6 +233,8 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {/* A port is opened on the computer the app runs on: in the browser that would be the server. */}
+          <DesktopOnly innerClassName="space-y-5">
           {/* Start New Forward Form */}
           <form onSubmit={handleStart} className="rounded-xl border border-border-subtle bg-app-surface p-4 space-y-3.5">
             <div className="flex items-center gap-2 text-xs font-semibold text-txt-primary">
@@ -444,7 +448,7 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          window.multissh.openExternal(`http://127.0.0.1:${pf.localPort}`);
+                          openLink(`http://127.0.0.1:${pf.localPort}`);
                         }}
                         className="flex items-center gap-1 rounded-lg border border-border-subtle bg-app-surface-subtle px-2.5 py-1 text-xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
                       >
@@ -471,6 +475,7 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
               </div>
             )}
           </div>
+          </DesktopOnly>
         </div>
 
         {/* Footer */}

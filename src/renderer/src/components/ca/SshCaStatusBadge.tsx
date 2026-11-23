@@ -96,7 +96,7 @@ export const SshCaStatusBadge: React.FC<SshCaStatusBadgeProps> = ({ onOpenSettin
         aria-expanded={isOpen}
         title={
           status.active
-            ? `SSH CA: Active (${status.username}) — ${formatRemainingTime(remainingSeconds)}`
+            ? `SSH CA: Active (${status.username}): ${formatRemainingTime(remainingSeconds)}`
             : 'SSH CA: Inactive (Click to log in)'
         }
         onClick={handleToggle}

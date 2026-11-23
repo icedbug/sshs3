@@ -1,9 +1,10 @@
 import React, { type ReactNode } from 'react';
 import { externalLinkTarget, linkTitle } from '../../lib/markdownLinks';
+import { openLink } from '../../lib/openLink';
 
 /**
  * A link of the markdown preview. The window blocks navigation, so a plain `<a href>` does nothing;
- * a web link is opened in the system browser instead. Every other kind (relative, `#anchor`, `mailto:`
+ * a web link is opened with `openLink` instead (the system browser, or a new tab). Every other kind (relative, `#anchor`, `mailto:`
  * and so on) is shown as ordinary text rather than as a link that looks clickable and is not.
  * The title shows where a link really goes, since the text of a link can say anything.
  */
@@ -23,8 +24,7 @@ export const MarkdownLink: React.FC<{ href?: string; title?: string; children?: 
       rel="noreferrer noopener"
       onClick={(event) => {
         event.preventDefault();
-        // A refused or failed open has nothing to show here; it must not become an unhandled rejection.
-        void Promise.resolve(window.multissh?.openExternal(target)).catch(() => {});
+        openLink(target);
       }}
     >
       {children}

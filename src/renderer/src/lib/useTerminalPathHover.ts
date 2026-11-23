@@ -1,3 +1,4 @@
+import { copyToClipboard } from './clipboard';
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { Terminal } from '@xterm/xterm';
 import type { FileEntry } from '@shared/types/storage';
@@ -609,7 +610,7 @@ export function useTerminalPathHover({
     },
     onClose: dismissCard,
     onCopyPath: (p: string) => {
-      navigator.clipboard?.writeText(p);
+      void copyToClipboard(p);
       notifyRef.current(`Copied path: ${p}`, 2000);
       dismissCard();
     },

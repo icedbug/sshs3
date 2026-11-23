@@ -170,7 +170,7 @@ describe('TeamVaultDetailPanel', () => {
 
       const demoteButton = screen.getByRole('button', { name: 'Demote' });
       expect(demoteButton).toBeDisabled();
-      expect(demoteButton).toHaveAttribute('title', "Can't demote the last admin — promote another member first");
+      expect(demoteButton).toHaveAttribute('title', "Can't demote the last admin: promote another member first");
 
       fireEvent.click(demoteButton);
       expect(window.multissh.teamVaultSetRole).not.toHaveBeenCalled();
@@ -538,7 +538,7 @@ describe('TeamVaultDetailPanel', () => {
       });
 
       renderPanel();
-      await waitFor(() => expect(screen.getByText('Remote has a newer version — pull first')).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText('Remote has a newer version: pull first')).toBeInTheDocument());
       expect(screen.getByRole('button', { name: /Pull/ }).className).toContain('border-amber-500');
     });
 

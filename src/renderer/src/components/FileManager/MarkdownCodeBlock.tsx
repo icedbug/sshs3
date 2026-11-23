@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../../lib/clipboard';
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { codeToCopy, highlightCode, readCodeBlock } from '../../lib/markdownCodeHighlight';
@@ -26,7 +27,7 @@ function CodeBlockFrame({ children, highlight }: { children?: ReactNode; highlig
   if (!block) return <pre>{children}</pre>;
 
   const copy = () => {
-    void navigator.clipboard?.writeText(text).then(
+    void writeClipboardText(text).then(
       () => {
         setCopied(true);
         clearTimeout(resetTimer.current);

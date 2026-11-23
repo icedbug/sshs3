@@ -8,7 +8,7 @@
  * the stream of pieces as they arrive, and asks again only when the snapshot says the conversation
  * holds something this copy does not.
  */
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { AgentChange, AgentMessage, AgentMessagesTail, AgentTask, HubSnapshot, RunStatus } from "@shared/types/aiHub";
 import type { AiHubDeltaEvent, MultiSSHApiWithHubDelta } from "@shared/ipc/createMultiSSHApi";
 import { hubSessionActive, onHubSessionReset } from "./aiHubSession";
@@ -35,6 +35,8 @@ interface Whole {
   loading: boolean;
   /** The snapshot moved on while it was: one more follows. */
   again: boolean;
+  /** The fetch that is on its way, with the one that follows it: whoever asks meanwhile waits for both. */
+  pending?: Promise<boolean>;
 }
 
 const whole = new Map<string, Whole>();
@@ -107,36 +109,54 @@ function upToDate(entry: Whole | undefined, task: AgentTask): boolean {
     (entry.messages.find(saved => saved.id === m.id)?.sourceCallCount ?? 0) >= m.sourceCallCount);
 }
 
-async function load(taskId: string): Promise<boolean> {
-  if (!hubSessionActive()) return false;
+function load(taskId: string): Promise<boolean> {
+  if (!hubSessionActive()) return Promise.resolve(false);
   const entry = whole.get(taskId) ?? { messages: [], changes: new Map<string, AgentChange>(), loaded: false, loading: false, again: false };
-  if (entry.loading) {
+  if (entry.loading && entry.pending) {
+    // What is on its way was asked for before the snapshot moved on: one more fetch follows it, and
+    // whoever asked now is answered when that one is back.
     entry.again = true;
-    return true;
+    return entry.pending;
   }
   entry.loading = true;
   whole.set(taskId, entry);
-  try {
-    const got = await readTask(taskId);
-    if (whole.get(taskId) !== entry) return false;
-    if (got) {
-      entry.messages = got.messages;
-      entry.changes = new Map(got.changes.map((c) => [c.id, c]));
-      entry.loaded = true;
-      publish();
-    }
-    return Boolean(got);
-  } catch {
-    // Gone, or the hub is away: the snapshot's own copy is shown, and the next change asks again.
-    if (whole.get(taskId) === entry && !entry.loaded) whole.delete(taskId);
-    return false;
-  } finally {
-    entry.loading = false;
-    if (entry.again && whole.get(taskId) === entry) {
+  entry.pending = (async () => {
+    try {
+      let ok = false;
+      do {
+        entry.again = false;
+        const got = await readTask(taskId);
+        if (whole.get(taskId) !== entry) return false;
+        if (got) {
+          entry.messages = got.messages;
+          entry.changes = new Map(got.changes.map((c) => [c.id, c]));
+          entry.loaded = true;
+          publish();
+        }
+        ok = Boolean(got);
+      } while (entry.again);
+      return ok;
+    } catch {
+      // Gone, or the hub is away: the snapshot's own copy is shown, and the next change asks again.
+      if (whole.get(taskId) === entry && !entry.loaded) whole.delete(taskId);
+      return false;
+    } finally {
+      entry.loading = false;
       entry.again = false;
-      void load(taskId);
+      entry.pending = undefined;
     }
-  }
+  })();
+  return entry.pending;
+}
+
+/**
+ * What the snapshot says a cut conversation holds: how many messages, which one is last, and the state of
+ * each change whose long parts were left out. When it changes while the whole copy is behind, the copy
+ * is fetched again.
+ */
+function needOf(task: AgentTask): string {
+  const tail = task.messagesTail;
+  return [tail ? `${tail.count}:${tail.lastId}` : "", ...task.changes.filter((c) => c.partial).map((c) => `${c.id}:${c.status}`)].join("|");
 }
 
 /** A change with the long parts the snapshot left out, where they have been fetched. */
@@ -159,16 +179,30 @@ export function useFullTask(task: AgentTask | undefined): AgentTask | undefined 
   const entry = wanted ? whole.get(wanted.id) : undefined;
   const stale = Boolean(wanted && !upToDate(entry, wanted));
   const id = wanted?.id;
+  const need = wanted ? needOf(wanted) : "";
+  const latest = useRef(wanted);
+  latest.current = wanted;
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!id || !stale) return;
     let mounted = true;
     let timer: ReturnType<typeof setTimeout>;
     void load(id).then((ok) => {
-      if (mounted && !ok) timer = setTimeout(() => setAttempt((n) => n + 1), Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5)));
+      if (!mounted) return;
+      // Fetched, and still behind what the snapshot says now (the hub answered with an older state): it is
+      // asked again after a pause, as after a failure. Without this the copy stayed behind until something
+      // else in the conversation changed.
+      const now = latest.current;
+      const behind = ok && now?.id === id && !upToDate(whole.get(id), now);
+      if (!ok || behind) timer = setTimeout(() => setAttempt((n) => n + 1), Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5)));
     });
     return () => { mounted = false; clearTimeout(timer); };
-  }, [id, stale, attempt]);
+    // `need`: the snapshot moved on while the copy was behind, so what is being fetched is already old.
+  }, [id, stale, attempt, need]);
+  // Up to date again: the next time it falls behind, the first retry is not held back.
+  useEffect(() => {
+    if (!stale) setAttempt(0);
+  }, [stale]);
   if (!task || !wanted || !entry?.loaded) return task;
   return {
     ...task,

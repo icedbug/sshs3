@@ -88,8 +88,10 @@
 }
 
 .ai-hub-resize-handle:hover,
-.ai-hub-resize-handle:active {
+.ai-hub-resize-handle:active,
+.ai-hub-resize-handle:focus-visible {
   background: var(--accent-border);
+  outline: none;
 }
 
 /* ==========================================================================
@@ -3545,6 +3547,11 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* The Inbox takes the focus on a click so its keys work. The chosen item shows where the keys land. */
+.ai-inbox-view:focus {
+  outline: none;
 }
 
 .ai-inbox-item {

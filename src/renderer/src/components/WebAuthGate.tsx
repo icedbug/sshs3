@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { setHubWebAccount } from '../lib/aiHubSession';
 import { copyToClipboard } from '../lib/clipboard';
+import { ConfirmProvider, useConfirm, type ConfirmOptions } from './ConfirmDialog';
 import { McpKeysPanel } from './McpKeysPanel';
 import {
   isWebBrowserMode,
@@ -230,8 +231,49 @@ async function webApiFetch<T = any>(path: string, options: RequestInit = {}): Pr
   return data as T;
 }
 
-export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, onAuthSubmit }) => {
+/**
+ * What the sign-in page says for an error code in the address. Anybody can write an address, so its
+ * text is never shown: a code the app knows gets the app's own sentence, and every other value gets
+ * one plain line.
+ */
+export function signInErrorText(code: string): string {
+  switch (code.trim().toLowerCase()) {
+    case 'access_denied':
+      return 'Sign-in was cancelled or not allowed.';
+    case 'login_required':
+    case 'interaction_required':
+      return 'Sign in at your organisation first, then try again.';
+    case 'server_error':
+    case 'temporarily_unavailable':
+      return 'The sign-in service did not answer. Try again in a moment.';
+    default:
+      return 'Sign-in did not work. Try again.';
+  }
+}
+
+/**
+ * The sign-in gate and the account window of the web app. The account window sits above everything
+ * else, so the questions it asks are raised above it too.
+ */
+export const WebAuthGate: React.FC<WebAuthGateProps> = (props) => (
+  <ConfirmProvider layerClassName="z-[10000]">
+    <WebAuthGateInner {...props} />
+  </ConfirmProvider>
+);
+
+const WebAuthGateInner: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, onAuthSubmit }) => {
   const inWebMode = isWebBrowserMode();
+  const confirm = useConfirm();
+  // True while a question is open: Escape then answers the question and leaves the account window open.
+  const askingRef = useRef(false);
+  const ask = async (options: ConfirmOptions): Promise<boolean> => {
+    askingRef.current = true;
+    try {
+      return await confirm(options);
+    } finally {
+      askingRef.current = false;
+    }
+  };
 
   const t = WEB_AUTH_COPY;
 
@@ -315,7 +357,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
     }
     const ssoError = params.get('sso_error') || params.get('error');
     if (ssoError) {
-      setAuthError(ssoError);
+      setAuthError(signInErrorText(ssoError));
     }
 
     const unsubWs = onWebConnectionStateChange((connected) => {
@@ -396,7 +438,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
       wasModalOpenRef.current = true;
       modalRef.current?.focus();
       const onKeyDown = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
+        if (e.key === 'Escape' && !askingRef.current) {
           e.preventDefault();
           setShowModal(false);
         }
@@ -539,6 +581,13 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
 
   const handleRotateSshKey = async () => {
     setKeyStatusMsg(null);
+    const sure = await ask({
+      title: 'Replace your SSH key?',
+      message:
+        'A new key is made and the old one is deleted. A server that only knows the old public key refuses this key until you add the new public key to its authorized_keys file.',
+      confirmLabel: 'Replace the key',
+    });
+    if (!sure) return;
     try {
       const res = await webApiFetch<{ sshPublicKey: string; publicKey?: string }>('/api/user/ssh-key', {
         method: 'POST',
@@ -597,6 +646,14 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
 
   const handleDeleteUser = async (targetUserId: string) => {
     setAdminMsg(null);
+    const target = usersList.find((u) => u.id === targetUserId);
+    const who = target ? `${target.displayName} (@${target.username})` : 'this user';
+    const sure = await ask({
+      title: 'Remove this user?',
+      message: `${who} is signed out and the account is deleted, with everything saved in it on this server: servers, keys, conversations and settings. This cannot be undone.`,
+      confirmLabel: 'Remove the user',
+    });
+    if (!sure) return;
     try {
       await webApiFetch(`/api/admin/users/${encodeURIComponent(targetUserId)}`, {
         method: 'DELETE',
@@ -1194,7 +1251,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
                       </button>
                       <button
                         type="button"
-                        onClick={handleRotateSshKey}
+                        onClick={() => void handleRotateSshKey()}
                         className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 transition"
                       >
                         Rotate / generate a new one
@@ -1529,7 +1586,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
                           {u.id !== user.id && (
                             <button
                               type="button"
-                              onClick={() => handleDeleteUser(u.id)}
+                              onClick={() => void handleDeleteUser(u.id)}
                               className="px-2.5 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[11px]"
                             >
                               Remove

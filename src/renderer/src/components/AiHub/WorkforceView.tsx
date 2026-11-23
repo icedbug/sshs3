@@ -1,3 +1,4 @@
+import { externalLinkProps } from "../../lib/openLink";
 import { boardSharedWith } from "@shared/sharingText";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -885,7 +886,7 @@ export function WorkforceView({
           {openTicket.external && (
             <p className="ai-hint" data-testid="ticket-jira">
               Mirrors{" "}
-              <a href={openTicket.external.url} target="_blank" rel="noreferrer noopener">
+              <a {...externalLinkProps(openTicket.external.url)}>
                 {openTicket.external.key}
               </a>{" "}
               in Jira, where it is “{openTicket.external.status}”. Its text and comments follow the issue; your decision here

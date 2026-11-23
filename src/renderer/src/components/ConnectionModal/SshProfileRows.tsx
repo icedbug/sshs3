@@ -1,3 +1,4 @@
+import { desktopOnlyHere } from '../ui/DesktopOnly';
 import React from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { Cable, Copy, Folder, KeyRound, Pencil, Trash2 } from 'lucide-react';
@@ -112,7 +113,8 @@ export const SshRecentRow: React.FC<SshProfileRowProps> = ({
         <OverflowMenu
         items={[
           { label: 'Install public key', icon: <KeyRound className="h-3.5 w-3.5" />, onSelect: () => setInstallKeyProfile(profile) },
-          { label: 'Manage tunnels', icon: <Cable className="h-3.5 w-3.5" />, onSelect: () => setTunnelsProfile(profile) },
+          // A tunnel opens a port on the computer the app runs on: not offered in the browser.
+          ...(desktopOnlyHere() ? [] : [{ label: 'Manage tunnels', icon: <Cable className="h-3.5 w-3.5" />, onSelect: () => setTunnelsProfile(profile) }]),
           { label: 'Duplicate profile', icon: <Copy className="h-3.5 w-3.5" />, onSelect: () => void handleCloneSSH(profile) },
           { label: 'Delete profile', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, separated: true, onSelect: () => void handleDeleteSSH(profile.id, profile.name) },
         ]}
@@ -238,7 +240,8 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
         <OverflowMenu
         items={[
           { label: 'Install public key', icon: <KeyRound className="h-3.5 w-3.5" />, onSelect: () => setInstallKeyProfile(profile) },
-          { label: 'Manage tunnels', icon: <Cable className="h-3.5 w-3.5" />, onSelect: () => setTunnelsProfile(profile) },
+          // A tunnel opens a port on the computer the app runs on: not offered in the browser.
+          ...(desktopOnlyHere() ? [] : [{ label: 'Manage tunnels', icon: <Cable className="h-3.5 w-3.5" />, onSelect: () => setTunnelsProfile(profile) }]),
           { label: 'Duplicate profile', icon: <Copy className="h-3.5 w-3.5" />, onSelect: () => void handleCloneSSH(profile) },
           { label: 'Delete profile', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, separated: true, onSelect: () => void handleDeleteSSH(profile.id, profile.name) },
         ]}

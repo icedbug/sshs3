@@ -243,7 +243,7 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
         if (msg.ok) {
           req.resolve(msg.result);
         } else {
-          req.reject(new Error(msg.error || 'Web IPC request failed'));
+          req.reject(new Error(msg.error || 'The server could not do that. Try again.'));
         }
       }
       return;
@@ -431,7 +431,9 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           this.sendQueue = this.sendQueue.filter((entry) => entry.id !== id);
-          reject(new Error(`Timeout waiting for IPC channel: ${channel}`));
+          // The channel is the app's own name for the request: it goes to the log, not to the person.
+          console.warn(`No answer from the server within a minute for ${channel}`);
+          reject(new Error('The server did not answer within a minute. Check the connection and try again.'));
         }
       }, 60_000);
 

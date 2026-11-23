@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../lib/clipboard';
 import React, { useEffect, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 
@@ -17,8 +18,7 @@ export const CopyValueButton: React.FC<{ value: string; label: string }> = ({ va
       aria-label={`Copy ${label}`}
       title={copied ? 'Copied' : `Copy ${label}`}
       onClick={() => {
-        void navigator.clipboard
-          .writeText(value)
+        void writeClipboardText(value)
           .then(() => setCopied(true))
           .catch(() => {});
       }}

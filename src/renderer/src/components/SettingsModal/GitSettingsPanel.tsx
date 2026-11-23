@@ -1,3 +1,5 @@
+import { writeClipboardText } from '../../lib/clipboard';
+import { openLink } from '../../lib/openLink';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Check,
@@ -128,7 +130,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
 
   const copyKeyOnly = async (key: LocalPublicKey) => {
     try {
-      await navigator.clipboard.writeText(key.line);
+      await writeClipboardText(key.line);
       setCopiedKeyId(key.id);
       setCopiedAction('copy');
       setTimeout(() => {
@@ -147,7 +149,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
 
   const registerOnGitProvider = async (key: LocalPublicKey, provider: 'github' | 'gitlab') => {
     try {
-      await navigator.clipboard.writeText(key.line);
+      await writeClipboardText(key.line);
       setCopiedKeyId(key.id);
       setCopiedAction(provider);
       setTimeout(() => {
@@ -159,11 +161,11 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
         provider === 'github'
           ? `https://github.com/settings/ssh/new?title=${encodeURIComponent(key.label || 'sshs3-key')}`
           : 'https://gitlab.com/-/user_settings/ssh_keys';
-      void window.multissh.openExternal(url);
+      openLink(url);
 
       setNotice({
         title: `Public key copied to clipboard!`,
-        description: `${provider === 'github' ? 'GitHub' : 'GitLab'} does not allow pre-filling key content via web links for security reasons (CSRF mitigation). Your browser has been opened — paste the key (Ctrl+V or Cmd+V) into the "Key" field.`,
+        description: `${provider === 'github' ? 'GitHub' : 'GitLab'} does not allow pre-filling key content via web links for security reasons (CSRF mitigation). Your browser has been opened: paste the key (Ctrl+V or Cmd+V) into the "Key" field.`,
         keySnippet: key.line.length > 65 ? `${key.line.slice(0, 60)}…` : key.line,
       });
     } catch {

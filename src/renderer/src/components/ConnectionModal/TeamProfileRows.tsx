@@ -94,7 +94,7 @@ export const TeamSshProfileRow: React.FC<TeamSshProfileRowProps> = ({
     {profile.authType === 'privateKey' && (
       <p className="flex items-center gap-1 px-2 text-2xs text-amber-400">
         <AlertTriangle className="h-3 w-3 shrink-0" />
-        Private key path is local to this machine — other members need an identical path for this to work.
+        Private key path is local to this machine: other members need an identical path for this to work.
       </p>
     )}
   </div>

@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../../lib/clipboard';
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   diffWordsWithSpace,
@@ -915,8 +916,7 @@ export function AnsiLogView({
 
   const handleCopy = async () => {
     try {
-      if (!navigator.clipboard?.writeText) return;
-      await navigator.clipboard.writeText(cleanCopyText);
+      await writeClipboardText(cleanCopyText);
       setCopied(true);
     } catch {
       // Clipboard unavailable or denied.

@@ -110,7 +110,7 @@ export const DiskSpaceMenu: React.FC<DiskSpaceMenuProps> = ({ providerId, canLis
       <button
         ref={buttonRef}
         type="button"
-        title={canListVolumes ? `${title} — click for drives` : title}
+        title={canListVolumes ? `${title}: click for drives` : title}
         aria-label={canListVolumes ? 'Drives and volumes' : 'Disk space'}
         aria-haspopup={canListVolumes ? 'menu' : undefined}
         aria-expanded={canListVolumes ? open : undefined}

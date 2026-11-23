@@ -107,13 +107,13 @@ export const SyncBootstrapModal: React.FC<SyncBootstrapModalProps> = ({ open, on
               <p className="text-xs text-txt-muted leading-relaxed">
                 {result.changedCategories.length > 0
                   ? `Imported: ${result.changedCategories.join(', ')}.`
-                  : 'Nothing new to import — this machine already matched the remote.'}
+                  : 'Nothing new to import: this machine already matched the remote.'}
               </p>
               {result.conflicts.length > 0 && (
                 <div className="space-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
                   <div className="flex items-center gap-1.5 text-amber-300 font-medium text-xs">
                     <ShieldAlert className="h-3.5 w-3.5" />
-                    {result.conflicts.length} known_hosts conflict{result.conflicts.length > 1 ? 's' : ''} — review manually
+                    {result.conflicts.length} known_hosts conflict{result.conflicts.length > 1 ? 's' : ''}: review manually
                   </div>
                   <p className="text-2xs text-amber-200/80 leading-relaxed">
                     Open Settings → Synchronization for details on each conflicting host key.

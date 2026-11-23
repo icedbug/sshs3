@@ -1,3 +1,4 @@
+import { DesktopOnly } from '../ui/DesktopOnly';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Activity, Search, Settings, X, Terminal, Keyboard, Sliders, Shield, FolderTree, RefreshCw, Boxes, GitBranch, Users } from 'lucide-react';
 import { type AppSettings } from '@shared/types/settings';
@@ -333,10 +334,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               {/* Category: Git & GitHub */}
               {activeCategory === 'git' && (
+                <DesktopOnly>
                 <GitSettingsPanel
                   fileManagerGitIntegration={fileManagerGitIntegration}
                   onChangeFileManagerGitIntegration={setFileManagerGitIntegration}
                 />
+                </DesktopOnly>
               )}
 
               {/* Category: Keyboard Shortcuts */}

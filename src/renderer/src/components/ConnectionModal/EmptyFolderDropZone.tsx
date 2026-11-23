@@ -33,6 +33,6 @@ export const EmptyFolderDropZone: React.FC<EmptyFolderDropZoneProps> = ({
         : 'border-border-subtle/60 text-txt-muted'
     }`}
   >
-    Folder is empty — drag profiles here
+    Folder is empty: drag profiles here
   </div>
 );

@@ -139,9 +139,9 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
     );
 
     // Toggle shortcut cheatsheet with ?
-    fireEvent.keyDown(window, { key: "?" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "?" });
     expect(screen.getByTestId("inbox-shortcuts")).toBeVisible();
-    fireEvent.keyDown(window, { key: "?" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "?" });
     expect(screen.queryByTestId("inbox-shortcuts")).not.toBeInTheDocument();
 
     // Typing inside search input must NOT trigger keyboard triage or cheatsheet
@@ -153,16 +153,16 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
     expect(act).not.toHaveBeenCalled();
 
     // Navigate with j -> selects first item (c-safe)
-    fireEvent.keyDown(window, { key: "j" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "j" });
     const approvals = screen.getAllByTestId("inbox-approval");
     expect(approvals[0]).toHaveAttribute("data-selected", "true");
 
     // Open with o -> opens t-safe
-    fireEvent.keyDown(window, { key: "o" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "o" });
     expect(onOpenTask).toHaveBeenCalledWith("t-safe");
 
     // Approve with a -> immediate approve
-    fireEvent.keyDown(window, { key: "a" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "a" });
     expect(act).toHaveBeenCalledWith({
       action: "approve",
       taskId: "t-safe",
@@ -172,9 +172,9 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
 
     // Navigate down to the next approval. Nothing rates a command, so there is no second step for one
     // that deletes: 'a' approves it as it approves any other.
-    fireEvent.keyDown(window, { key: "j" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "j" });
     expect(approvals[1]).toHaveAttribute("data-selected", "true");
-    fireEvent.keyDown(window, { key: "a" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "a" });
     expect(screen.queryByTestId("inbox-destructive-arm")).toBeNull();
     expect(act).toHaveBeenCalledTimes(2);
     expect(act).toHaveBeenLastCalledWith({
@@ -184,8 +184,11 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
       approved: true,
     });
 
+    // The approval is on its way: until it lands, nothing else is sent for that item.
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Approve" })[1]).toBeEnabled());
+
     // Press h to open snooze menu on selected item, then click 4h
-    fireEvent.keyDown(window, { key: "h" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "h" });
     const snoozeMenu = screen.getByTestId("inbox-snooze-menu-approval:c-dest");
     fireEvent.click(within(snoozeMenu).getByRole("button", { name: "4h" }));
     expect(act).toHaveBeenLastCalledWith(
@@ -196,9 +199,10 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
       }),
     );
 
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Approve" })[0]).toBeEnabled());
     // Move back up with k and press e to archive/acknowledge
-    fireEvent.keyDown(window, { key: "k" });
-    fireEvent.keyDown(window, { key: "e" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "k" });
+    fireEvent.keyDown(screen.getByTestId("inbox-view"), { key: "e" });
     expect(act).toHaveBeenLastCalledWith({
       action: "ack-inbox",
       itemId: "approval:c-safe",
@@ -267,11 +271,10 @@ describe("PlanCard 2-button decision flow", () => {
     createdAt: 100,
   };
 
-  it("renders Approve & Execute and Edit Plan, supports Save Draft and Send Revision without silent askEach flip", async () => {
+  it("renders Approve & Execute and Edit Plan, supports Send Revision without silent askEach flip, and offers no draft button that saves nothing", async () => {
     const act = vi.fn(async () => undefined);
-    const onSaveDraft = vi.fn();
 
-    render(<PlanCard taskId="task-1" plan={plan} busy={false} act={act} onSaveDraft={onSaveDraft} />);
+    render(<PlanCard taskId="task-1" plan={plan} busy={false} act={act} />);
 
     expect(screen.getByTestId("plan-step-1")).toHaveTextContent("medium risk");
     expect(screen.getByTestId("plan-step-2")).toHaveTextContent("low risk");
@@ -288,10 +291,13 @@ describe("PlanCard 2-button decision flow", () => {
     fireEvent.change(noteInput, { target: { value: "Test on staging first" } });
     expect(screen.getByTestId("plan-ask-each")).not.toBeChecked();
 
-    // Save Draft preserves draft locally without calling act
-    fireEvent.click(screen.getByTestId("plan-save-draft-btn"));
-    expect(onSaveDraft).toHaveBeenCalledWith("Test on staging first");
-    expect(screen.getByTestId("plan-draft-badge")).toHaveTextContent("Draft saved");
+    // There is no "Save Draft": nothing was saved by it. What is typed stays in the field while the plan is shown.
+    expect(screen.queryByTestId("plan-save-draft-btn")).toBeNull();
+    expect(screen.queryByText("Save Draft")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByTestId("plan-draft-badge")).toBeNull();
+    fireEvent.click(screen.getByTestId("plan-edit-btn"));
+    expect(screen.getByLabelText("Note to the agent")).toHaveValue("Test on staging first");
     expect(act).not.toHaveBeenCalled();
 
     // Send Revision dispatches plan-decide approved: false with note

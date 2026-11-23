@@ -1,3 +1,4 @@
+import { writeClipboardText } from '../lib/clipboard';
 import { sharingWithoutBucket } from '@shared/sharingText';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -37,6 +38,7 @@ import { formatRelativeTime as formatRelativeIsoTime } from '../lib/relativeTime
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { SshCaStatus } from '@shared/types/sshCa';
 import type { WorkspaceActivityEvent, WorkspaceServerSummary } from '@shared/types/aiHub';
+import { DEFAULT_AI_MODELS } from '@shared/types/ai';
 import type { TabType } from './TabBar';
 import {
   FOCUSABLE_OVERLAY_SELECTOR,
@@ -45,6 +47,7 @@ import {
   type NavigationDirection,
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
+import { describeIpcError } from '../lib/format';
 import { useSshCa } from '../lib/useSshCa';
 import { isWebBrowserMode } from '../lib/webClientBridge';
 import { MASKED } from './AiHub/dataDestination';
@@ -264,6 +267,9 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [newNodeDesc, setNewNodeDesc] = useState('');
   const [newNodeShared, setNewNodeShared] = useState(true);
   const [creatingNode, setCreatingNode] = useState(false);
+  // A save, a removal or an add that failed: said where the person pressed, with what they typed still there.
+  const [serverActionError, setServerActionError] = useState<{ id: string; text: string } | null>(null);
+  const [addNodeError, setAddNodeError] = useState<string | null>(null);
 
   // S3 Team Bucket setup state
   const [s3SetupOpen, setS3SetupOpen] = useState(false);
@@ -291,6 +297,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [quickAiDismissed, setQuickAiDismissed] = useState(false);
   const [quickAiProvider, setQuickAiProvider] = useState<'openai-compatible' | 'anthropic' | 'openrouter'>('openai-compatible');
   const [quickAiKey, setQuickAiKey] = useState('');
+  // The model to use with a pasted key. Anthropic starts from the app's own default; the others have none, so it is typed.
+  const [quickAiModel, setQuickAiModel] = useState('');
   const [quickAiSaving, setQuickAiSaving] = useState(false);
   const [quickAiNotice, setQuickAiNotice] = useState<string | null>(null);
   // A check that failed is shown as an error, never in the colour of a success.
@@ -607,7 +615,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       ...(server.tags?.length ? [`Tags: ${server.tags.join(', ')}`] : []),
       ...(latestEvent
         ? [
-            `Latest team activity: [${new Date(latestEvent.at).toISOString()}] ${latestEvent.actor} — ${latestEvent.summary}${latestEvent.detail ? ` (${latestEvent.detail})` : ''}`,
+            `Latest team activity: [${new Date(latestEvent.at).toISOString()}] ${latestEvent.actor}: ${latestEvent.summary}${latestEvent.detail ? ` (${latestEvent.detail})` : ''}`,
           ]
         : []),
     ];
@@ -659,6 +667,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const openEditServer = (server: WorkspaceServerSummary) => {
     const localOverride = hub?.localOverrides?.[server.id];
+    setServerActionError(null);
     setEditingServerId(server.id);
     setEditCluster(server.cluster ?? '');
     setEditNodeRole(server.nodeRole ?? '');
@@ -671,6 +680,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const handleSaveServerMeta = async (server: WorkspaceServerSummary) => {
     setSavingMeta(true);
+    setServerActionError(null);
     try {
       const tags = editTags
         .split(',')
@@ -689,9 +699,9 @@ export const LandingView: React.FC<LandingViewProps> = ({
         localPrivateKeyPath: editLocalKeyPath.trim(),
       });
       setEditingServerId(null);
-    } catch {
-      // Ignore in offline/mocked environments
-      setEditingServerId(null);
+    } catch (err) {
+      // The editor stays open with what was typed, and says why it was not saved.
+      setServerActionError({ id: server.id, text: `Not saved. ${describeIpcError(err, "Try again.")}` });
     } finally {
       setSavingMeta(false);
     }
@@ -699,14 +709,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const handleDeleteServer = async (server: WorkspaceServerSummary) => {
     setSavingMeta(true);
+    setServerActionError(null);
     try {
       await hubRequest({
         action: 'server-delete',
         profileId: server.id,
       });
       setEditingServerId(null);
-    } catch {
-      setEditingServerId(null);
+    } catch (err) {
+      setServerActionError({ id: server.id, text: `Not removed. ${describeIpcError(err, "Try again.")}` });
     } finally {
       setSavingMeta(false);
     }
@@ -785,7 +796,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
     try {
       const code = (await hubRequest({ action: 'workspace-s3-invite' })).reply?.s3Invite?.code;
       if (!code) throw new Error('No invite code came back.');
-      await navigator.clipboard.writeText(code);
+      await writeClipboardText(code);
       setS3CopyFeedback(true);
       setTimeout(() => setS3CopyFeedback(false), 2000);
     } catch (err) {
@@ -797,6 +808,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
     e.preventDefault();
     if (!newNodeName.trim() || !newNodeHost.trim()) return;
     setCreatingNode(true);
+    setAddNodeError(null);
     try {
       const tags = newNodeTags
         .split(',')
@@ -827,8 +839,9 @@ export const LandingView: React.FC<LandingViewProps> = ({
       setNewNodeHost('');
       setNewNodeDesc('');
       setAddNodeOpen(false);
-    } catch {
-      setAddNodeOpen(false);
+    } catch (err) {
+      // The form stays open with what was typed, and says why the node was not added.
+      setAddNodeError(`Not added. ${describeIpcError(err, "Try again.")}`);
     } finally {
       setCreatingNode(false);
     }
@@ -937,14 +950,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const handleQuickConnectApiKey = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!quickAiKey.trim()) return;
+    const quickModel = quickAiModel.trim() || (quickAiProvider === 'anthropic' ? DEFAULT_AI_MODELS.anthropic : '');
+    if (!quickAiKey.trim() || !quickModel) return;
     setQuickAiSaving(true);
     setQuickAiNotice(null);
     setQuickAiFailed(false);
     try {
       const isAnthropic = quickAiProvider === 'anthropic';
       const isOpenRouter = quickAiProvider === 'openrouter';
-      await hubRequest({
+      const saved = await hubRequest({
         action: 'configure',
         config: {
           enabled: true,
@@ -954,18 +968,24 @@ export const LandingView: React.FC<LandingViewProps> = ({
             : isOpenRouter
               ? 'https://openrouter.ai/api/v1'
               : 'https://api.openai.com/v1',
-          model: isAnthropic
-            ? 'claude-sonnet-4-20250514'
-            : isOpenRouter
-              ? 'anthropic/claude-3.7-sonnet'
-              : 'gpt-4.1',
+          model: quickModel,
           apiKey: quickAiKey.trim(),
           useHermes: false,
         },
       });
       setQuickAiKey('');
-      setQuickAiNotice('✅ API key saved to the OS keyring; AI enabled');
-      setTimeout(() => setQuickAiOpen(false), 1200);
+      // Where the key really is: the app says it, so this does not claim a place it is not in.
+      setQuickAiNotice(
+        `${
+          saved?.config?.keyStorage === 'session'
+            ? 'The key is kept in memory. Enter it again after the app or server restarts.'
+            : isWebBrowserMode()
+              ? 'The key is saved, encrypted on the app server.'
+              : 'The key is saved, encrypted with help from the operating system.'
+        } The AI is on, with the model ${quickModel}.`
+      );
+      // The card stays open so that what it says about the key can be read.
+      setQuickAiOpen(true);
     } catch (err) {
       setQuickAiFailed(true);
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
@@ -1014,7 +1034,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const showWorkspaceSection = true;
 
-  const renderSshCaPill = () => (
+  // Not in the web app: signing in to an SSH certificate authority opens a browser on the computer the app runs on.
+  const renderSshCaPill = () => isWebBrowserMode() ? null : (
     <button
       type="button"
       data-testid="landing-ssh-ca-pill"
@@ -1330,6 +1351,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                           />
                         </div>
+                        {serverActionError?.id === summary.id && (
+                          <p role="alert" data-testid="server-action-error" className="text-[11px] text-rose-400">
+                            {serverActionError.text}
+                          </p>
+                        )}
                         <div className="flex justify-end gap-1.5 pt-1">
                           <button
                             type="button"
@@ -1587,6 +1613,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                     </div>
+                    {addNodeError && (
+                      <p role="alert" data-testid="add-node-error" className="text-[11px] text-rose-400">
+                        {addNodeError}
+                      </p>
+                    )}
                     <div className="flex items-center justify-between sm:justify-end gap-2">
                       <label className="inline-flex items-center gap-1 text-[11px] text-txt-secondary cursor-pointer">
                         <input
@@ -2085,6 +2116,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 </div>
                               </div>
                             </div>
+                            {serverActionError?.id === server.id && (
+                              <p role="alert" data-testid="server-action-error" className="text-[11px] text-rose-400">
+                                {serverActionError.text}
+                              </p>
+                            )}
                             <div className="flex items-center justify-between pt-1">
                               <button
                                 type="button"
@@ -2629,7 +2665,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       setQuickAiDismissed(false);
                       setQuickAiOpen((v) => !v);
                     }}
-                    title="Connect your AI (ChatGPT sign-in, an API key or local Ollama)"
+                    title={
+                      isAiConnected
+                        ? 'Change how the AI runs (ChatGPT sign-in, an API key or local Ollama)'
+                        : 'Connect your AI (ChatGPT sign-in, an API key or local Ollama)'
+                    }
                     className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
                       isAiConnected
                         ? 'border border-border-subtle bg-app-card text-txt-secondary hover:text-txt-primary'
@@ -2714,12 +2754,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
-                        ⚡ Connect your AI
+                      <span
+                        data-testid="quick-connect-ai-heading"
+                        className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30"
+                      >
+                        {isAiConnected ? 'AI set up' : '⚡ Connect your AI'}
                       </span>
                       <span className="text-xs font-semibold text-txt-primary">
                         {/* Counts are this workspace's own content, not a promise of preloaded material. */}
-                        {`This workspace has ${(hub?.agents ?? []).length} agent(s), ${(hub?.kbDocuments ?? []).length} runbooks and ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Choose how the AI runs:`}
+                        {isAiConnected
+                          ? `The AI is set up${hub?.config.model ? ` with the model ${hub.config.model}` : ''}. To change how it runs, choose one:`
+                          : `This workspace has ${(hub?.agents ?? []).length} agent(s), ${(hub?.kbDocuments ?? []).length} runbooks and ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Choose how the AI runs:`}
                       </span>
                     </div>
                     <button
@@ -2778,8 +2823,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             }
                             className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] text-txt-primary"
                           >
-                            <option value="openai-compatible">OpenAI (GPT-4.1)</option>
-                            <option value="anthropic">Anthropic (Claude Sonnet 4)</option>
+                            <option value="openai-compatible">OpenAI</option>
+                            <option value="anthropic">Anthropic</option>
                             <option value="openrouter">OpenRouter</option>
                           </select>
                         </div>
@@ -2791,14 +2836,30 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           placeholder="sk-... / sk-ant-..."
                           className="mt-1.5 w-full rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none focus:border-purple-400"
                         />
+                        {/* The model is the person's choice: a name written into the app goes out of date. */}
+                        <input
+                          type="text"
+                          aria-label="Model ID"
+                          data-testid="quick-connect-model-input"
+                          value={quickAiModel}
+                          onChange={(e) => setQuickAiModel(e.target.value)}
+                          placeholder={
+                            quickAiProvider === 'anthropic'
+                              ? `Model ID (empty: ${DEFAULT_AI_MODELS.anthropic})`
+                              : 'Model ID, as the provider names it'
+                          }
+                          className="mt-1.5 w-full rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none focus:border-purple-400"
+                        />
                       </div>
                       <button
                         type="submit"
                         data-testid="quick-connect-apikey-btn"
-                        disabled={quickAiSaving || !quickAiKey.trim()}
+                        disabled={
+                          quickAiSaving || !quickAiKey.trim() || (quickAiProvider !== 'anthropic' && !quickAiModel.trim())
+                        }
                         className="mt-2 w-full rounded-md bg-purple-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50 transition-colors"
                       >
-                        🔑 Save to the OS keyring and enable
+                        🔑 Save the key and turn the AI on
                       </button>
                     </form>
 
@@ -3158,7 +3219,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   Open New Terminal
                 </div>
                 <div className="text-xs text-txt-muted mt-0.5">
-                  Launch a local shell — pick a saved connection or type user@host for SSH
+                  Launch a local shell: pick a saved connection or type user@host for SSH
                 </div>
               </div>
             </button>
@@ -3356,7 +3417,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     Privacy & AI Setup
                   </div>
                   <div className="text-[11px] text-txt-muted mt-0.5">
-                    Connect ChatGPT/Codex OAuth, OS-keyring API key, or local Ollama
+                    Connect a ChatGPT sign-in, an API key or a local model
                   </div>
                 </div>
               </button>
@@ -3368,7 +3429,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         <div className="pt-2 text-2xs text-txt-muted flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
           <span><Shortcut id="nextTab" shortcuts={shortcuts} variant="plain" /> Cycle tabs</span>
           <span><Kbd variant="plain">Ctrl+L</Kbd> Send terminal to AI</span>
-          <span><Kbd variant="plain">Ctrl+K</Kbd> Inline Terminal AI</span>
+          <span><Kbd variant="plain">Ctrl+K</Kbd> Suggest a command in the terminal (pasted, not run)</span>
           <span><Shortcut id="closeTab" shortcuts={shortcuts} variant="plain" /> Close tab</span>
           <span><Shortcut id="openSettings" shortcuts={shortcuts} variant="plain" /> Settings</span>
         </div>

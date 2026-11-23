@@ -432,7 +432,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
     try {
       const res = await window.multissh.fileOpenExternal(providerId, entry.path);
       setExternalSessionToken(res.sessionToken);
-      setExternalStatus('External editor active — auto-uploading on save');
+      setExternalStatus('External editor active: auto-uploading on save');
     } catch (err: any) {
       setError(describeIpcError(err, 'Failed to open external editor'));
     } finally {

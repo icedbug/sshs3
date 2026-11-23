@@ -1,6 +1,7 @@
 import { X } from "lucide-react";
 import { lazy, Suspense } from "react";
 import type { PanelState } from "./usePanelState";
+import { ErrorBoundary } from "../../ErrorBoundary";
 
 const Settings = lazy(() => import("../SettingsView").then((m) => ({ default: m.Settings })));
 
@@ -13,7 +14,10 @@ export function SettingsOverlay({ p }: { p: PanelState }): JSX.Element {
   const {
     settingsOpen,
     hub,
-    setSettingsOpen,
+    closeSettings,
+    settingsAsking,
+    setSettingsAsking,
+    setSettingsUnsaved,
     modal,
     error,
     act,
@@ -26,7 +30,7 @@ export function SettingsOverlay({ p }: { p: PanelState }): JSX.Element {
         <div
           className="ai-settings-overlay"
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setSettingsOpen(false);
+            if (e.target === e.currentTarget) closeSettings();
           }}
         >
           <div
@@ -41,25 +45,41 @@ export function SettingsOverlay({ p }: { p: PanelState }): JSX.Element {
               <button
                 className="ai-icon-button"
                 aria-label="Close AI settings"
-                onClick={() => setSettingsOpen(false)}
+                onClick={() => closeSettings()}
               >
                 <X size={17} />
               </button>
             </header>
+            {settingsAsking && (
+              <div className="ai-note" role="alertdialog" aria-label="Changes that are not saved" data-testid="ai-settings-unsaved">
+                <span>Your changes are not saved yet.</span>
+                <div className="ai-card-actions">
+                  <button type="button" className="ai-btn-accent" autoFocus onClick={() => setSettingsAsking(false)}>
+                    Keep editing
+                  </button>
+                  <button type="button" className="ai-btn-danger" onClick={() => closeSettings(true)}>
+                    Close without saving
+                  </button>
+                </div>
+              </div>
+            )}
             {error && (
               <p className="ai-error" role="alert">
                 {error}
               </p>
             )}
-            <Suspense fallback={<p role="status">Opening settings…</p>}>
-              <Settings
-                hub={hub}
-                act={act}
-                error={error}
-                labsEnabled={labsEnabled}
-                onToggleLabs={handleToggleLabs}
-              />
-            </Suspense>
+            <ErrorBoundary what="The settings">
+              <Suspense fallback={<p role="status">Opening settings…</p>}>
+                <Settings
+                  hub={hub}
+                  act={act}
+                  error={error}
+                  labsEnabled={labsEnabled}
+                  onToggleLabs={handleToggleLabs}
+                  onUnsavedChange={setSettingsUnsaved}
+                />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         </div>
       )}

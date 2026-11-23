@@ -97,7 +97,8 @@ export function InfrastructureView({
     if (check.status === "blocked" && check.reasonKind === "proxy") {
       return { text: "via jump host", tone: "" };
     }
-    return STATUS[check.status];
+    // A state this version does not know (a newer server) is shown by its own name.
+    return STATUS[check.status] ?? { text: String(check.status), tone: "" };
   };
 
   const statusBadge = (check?: InventoryEntry): JSX.Element | null => {

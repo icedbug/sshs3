@@ -24,15 +24,15 @@ const TYPE_INFO: Record<
     icon: <ArrowRight className="h-5 w-5" />,
     title: 'Reach a service beyond the server',
     blurb:
-      'Opens a port on your own computer. Traffic sent there travels over the SSH connection to the server, and onward to an address the server can reach — e.g. a database that only listens internally.',
-    example: 'Most common — e.g. "connect to a database that is only reachable from the server".',
+      'Opens a port on your own computer. Traffic sent there travels over the SSH connection to the server, and onward to an address the server can reach: e.g. a database that only listens internally.',
+    example: 'Most common: e.g. "connect to a database that is only reachable from the server".',
   },
   remote: {
     icon: <Home className="h-5 w-5" />,
     title: 'Let the server reach something on your side',
     blurb:
       'Opens a port on the remote server. Traffic sent there travels back over the SSH connection to an address your own computer can reach.',
-    example: 'Less common — e.g. "let the server call a webhook running locally on your computer".',
+    example: 'Less common: e.g. "let the server call a webhook running locally on your computer".',
   },
   dynamic: {
     icon: <Shuffle className="h-5 w-5" />,
@@ -237,7 +237,7 @@ export const SSHTunnelWizard: React.FC<SSHTunnelWizardProps> = ({
               className="w-full rounded-lg border border-border-subtle bg-app-surface-subtle px-2.5 py-1.5 text-sm text-txt-primary focus:border-sky-500/50 focus:outline-none"
             />
             <p className="mt-1 text-xs text-txt-muted">
-              How this tunnel is labeled in the Tunnels panel — independent of the connection's own name.
+              How this tunnel is labeled in the Tunnels panel: independent of the connection's own name.
             </p>
           </div>
 
@@ -267,7 +267,7 @@ export const SSHTunnelWizard: React.FC<SSHTunnelWizardProps> = ({
             ) : (
               <p className="mt-1 text-xs text-txt-muted">
                 {type === 'local' && 'The address you connect to yourself, e.g. localhost:PORT in your database client.'}
-                {type === 'remote' && "The port the remote server opens for you — it must be free there."}
+                {type === 'remote' && "The port the remote server opens for you: it must be free there."}
                 {type === 'dynamic' && 'Point your browser/client at a SOCKS proxy on 127.0.0.1:PORT.'}
               </p>
             )}
