@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, within, createEvent } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { FileList } from '../../src/renderer/src/components/FileManager/FileList';
 import type { FileEntry } from '../../src/shared/types/storage';
@@ -637,14 +637,49 @@ describe('FileList Component', () => {
         toJSON: () => {},
       });
 
-      // Hover near top (< 50px from rect.top: clientY = 110)
-      fireEvent.dragOver(listContainer, { clientY: 110, dataTransfer: { dropEffect: 'none' } });
+      // The frames are run by hand, so each step of the scroll can be looked at.
+      const frames: FrameRequestCallback[] = [];
+      const request = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((step) => {
+        frames.push(step);
+        return frames.length;
+      });
+      const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+      // jsdom has no DragEvent, so a pointer position given to fireEvent.dragOver is dropped: set it on the event.
+      const dragOverAt = (clientY: number) => {
+        const event = createEvent.dragOver(listContainer, { dataTransfer: { dropEffect: 'none' } });
+        Object.defineProperty(event, 'clientY', { value: clientY });
+        fireEvent(listContainer, event);
+      };
+      try {
+        listContainer.scrollTop = 200;
 
-      // Hover near bottom (> 400 - 50: clientY = 480)
-      fireEvent.dragOver(listContainer, { clientY: 480, dataTransfer: { dropEffect: 'none' } });
+        // In the middle of the list nothing scrolls.
+        dragOverAt(300);
+        expect(request).not.toHaveBeenCalled();
 
-      // Moving away stops auto-scroll
-      fireEvent.dragLeave(listContainer);
+        // Near the top (10px from rect.top) it scrolls up.
+        dragOverAt(110);
+        expect(request).toHaveBeenCalledTimes(1);
+        frames.shift()!(0);
+        expect(listContainer.scrollTop).toBeLessThan(200);
+        const afterUp = listContainer.scrollTop;
+
+        // Near the bottom (20px from rect.bottom) it scrolls down.
+        dragOverAt(480);
+        frames.shift()!(0);
+        expect(listContainer.scrollTop).toBeGreaterThan(afterUp);
+
+        // Moving away stops it: the waiting frame is cancelled, and one that still runs moves nothing.
+        const cancelsBefore = cancel.mock.calls.length;
+        fireEvent.dragLeave(listContainer);
+        expect(cancel.mock.calls.length).toBeGreaterThan(cancelsBefore);
+        const stoppedAt = listContainer.scrollTop;
+        frames.shift()?.(0);
+        expect(listContainer.scrollTop).toBe(stoppedAt);
+      } finally {
+        request.mockRestore();
+        cancel.mockRestore();
+      }
     });
 
     it('spring-loads (auto-opens) a folder when hovered for 900ms during drag', () => {

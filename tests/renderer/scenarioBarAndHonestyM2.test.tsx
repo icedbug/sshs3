@@ -9,6 +9,7 @@ import { ChatThread, TeamChatCard } from "../../src/renderer/src/components/AiHu
 import { ScenariosCard } from "../../src/renderer/src/components/AiHub/ScenariosCard";
 import { InfrastructureView } from "../../src/renderer/src/components/AiHub/InfrastructureView";
 import type { PanelState } from "../../src/renderer/src/components/AiHub/panel/usePanelState";
+import { getActiveProfileSummary } from "../../src/renderer/src/components/AiHub/panel/panelHelpers";
 
 afterEach(() => {
   cleanup();
@@ -52,12 +53,7 @@ function makePanelState(overrides: Partial<PanelState> = {}): PanelState {
     setView: vi.fn(),
     setWorkforceTicketId: vi.fn(),
     draftMode: "assisted",
-    activeProfile: {
-      label: "Demo answers (no model)",
-      destination: "Local demo answers only",
-      configured: false,
-      isLocal: true,
-    },
+    activeProfile: getActiveProfileSummary(hub),
     setAutonomy: vi.fn(),
     setModePicked: vi.fn(),
     setConnection: vi.fn(),
@@ -203,6 +199,22 @@ describe("Milestone 2 frontend honesty and ScenarioBar", () => {
     const chip = screen.getByTestId("ai-composer-model-chip");
     expect(chip).toHaveTextContent("Demo answers (no model)");
     expect(chip).not.toHaveTextContent("placeholder-model");
+  });
+
+  it("names the model in ComposerFooter once one is set up, also in demo mode", () => {
+    const hub = {
+      demoMode: true,
+      config: { enabled: true, provider: "openai", model: "placeholder-model", baseUrl: "https://models.example.test/v1", contextWindowTokens: 128000 },
+      sessions: [],
+      tasks: [],
+      workspaceServers: [],
+      simulation: { scenarios: sampleScenarios },
+    } as unknown as HubSnapshot;
+    const p = makePanelState({ hub, activeProfile: getActiveProfileSummary(hub) });
+    render(<ComposerFooter p={p} hub={hub} />);
+    const chip = screen.getByTestId("ai-composer-model-chip");
+    expect(chip).toHaveTextContent("placeholder-model");
+    expect(chip).not.toHaveTextContent("Demo answers (no model)");
   });
 
   it("shows tags, Open terminal, and careful/careless scripted walkthrough controls in ScenariosCard", async () => {

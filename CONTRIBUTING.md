@@ -78,7 +78,7 @@ Before writing new features or modifying IPC interfaces, please read [`ARCHITECT
 User documentation is maintained in Markdown under [`docs/user-guide/`](docs/user-guide/) — the **single source**, in English, written next to the code it describes (see its [README](docs/user-guide/README.md) for the page registry, conventions and writing rules). It is rendered and published to [docs.sshs3.com](https://docs.sshs3.com) by the site repo's build.
 - Any PR introducing or changing user-facing functionality (new shortcuts, connection options, file manager features, settings, etc.) **must update or add to the relevant page** in `docs/user-guide/`. Verify button and setting names against the UI and `src/shared/types/settings.ts`.
 - Validate documentation locally using `npm run docs:sync`.
-- Merging to `master` only validates the documentation (`.github/workflows/deploy-docs.yml`). It goes live with `scripts/deploy-site.sh`, which `scripts/deploy.sh` runs automatically after a release when `docs/` (or `ipc.ts`/`settings.ts`) changed; it can also be run on its own.
+- Merging to `master` validates the documentation and, in the upstream repository, asks the site repository to rebuild (`.github/workflows/deploy-docs.yml`). `scripts/deploy-site.sh` publishes it directly; `scripts/deploy.sh` runs that after a release when `docs/` (or `ipc.ts`/`settings.ts`) changed, and it can also be run on its own.
 
 ---
 
@@ -115,7 +115,7 @@ npm run test
 
 ### Conventions & Standards
 
-- **Release Versioning**: When releasing new versions, use only a single segment after the dot (e.g. `0.2`, `0.3`, `0.96.1` instead of `0.2.19`) to ensure correct sorting in GitHub Releases.
+- **Release Versioning**: Versions have three parts (`0.97.4`). Bump the last part by default (`0.96.6` to `0.96.7`) and the middle part only for a real milestone. Tag as `vX.Y.Z` and add a `CHANGELOG.md` entry in every release.
 - **Date Formatting**: Always format timestamps across UI and logs as `yyyy-mm-dd HH:mm` (24h).
 - **Security & Ephemeral Secrets**: Never log or store PINs, passphrases, or private keys on disk or in persistent memory.
 

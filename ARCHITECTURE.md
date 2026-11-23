@@ -64,19 +64,26 @@ renderer and main-process services also run without Electron in the multi-user *
 │   │   ├── demo/                   # Launch-time demo mode: demoMode, outwardSync, DemoVirtualPty, DemoStorageProvider
 │   │   ├── web/                    # Multi-user Web Server: serverEntry, WebServer, WebAuthService, WebTenantManager, electronShim
 │   │   ├── ipc/                    # One registerXHandlers(bridge) per domain (terminal, smartcard, storage, transfer, profile, dotfile, sync, k8s, key install, git, …) + ipcHelpers.ts
+│   │   ├── archive/                # Packing and unpacking archives (ArchiveService, archiveCommands: tar, zip)
 │   │   ├── aws/                    # AWS SSO OIDC device auth service (AwsSsoAuthService)
+│   │   ├── certs/                  # Reading certificate files: fields and extensions shown in the UI
 │   │   ├── ca/                     # SSH Certificate Authority: SshCaService (session, cert install, timers), oidcFlow (OIDC discovery/browser login/refresh), operationQueue, providers/ (Step-CA, Vault), cert validation, agent protocol, sshWire (wire encoding)
 │   │   ├── oauth/                  # Shared OAuth/OIDC loopback callback server, PKCE, requestJson
 │   │   ├── crypto/                 # System CA trust store & SecretFieldCrypto
 │   │   ├── dirsync/                # Directory diff and synchronization engine
 │   │   ├── dotfiles/               # Dotfiles pool store, SFTP sync & Git importer (DotfileGitImporter)
+│   │   ├── dragout/                # Dragging a remote file out to the desktop (DragOutService)
 │   │   ├── editor/                 # Temporary external file editor service
 │   │   ├── git/                    # Git config, commit signing, status & remote operations
+│   │   ├── log/                    # The app log: createLogger, masking (redact.ts), the rotating file (FileSink)
+│   │   ├── net/                    # WebSocket client over a pinned connection (wsClient), used by the chat agent
 │   │   ├── profile/                # OS keychain encrypted profile store (safeStorage)
 │   │   ├── proxy/                  # HTTP/SOCKS socket creation & proxyCli helper
 │   │   ├── search/                 # Local/remote regex search & live log tailing (tail -f)
 │   │   ├── services/               # K8s discovery, debug containers, port forward, OpenShift, & Team Vault (TeamVaultService, TeamVaultCryptoService, TeamVaultConfigStore, AgeBinaryResolver, AgePtyPinRelay)
 │   │   ├── session/                # Window tab & layout persistence (SessionStore)
+│   │   ├── sim/                    # The demo lab's simulated servers: SimWorld, SimShell, scenarios, baseFleet, scripted answers
+│   │   ├── splash/                 # The splash window shown while the app starts
 │   │   ├── clipboard/              # Encrypted terminal selection history (ClipboardHistoryStore)
 │   │   ├── snippets/               # Saved terminal command snippets (SnippetStore, plain JSON)
 │   │   ├── settings/               # App configuration & default settings (SettingsStore)
@@ -89,6 +96,7 @@ renderer and main-process services also run without Electron in the multi-user *
 │   │   │   └── sftp/               # OpenSSH-based SFTP engine (protocol, streams, process, adapter)
 │   │   ├── terminal/               # K8s container exec PTY & live log streaming managers
 │   │   ├── transfer/               # Streaming TransferPipeline, ByteMeter & TransferQueue
+│   │   ├── windows/                # WindowManager (which window owns which session), createAppWindow, window bounds
 │   │   └── x11/                    # X11 server lifecycle manager (VcXsrv integration)
 │   ├── preload/                    # Electron preload script exposing window.multissh (via shared createMultiSSHApi)
 │   ├── renderer/                   # React frontend
@@ -251,6 +259,8 @@ Always run these checks before finishing any task:
 npm run typecheck   # Static typecheck with TypeScript
 npm run lint        # ESLint verification (must be 0 errors, 0 warnings)
 npm run test        # Unit & integration tests via Vitest
-npm run build       # Verify Vite & electron-builder bundle compilation
-npm run deploy      # Bump patch version, commit, tag, and push to GitHub Actions (scripts/deploy.sh)
+npm run build       # Typecheck, then the Vite build of the desktop app (no installer is made)
+npm run build:web   # The web client and the web server, when you changed either
 ```
+
+Releasing is a separate step and never part of finishing a task: `npm run deploy` (`scripts/deploy.sh`) bumps the version, commits, tags and pushes. Only a maintainer runs it, on purpose.

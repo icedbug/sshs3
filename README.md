@@ -6,7 +6,7 @@
 [![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Falun-hub%2Fsshs3%2Fbadges%2Fdownloads.json)](https://github.com/alun-hub/sshs3/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **A modern, security-focused, cross-platform SSH, SFTP, S3 Object Storage, Enterprise Storage Cluster (NetApp ONTAP / StorageGRID / Ceph / ZFS), and Kubernetes platform** — available both as a **Desktop App (Linux & Windows)** and a **Self-Hosted Multi-User Web Server**. Built-in **Collaborative AI Hub**, **S3 Team Workspace Sync (`sshs3-team://` InviteCode)**, **`Ctrl+K` Inline Terminal AI**, **FIDO2 / YubiKey / PKCS#11 Smartcard Authentication**, **Konsole-style Split Terminals**, and a **Dual-Pane File Explorer**.
+> **A modern, security-focused, cross-platform SSH, SFTP, S3 Object Storage, Enterprise Storage Cluster (NetApp ONTAP / StorageGRID / Ceph / ZFS), and Kubernetes platform** — available both as a **Desktop App (Linux & Windows)** and a **Self-Hosted Multi-User Web Server**. Built-in **Collaborative AI Hub**, **S3 Team Workspace Sync (`sshs3-s3://` InviteCode)**, **`Ctrl+K` Inline Terminal AI**, **FIDO2 / YubiKey / PKCS#11 Smartcard Authentication**, **Konsole-style Split Terminals**, and a **Dual-Pane File Explorer**.
 
 <p align="center">
   <img src="docs/screenshots/split.png" alt="Three split panes: remote SSH, local shell and a second SSH session" width="850" />
@@ -33,7 +33,7 @@ Infrastructure, Storage, and DevOps teams typically juggle **5+ disconnected too
 | :--- | :--- |
 | **🤖 Context-Aware AI Hub & Full App Control** | Built-in AI agent with complete awareness of your clusters, VMs, S3 buckets, runbooks, and open terminals. Ask anything about `sshs3`, paste screenshots (`Ctrl+V`), or tell the AI to directly add/organize servers, clusters, folders, S3 profiles, schedules, snippets, and settings via `sshs3_*` tools. |
 | **🧠 Auto-Memory & Live `TerminalObserver`** | Every notable terminal action (`vim /etc/nginx/...`, `systemctl restart`, `kubectl rollout`, ONTAP `volume modify`, `snapmirror resync`, Ceph/ZFS ops) is automatically logged and distilled into shared **Team Memories & Runbooks** — no manual documentation required. |
-| **☁️ S3 Team Workspace & `InviteCode`** | Share your entire server/cluster topology, runbooks, and activity log through your own S3 bucket (AWS S3, NetApp StorageGRID, MinIO, Ceph RGW, R2). Invite teammates with a single `sshs3-team://...` code while **private SSH keys and passwords never leave each user's device**. |
+| **☁️ S3 Team Workspace & `InviteCode`** | Share your entire server/cluster topology, runbooks, and activity log through your own S3 bucket (AWS S3, NetApp StorageGRID, MinIO, Ceph RGW, R2). Invite teammates with a single `sshs3-s3://...` code while **private SSH keys and passwords never leave each user's device**. |
 | **🌐 Self-Hosted Multi-User Web Server** | Deploy `sshs3` on any Linux/Windows VM (`npm run start:web`) and access the full experience in the browser with First-Run Admin setup, Invite Tokens, per-user isolated `~/.ssh/id_ed25519` keys, and live multi-user presence. |
 | **🔐 Hardware-Grade Zero-Knowledge Security** | Native support for **FIDO2 / YubiKey**, **PKCS#11 Smartcards (SITHS, Net iD, PIV/CAC, OpenSC)**, OS Keyring encryption (`safeStorage`), and YubiKey/PIV-backed Team Vaults. |
 
@@ -83,11 +83,11 @@ Infrastructure, Storage, and DevOps teams typically juggle **5+ disconnected too
   </p>
   <p align="center">
     <img src="docs/screenshots/web-flow-3-ssh-key-modal.png" alt="Per-User SSH Public Key Modal" width="850" />
-    <br><em><b>Step 3 — Per-User SSH Identity (<code>🔑 Min SSH-nyckel</code>):</b> Every web user gets their own isolated <code>~/.ssh/id_ed25519</code> keypair with one-click copy and a ready-to-run <code>authorized_keys</code> snippet.</em>
+    <br><em><b>Step 3 — Per-User SSH Identity (<code>🔑 My SSH key on the server</code>):</b> Every web user gets their own isolated <code>~/.ssh/id_ed25519</code> keypair with one-click copy and a ready-to-run <code>authorized_keys</code> snippet.</em>
   </p>
   <p align="center">
     <img src="docs/screenshots/web-flow-4-team-invite-admin.png" alt="Admin Generating Team Invite Link and S3 InviteCode" width="850" />
-    <br><em><b>Step 4 — 1-Click Team Invites (<code>👥 Team &amp; Inbjudan</code>):</b> Admins generate single-use Web Invite Tokens or copy the <code>sshs3-team://...</code> S3 InviteCode for desktop teammates.</em>
+    <br><em><b>Step 4 — 1-Click Team Invites (<code>👥 Invites and user accounts</code>):</b> Admins create single-use web invite codes here. The S3 invite code (<code>sshs3-s3://...</code>) for desktop teammates is copied from the team card on the start page.</em>
   </p>
   <p align="center">
     <img src="docs/screenshots/web-flow-5-friend-invite-signup.png" alt="Teammate Redeeming Invite Token" width="850" />
@@ -104,8 +104,8 @@ Infrastructure, Storage, and DevOps teams typically juggle **5+ disconnected too
 ## Quick Start: Desktop, Demo Mode & Multi-User Web Server
 
 ```bash
-# 1. Install dependencies
-npm install
+# 1. Install the locked dependencies (Node.js 24.15 or later in the 24.x series)
+npm ci
 
 # 2. Run Desktop App in Enterprise Storage Demo Mode (NetApp ONTAP, StorageGRID S3, Ceph, TrueNAS ZFS, Astra Trident)
 SSHS3_DEMO=1 npm run dev

@@ -9,6 +9,9 @@
     "email": "info@sshs3.com"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
   "homepage": "https://unixkonsult.se/sshs3",
   "desktopName": "sshs3",
   "repository": {
@@ -36,6 +39,7 @@
     "test:coverage": "vitest run --coverage",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:smoke:demo": "node scripts/smoke-test.mjs --demo",
+    "test:smoke:web": "node scripts/smoke-web.mjs",
     "typecheck": "node node_modules/@typescript/native/bin/tsc --noEmit --incremental --tsBuildInfoFile .typecheck.tsbuildinfo",
     "lint": "eslint .",
     "package": "npm run build && electron-builder",
@@ -112,7 +116,7 @@
     "@typescript/native": "npm:typescript@7.0.2",
     "@vitejs/plugin-react": "^6.1.2",
     "@vitest/coverage-v8": "^5.0.4",
-    "electron": "^45.0.0",
+    "electron": "^45.4.1",
     "electron-builder": "^26.15.3",
     "eslint": "^10.13.0",
     "eslint-plugin-react-hooks": "^7.1.1",

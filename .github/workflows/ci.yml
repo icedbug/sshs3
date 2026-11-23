@@ -38,6 +38,12 @@ jobs:
         run: npm run bundle:desktop
       - name: Headless Smoke Test
         run: xvfb-run --auto-servernum npm run test:smoke
+      - name: Headless Smoke Test of the demo lab
+        run: xvfb-run --auto-servernum npm run test:smoke:demo
+      - name: Build the web client and server
+        run: npm run build:web
+      - name: Web server smoke test
+        run: npm run test:smoke:web
 
   windows-tests:
     name: Windows tests (${{ matrix.shard }}/3)
