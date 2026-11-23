@@ -62,6 +62,17 @@ describe("the hub's parts", () => {
     await expect(hub.request({} as never)).rejects.toThrow("Invalid AI request");
   });
 
+  it("the guide gives the number of requests each part answers", async () => {
+    // docs/ai-hub.md lists the parts with a count each. The count is typed by hand, so it drifts when a
+    // request is added or removed: this holds it to the table the compiler checks.
+    const counted = new Map<string, number>();
+    for (const part of Object.values(AREA_OF)) counted.set(part, (counted.get(part) ?? 0) + 1);
+    const guide = await fs.readFile(path.join(__dirname, "../../docs/ai-hub.md"), "utf8");
+    const written = new Map<string, number>();
+    for (const row of guide.matchAll(/^\| `areas\/([A-Za-z]+)\.ts` \|.*\| (\d+) \|$/gm)) written.set(row[1], Number(row[2]));
+    expect(Object.fromEntries(written)).toEqual(Object.fromEntries(counted));
+  });
+
   it("answers a request through its part, and still saves and answers as before", async () => {
     const { hub } = await makeHub();
     // One that only reads, and one that writes: both come back as a snapshot.

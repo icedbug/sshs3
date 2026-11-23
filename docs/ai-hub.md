@@ -108,12 +108,17 @@ explicitly enabled presentation on top of the same terminal authority.
     first, with the matching lines) and read one in full, with its task list
     and the commands and their results. Runs the hub started itself and the
     current conversation are left out.
-  - *A fast model for background work* (`fastModel` in the AI configuration):
-    the hub's own runs (investigators, workforce reviews, reading for memory)
-    are started on it when it is set and the run uses the configured
-    provider; conversations keep `model`. A background run that fails on the
-    fast model is run once more on the main model (`mainModelOnly`). Every
-    task records the model it ran on (`task.model`).
+  - *Which model a run uses* (`AiConfigStore.getConfig`). There are four
+    kinds of work: the chat and the agents (`primary`), quick background
+    work (`fastTriage`), reading for memory (`backgroundDistill`) and search
+    (`embedding`). A kind of work with a saved model of its own uses it.
+    One without uses the saved model chosen as the main model, and when no
+    saved model is chosen, the fields under Model. The model for background
+    work (`fastModel`) names the model for the two background kinds when
+    neither has a saved model of its own; conversations never use it. A
+    background run that fails on that model is run once more on the main
+    model (`mainModelOnly`). Every task records the model it ran on
+    (`task.model`).
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.
@@ -362,8 +367,8 @@ parts that define the same method name are refused when the file loads.
 | `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log | 19 |
 | `areas/runs.ts` | A run: starting it, its events, its budget and clock, stopping it; runs on an external agent | none: started by other parts |
 | `areas/chatRuns.ts` | Conversations asked for from a chat thread: the fence they run inside (`chatFence.ts`), starting and going on, their own terminals, and following a run without a browser (`onRun`, `runView`) | none: called by the chat agent |
-| `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 11 |
-| `areas/tickets.ts` | The board: goals and tickets, starting a ticket's agent, the board's clock | 10 |
+| `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 12 |
+| `areas/tickets.ts` | The board: goals and tickets, starting a ticket's agent, the board's clock | 11 |
 | `areas/agents.ts` | Agents, external runners, workforce runs, specialists, a plan's reviewer, investigators | 11 |
 | `areas/knowledge.ts` | The knowledge base: documents, pages, search, gaps | 19 |
 | `areas/memory.ts` | Team memory, proposals from runs and activity, the learning queue, tidying up | 9 |
@@ -752,9 +757,12 @@ reads them. There are none in the desktop app and none in the demo lab.
   (above), switched on for everybody. `safetyPolicy()` counts it as the
   person's own being on, so everything that follows from it is the same. A
   person's own switch then has nothing left to decide and is shown as on. It
-  still needs a second person who may answer: for an account nobody else may
-  approve production for (the only administrator), it does not hold, and the
-  card says so.
+  holds also where nobody else may answer. An administrator nobody else may
+  approve production for (the only one who may) can then approve one change
+  alone, in the Inbox, with a written reason: "Approve this change alone".
+  The reason is recorded with the change (`adminException`) and in the audit
+  log. A member with nobody to ask is refused at once, and the settings say
+  which of the two holds.
 - **A change freeze.** On every server (`*`) or on one cluster, for a number
   of hours, with a reason. A freeze stops change cards and file writes.
   Commands still run. Until it ends, the broker refuses a change card or a

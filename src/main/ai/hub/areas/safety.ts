@@ -598,9 +598,11 @@ export class SafetyPart {
    */
   safetyPolicy(this: HubService): SafetyPolicyConfig {
     const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
-    // Where only one person can approve, a second approval can never come: the rule is not in force
-    // (and cannot be switched on), rather than leaving every production change to time out.
-    // The rule the server's administrator set for everyone counts as this person's own being on.
+    // A person's own rule: where only one person can approve, a second approval can never come, so it
+    // is not in force (and cannot be switched on), rather than leaving every production change to time out.
+    // The rule the server's administrator set for everyone is in force whoever can be asked: where nobody
+    // can, the broker refuses a member's change at once and lets an administrator approve one change
+    // alone with a written reason (`adminExceptionAvailable`).
     const peer = Boolean(this.teamRules()?.requirePeerApprovalOnProd || (stored.requirePeerApprovalOnProd && this.peerApprovalPossible()));
     const own = peer === Boolean(stored.requirePeerApprovalOnProd) ? stored : { ...stored, requirePeerApprovalOnProd: peer };
     if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
