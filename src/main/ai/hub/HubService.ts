@@ -1391,7 +1391,9 @@ export class HubService {
     for (let i = 0; i < 100 && (this.kbReadingId || this.factsRound); i++)
       await new Promise((r) => setTimeout(r, 20));
     await this.factsRound?.catch(() => undefined);
-    if (this.initialized) await this.store.save();
+    // The last save. When it cannot be written (the folder is gone, the disk is full) there is nobody
+    // left to tell: closing must still end, and must not end as an error nobody catches.
+    if (this.initialized) await this.store.save().catch(() => undefined);
   }
 }
 
