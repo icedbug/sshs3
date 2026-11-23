@@ -66,6 +66,7 @@ import { listAgentPublicKeys } from './PublicKeyDiscovery';
 import type { AskpassPromptRetryContext } from '../smartcard/AskpassServer';
 import { createLogger } from '../log';
 import { createMuxControlPath } from './muxControlPath';
+import { clientTerminalEnv, isWebServerProcess, sshClientFileArgs } from '../web/tenantBoundary';
 const sshLog = createLogger('ssh');
 
 export const CONPTY_WRITE_CHUNK_BYTES = 512;
@@ -796,7 +797,7 @@ export class InternalSSHPtySession implements SSHPtySession {
           await new Promise<void>((resolve) => {
             const sshBinary = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
             // Bounded: never let a stuck/unresponsive master block session cleanup.
-            execFile(sshBinary, ['-S', controlPath, '-O', 'exit', '--', host], { timeout: 3000 }, () => resolve());
+            execFile(sshBinary, [...sshClientFileArgs(this.config), '-S', controlPath, '-O', 'exit', '--', host], { timeout: 3000 }, () => resolve());
           });
         }
       } catch {
@@ -836,6 +837,12 @@ export interface SSHPtyManagerOptions {
   isTunnelActive?: (connectionId: string, tunnelId: string) => boolean;
   /** Answers OpenSSH's unknown-host-key question; absent means "no" (fail closed). */
   hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
+  /**
+   * Web server only: this manager is one account's. Every connection is made the account's own before
+   * ssh is started (its ssh files, only its own key files: see IpcBridge.confineSshConfig), a client
+   * sets only display and language variables on the ssh process, and there is no shell on the server.
+   */
+  confineConfig?: (config: SSHConnectionConfig) => SSHConnectionConfig;
 }
 
 /** Options of an SSH session: those of its pty, and the saved profile it is for. */
@@ -853,6 +860,7 @@ export class SSHPtyManager extends EventEmitter {
   private sessionOptions: Map<string, SshSessionOptions | undefined> = new Map();
   private settingsStore?: SettingsStore;
   private hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
+  private confineConfig?: (config: SSHConnectionConfig) => SSHConnectionConfig;
   /**
    * Local ports our own already-open sessions have bound a tunnel for, keyed by the owning
    * session id. Terminal sessions no longer auto-embed saved tunnels (only the Tunnels panel
@@ -865,6 +873,32 @@ export class SSHPtyManager extends EventEmitter {
     super();
     this.settingsStore = options?.settingsStore;
     this.hostKeyPromptHandler = options?.hostKeyPromptHandler;
+    this.confineConfig = options?.confineConfig;
+  }
+
+  /**
+   * The environment of an ssh process. What a client asked for comes before the app's own variables
+   * (askpass, proxy), so it can never replace them. On a web server the client is a browser somewhere
+   * else: only its display and language names are taken, and the server's ssh agent and credential
+   * key are not handed to the child.
+   */
+  private sshChildEnv(config: SSHConnectionConfig, askpassEnv: Record<string, string>, clientEnv?: Record<string, string>): Record<string, string> {
+    const account = Boolean(this.confineConfig) || isWebServerProcess();
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      TERM: 'xterm-256color',
+      ...(account ? clientTerminalEnv(clientEnv) : clientEnv || {}),
+      ...askpassEnv,
+      ...SmartcardDetector.buildProxyEnv(config),
+    };
+    // The native agent's host capability is never an environment credential for a PTY.
+    delete env.SSHS3_NATIVE_TOOL_KEY;
+    delete env.SSHS3_NATIVE_TOOL_URL;
+    if (account) {
+      delete env.SSH_AUTH_SOCK;
+      delete env.SSHS3_MASTER_KEY;
+    }
+    return env;
   }
 
   public static getControlPath(config: SSHConnectionConfig): string {
@@ -931,6 +965,12 @@ export class SSHPtyManager extends EventEmitter {
     });
   }
 
+  /** Where an ssh process starts. A web client does not choose a folder on the server. */
+  private childCwd(options?: PtyOptions): string {
+    const fallback = process.env.HOME || process.cwd();
+    return this.confineConfig || isWebServerProcess() ? fallback : (options?.cwd ?? fallback);
+  }
+
   /**
    * Reconnects an existing session by spawning a new underlying SSH process.
    */
@@ -939,7 +979,7 @@ export class SSHPtyManager extends EventEmitter {
     const options = this.sessionOptions.get(session.sessionId);
     const cols = session.cols;
     const rows = session.rows;
-    const cwd = options?.cwd ?? (process.env.HOME || process.cwd());
+    const cwd = this.childCwd(options);
 
     if (isDemoTarget(config.id, options?.profileId)) {
       // A demo target stays on the virtual terminal: reconnecting starts a fresh one, never ssh.
@@ -948,16 +988,7 @@ export class SSHPtyManager extends EventEmitter {
     }
 
     const askpassEnv = session.askpassServer ? session.askpassServer.getEnv() : {};
-    const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      TERM: 'xterm-256color',
-      ...askpassEnv,
-      ...SmartcardDetector.buildProxyEnv(config),
-      ...(options?.env || {}),
-    };
-    // The native agent's host capability is never an environment credential for a PTY.
-    delete env.SSHS3_NATIVE_TOOL_KEY;
-    delete env.SSHS3_NATIVE_TOOL_URL;
+    const env = this.sshChildEnv(config, askpassEnv, options?.env);
 
     if (config.agentPath) {
       env.SSH_AUTH_SOCK = config.agentPath;
@@ -1003,14 +1034,17 @@ export class SSHPtyManager extends EventEmitter {
    * (`options.profileId`, see SshSessionOptions) gets the virtual demo terminal instead.
    */
   public async createSession(
-    config: SSHConnectionConfig,
+    requested: SSHConnectionConfig,
     options?: SshSessionOptions
   ): Promise<SSHPtySession> {
+    // A demo target never gets an ssh process, so there is nothing of the account's to check for it.
+    const demo = isDemoTarget(requested.id, options?.profileId);
+    const config = this.confineConfig && !demo ? this.confineConfig(requested) : requested;
     const sessionId = config.id || `ssh-${crypto.randomUUID()}`;
     this.sessionOptions.set(sessionId, options);
     const cols = options?.cols ?? 80;
     const rows = options?.rows ?? 24;
-    const cwd = options?.cwd ?? (process.env.HOME || process.cwd());
+    const cwd = this.childCwd(options);
 
     if (isDemoTarget(config.id, options?.profileId)) {
       const demoPty = new DemoVirtualPty(config, cols, rows);
@@ -1091,15 +1125,7 @@ export class SSHPtyManager extends EventEmitter {
     // Everything from here to the spawn may throw (invalid proxy/tunnel config, argument
     // building, spawn itself); the askpass server and mux registry entry must not leak then.
     try {
-      const env: Record<string, string> = {
-        ...(process.env as Record<string, string>),
-        TERM: 'xterm-256color',
-        ...askpassEnv,
-        ...SmartcardDetector.buildProxyEnv(config),
-        ...(options?.env || {}),
-      };
-      delete env.SSHS3_NATIVE_TOOL_KEY;
-      delete env.SSHS3_NATIVE_TOOL_URL;
+      const env = this.sshChildEnv(config, askpassEnv, options?.env);
 
       if (config.agentPath) {
         env.SSH_AUTH_SOCK = config.agentPath;
@@ -1191,6 +1217,10 @@ export class SSHPtyManager extends EventEmitter {
    * Spawns a local shell PTY session (e.g. bash or powershell/cmd).
    */
   public async createShellSession(options?: PtyOptions): Promise<SSHPtySession> {
+    // A shell here would be a shell on the server itself, as the server's own user.
+    if (this.confineConfig || isWebServerProcess()) {
+      throw new Error('This is a shared sshs3 server: there is no local terminal here. Connect to one of your servers instead.');
+    }
     const sessionId = `shell-${crypto.randomUUID()}`;
     const cols = options?.cols ?? 80;
     const rows = options?.rows ?? 24;

@@ -23,7 +23,7 @@ import { assertStrings, isMissingPathError } from './ipcHelpers';
 /** The part of IpcBridge this handler group may use. */
 export type StorageHost = Pick<
   IpcBridge,
-  'registerHandler' | 'requireS3Capability' | 'resolveProxyJumpConfig' | 'storageRegistry' | 'teamVaultService' | 'sshPtyManager'
+  'localFilesDir' | 'registerHandler' | 'requireS3Capability' | 'resolveProxyJumpConfig' | 'storageRegistry' | 'teamVaultService' | 'sshPtyManager'
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
@@ -388,7 +388,8 @@ export function registerStorageHandlers(bridge: StorageHost): void {
     IPC_CHANNELS.STORAGE_GET_HOMEDIR,
     async (_event, providerId: string): Promise<string> => {
       if (providerId === 'local') {
-        return os.homedir();
+        // On a web server: the account's own folder, never the server user's home.
+        return bridge.localFilesDir ?? os.homedir();
       }
       const provider = bridge.storageRegistry.get(providerId);
       if (!provider) {

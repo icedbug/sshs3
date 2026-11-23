@@ -89,6 +89,7 @@ import { SshCaService } from './ca/SshCaService';
 import { handleHostKeyChanged } from './ssh/hostKeyChanged';
 import { assertOutwardSyncAllowed, outwardSyncDisabledReason } from './demo/outwardSync';
 import { createLogger } from './log';
+import { confineS3Config, confineSshConfig, ensureAccountSshFiles, type SshAccount, type SshClientFiles } from './web/tenantBoundary';
 const ipcLog = createLogger('ipc');
 const sshLog = createLogger('ssh');
 const smartcardLog = createLogger('smartcard');
@@ -169,6 +170,14 @@ export class IpcBridge {
   public aiHub?: HubService;
   public readonly tenantHomeDir?: string;
   public readonly tenantSshPrivateKeyPath?: string;
+  /**
+   * Web server only, all three derived from `tenantHomeDir`: the files this account's ssh children read
+   * instead of the server user's `~/.ssh`, its own kubeconfig, and the one folder its "local" files are in.
+   */
+  public readonly tenantSshFiles?: SshClientFiles;
+  public readonly tenantKubeConfigPath?: string;
+  public readonly localFilesDir?: string;
+  private readonly sshAccount?: SshAccount;
   private ipcMain: IpcMain;
   public readonly sshPtyManager: SSHPtyManager;
   public readonly storageRegistry: StorageRegistry;
@@ -298,6 +307,15 @@ export class IpcBridge {
       }
     }
     this.ipcMain = options.ipcMain ?? electronIpcMain;
+    // An account of a web server: everything that would read the server user's home reads the account's folder.
+    const accountHome = options.tenantHomeDir;
+    if (accountHome) {
+      this.tenantSshFiles = ensureAccountSshFiles(accountHome, options.tenantSshPrivateKeyPath);
+      this.tenantKubeConfigPath = path.join(accountHome, '.kube', 'config');
+      this.localFilesDir = path.join(accountHome, 'files');
+      this.sshAccount = { homeDir: accountHome, files: this.tenantSshFiles };
+    }
+    const sshAccount = this.sshAccount;
     this.policy = options.policy ?? NO_POLICY;
     this.settingsStore = options.settingsStore ?? new SettingsStore(undefined, this.policy.policy);
     this.sshPtyManager =
@@ -312,12 +330,16 @@ export class IpcBridge {
             .listActive()
             .some((t) => t.connectionId === connectionId && t.tunnel.id === tunnelId),
         hostKeyPromptHandler: (info) => this.promptHostKeyTrust(info),
+        confineConfig: sshAccount ? (config) => confineSshConfig(config, sshAccount) : undefined,
       });
     this.storageRegistry =
       options.storageRegistry ??
       new StorageRegistry({
         // A user of a shared server sees their own folder as "local" files, never the server's disk.
-        localSandbox: options.tenantHomeDir ? path.join(options.tenantHomeDir, 'files') : undefined,
+        localSandbox: this.localFilesDir,
+        confineSftp: sshAccount ? (config) => confineSshConfig(config, sshAccount) : undefined,
+        confineS3: accountHome ? (config) => confineS3Config(config, accountHome) : undefined,
+        kubeConfigPath: this.tenantKubeConfigPath,
         sftpHostVerifierFactory: (host, port) =>
           createHostVerifier({
             host,
@@ -393,6 +415,9 @@ export class IpcBridge {
       new ProfileSyncService(this.profileStore, this.dotfilePoolStore, this.settingsStore, this.syncCryptoService, {
         directorySyncProfileStore: this.directorySyncProfileStore,
         k8sProfileStore: this.k8sProfileStore,
+        // On a web server the block of saved hosts and the known hosts are the account's own files.
+        sshConfigPath: this.tenantSshFiles?.managedConfigPath,
+        knownHostsPath: this.tenantSshFiles?.knownHostsPath,
       });
     this.smartcard = new SmartcardCoordinator({
       settingsStore: this.settingsStore,
@@ -425,9 +450,11 @@ export class IpcBridge {
         this.getWebContents()?.send(IPC_CHANNELS.SSH_CA_STATUS_CHANGED, status);
       }
     });
-    this.k8sDiscoveryService = options.k8sDiscoveryService ?? new K8sDiscoveryService();
-    this.k8sDebugService = options.k8sDebugService ?? new K8sDebugService();
-    this.k8sTerminalManager = options.k8sTerminalManager ?? new K8sTerminalManager();
+    // On a web server every Kubernetes service reads the account's own kubeconfig, never the server's.
+    const kubeConfigPath = this.tenantKubeConfigPath;
+    this.k8sDiscoveryService = options.k8sDiscoveryService ?? new K8sDiscoveryService(kubeConfigPath);
+    this.k8sDebugService = options.k8sDebugService ?? new K8sDebugService(kubeConfigPath);
+    this.k8sTerminalManager = options.k8sTerminalManager ?? new K8sTerminalManager(kubeConfigPath);
     this.perfMetricsService = new PerfMetricsService((sessionId) => {
       const session = this.sshPtyManager.getSession(sessionId);
       return session
@@ -438,14 +465,14 @@ export class IpcBridge {
             askpassEnv: (session as InternalSSHPtySession).askpassServer?.getEnv(),
           }
         : undefined;
-    });
-    this.k8sLogManager = options.k8sLogManager ?? new K8sLogManager();
-    this.k8sPortForwardManager = options.k8sPortForwardManager ?? new K8sPortForwardManager(undefined, this.k8sDiscoveryService);
+    }, kubeConfigPath);
+    this.k8sLogManager = options.k8sLogManager ?? new K8sLogManager(kubeConfigPath);
+    this.k8sPortForwardManager = options.k8sPortForwardManager ?? new K8sPortForwardManager(kubeConfigPath, this.k8sDiscoveryService);
     this.k8sPortForwardManager.setDiscoveryService(this.k8sDiscoveryService);
     this.sshTunnelManager = options.sshTunnelManager ?? new SSHTunnelManager();
     this.getWebContents = options.getWebContents ?? (() => null);
     this.confirmQuit = options.confirmQuit;
-    this.tenantHomeDir = options.tenantHomeDir;
+    this.tenantHomeDir = accountHome;
     this.tenantSshPrivateKeyPath = options.tenantSshPrivateKeyPath;
     this.isTrustedFrame = options.isTrustedFrame;
     this.windows = options.windows;
@@ -563,7 +590,9 @@ export class IpcBridge {
     registerSshCaHandlers(this);
     this.setupEventListeners();
 
-    if (process.platform === 'win32') {
+    // Not for an account of a web server: the X server program and its arguments come from the settings,
+    // which there are the account's own, and it would start on the server.
+    if (process.platform === 'win32' && !this.tenantHomeDir) {
       void this.settingsStore
         .getSettings()
         .then((settings) => {
@@ -884,7 +913,30 @@ export class IpcBridge {
     return needsPassword ? { ...config, password: match.password } : { ...config, passphrase: match.passphrase };
   }
 
+  /**
+   * Web server only: the connection as this account may use it, carrying the account's ssh files (see
+   * confineSshConfig in web/tenantBoundary.ts). On the desktop the config comes back as it is.
+   */
+  public confineSshConfig<T extends object>(config: T): T {
+    return this.sshAccount ? confineSshConfig(config, this.sshAccount) : config;
+  }
+
+  /** Web server only: an S3 connection as this account may use it. On the desktop it comes back as it is. */
+  public confineS3Config<T extends object>(config: T): T {
+    return this.tenantHomeDir ? confineS3Config(config, this.tenantHomeDir) : config;
+  }
+
+  /**
+   * Every connection the handlers and the AI hub start goes through here before ssh is started for it,
+   * so this is also where it is made the account's own on a web server.
+   */
   public async resolveProxyJumpConfig<T extends { proxyJumpProfileId?: string; proxyJump?: string }>(
+    config: T
+  ): Promise<T> {
+    return this.confineSshConfig(await this.withProxyJumpResolved(config));
+  }
+
+  private async withProxyJumpResolved<T extends { proxyJumpProfileId?: string; proxyJump?: string }>(
     config: T
   ): Promise<T> {
     if (!config.proxyJumpProfileId) return config;
@@ -1768,6 +1820,7 @@ export class IpcBridge {
       handleHostKeyChanged(target, {
         promptHostKeyTrust: (info) => this.promptHostKeyTrust(info),
         notify: (data) => this.onPtyData?.({ sessionId, data }),
+        knownHostsFile: this.tenantSshFiles?.knownHostsPath,
       }).catch((err) => ipcLog.warn('Changed host key handling failed:', err));
     });
 

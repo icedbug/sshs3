@@ -18,6 +18,11 @@ import { type AuditShipperOptions } from "./AuditLog";
 import { type ConditionalQueueStore } from "./WorkSync";
 
 export interface HubHost {
+  /**
+   * On a web server: the account's own kubeconfig. When it is set, a Kubernetes tool reads this file and
+   * nothing a request or the model names instead.
+   */
+  accountKubeConfigPath?: string;
   /** Optional host admission check, run synchronously before spending an action. */
   beforeAction?(task: AgentTask): void;
   /** Optional counter for a model request, including a retry, without its contents. */

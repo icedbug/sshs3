@@ -103,6 +103,9 @@ export const tokenView = (t: McpTokenRecord, now = Date.now()): McpTokenView => 
   ...(t.tools ? { tools: t.tools } : {}),
 });
 
+/** How long a key works when its request does not say. */
+export const DEFAULT_KEY_DAYS = 30;
+
 export class McpTokenStore {
   private readonly file: string;
   private data: StoredTokens = { version: 1, tokens: [] };
@@ -147,7 +150,9 @@ export class McpTokenStore {
   }
 
   /**
-   * A new key. The secret is returned once, in the only form it will ever
+   * A new key. It stops working after DEFAULT_KEY_DAYS days unless the request says how long, or says
+   * in so many words that it never does: a key nobody thought about does not live for ever.
+   * The secret is returned once, in the only form it will ever
    * have; what is kept is its hash. A key that may run commands must name the
    * one server it may run them on.
    */
@@ -157,7 +162,10 @@ export class McpTokenStore {
     createdBy: string;
     scopes: McpScope[];
     serverId?: string;
+    /** How many days the key works. Without it: DEFAULT_KEY_DAYS. */
     expiresInDays?: number;
+    /** The key never stops working. Only when asked for in so many words: leaving the days out does not mean this. */
+    neverExpires?: boolean;
     tools?: string[];
     now?: number;
   }): Promise<{ token: string; view: McpTokenView }> {
@@ -180,7 +188,9 @@ export class McpTokenStore {
       serverId: scopes.includes('run') ? input.serverId : undefined,
       createdAt: now,
       createdBy: input.createdBy,
-      expiresAt: input.expiresInDays ? now + Math.min(3650, Math.max(1, input.expiresInDays)) * 24 * 3600_000 : undefined,
+      expiresAt: input.neverExpires
+        ? undefined
+        : now + Math.min(3650, Math.max(1, input.expiresInDays && input.expiresInDays > 0 ? input.expiresInDays : DEFAULT_KEY_DAYS)) * 24 * 3600_000,
       ...(input.tools?.length ? { tools: [...new Set(input.tools.map((t) => t.trim()).filter(Boolean))].slice(0, 40) } : {}),
     };
     this.data.tokens.push(record);

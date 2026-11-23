@@ -11,6 +11,7 @@ import type { HostKeyPromptInfo } from '../../ssh/HostKeyVerifier';
 import type { SFTPConfig } from '../../../shared/types/storage';
 import type { SSHConnectionConfig } from '../../../shared/types/ssh';
 import { createLogger } from '../../log';
+import { sshClientFileArgs } from '../../web/tenantBoundary';
 const sftpLog = createLogger('sftp');
 
 export interface OpenSshProcessOptions {
@@ -300,13 +301,18 @@ export class OpenSshSftpProcess {
    *   proxy credentials and agent socket in the environment like the SFTP process itself (a ProxyCommand
    *   with no ELECTRON_RUN_AS_NODE starts a second copy of the app).
    */
+  /** On a web server: the account's own ssh files, also for a call that goes over the control socket. */
+  private clientFileArgs(): string[] {
+    return this.config ? sshClientFileArgs(this.config) : [];
+  }
+
   private buildExecInvocation(
     cmd: string,
     useControlSocket = true
   ): { args: string[]; env?: Record<string, string>; viaControlSocket: boolean } {
     if (useControlSocket && this.controlPath && fs.existsSync(this.controlPath)) {
       return {
-        args: ['-S', this.controlPath, '-o', 'BatchMode=yes', '-o', 'ProxyCommand=false', '--', this.host, cmd],
+        args: [...this.clientFileArgs(), '-S', this.controlPath, '-o', 'BatchMode=yes', '-o', 'ProxyCommand=false', '--', this.host, cmd],
         viaControlSocket: true,
       };
     }
@@ -331,7 +337,7 @@ export class OpenSshSftpProcess {
   private masterIsAlive(sshBinary: string): Promise<boolean> {
     if (!this.controlPath) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
-      execFile(sshBinary, ['-S', this.controlPath!, '-O', 'check', '--', this.host], { timeout: 5000 }, (err) =>
+      execFile(sshBinary, [...this.clientFileArgs(), '-S', this.controlPath!, '-O', 'check', '--', this.host], { timeout: 5000 }, (err) =>
         resolve(!err)
       );
     });

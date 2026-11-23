@@ -14,7 +14,7 @@ import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 /** The part of IpcBridge this handler group may use. */
 export type K8sHost = Pick<
   IpcBridge,
-  'assignSession' | 'broadcast' | 'k8sDebugService' | 'k8sDiscoveryService' | 'k8sLogManager' | 'k8sPortForwardManager' | 'k8sProfileStore' | 'k8sTerminalManager' | 'perfMetricsService' | 'promptForPinDirect' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'sshTunnelManager' | 'teamVaultService'
+  'assignSession' | 'broadcast' | 'k8sDebugService' | 'k8sDiscoveryService' | 'k8sLogManager' | 'k8sPortForwardManager' | 'k8sProfileStore' | 'k8sTerminalManager' | 'perfMetricsService' | 'promptForPinDirect' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'sshTunnelManager' | 'teamVaultService' | 'tenantKubeConfigPath'
 > & {
   aiHub?: IpcBridge['aiHub'];
   smartcard: Pick<SmartcardCoordinator, 'prepareFido2Config' | 'prepareSmartcardConfig' | 'prepareSshCaConfig'>;
@@ -46,7 +46,8 @@ export function registerK8sHandlers(bridge: K8sHost, deps: K8sHandlerDeps = {}):
 
   /** Stores the token in the kubeconfig (shared by pasted and browser sign-in) and tells the UI to reload. */
   const completeLogin = async (options: K8sLoginOptions): Promise<K8sLoginResult> => {
-    const result = await loginWithToken(options);
+    // On a web server: the account's own kubeconfig. On the desktop it is not set, and the person's own is written.
+    const result = await loginWithToken({ ...options, kubeConfigPath: bridge.tenantKubeConfigPath });
     bridge.k8sDiscoveryService.reload();
     bridge.broadcast(IPC_CHANNELS.K8S_CONFIG_CHANGED);
     return result;

@@ -12,6 +12,7 @@ import type { S3Config } from '../../shared/types/storage';
 import type { IpcBridge } from '../IpcBridge';
 import { readSmartcardCertificates } from '../smartcard/SmartcardCertificateReader';
 import { testS3ConnectionConfig } from './connectionTestHandlers';
+import { s3ConfigRefusal } from './ipcHelpers';
 import { toTeamK8sProfile } from '../services/teamVaultK8s';
 import { withNormalizedTags } from '../../shared/tags';
 import { withNormalizedSystem } from '../../shared/system';
@@ -24,6 +25,7 @@ const teamVaultLog = createLogger('team-vault');
 export type TeamVaultHost = Pick<
   IpcBridge,
   | 'aiHub'
+  | 'confineS3Config'
   | 'buildAllTeamVaultStatuses'
   | 'buildTeamVaultStatus'
   | 'registerHandler'
@@ -485,7 +487,7 @@ export function registerTeamVaultHandlers(bridge: TeamVaultHost): void {
           config = { ...config, secretAccessKey: existingTarget.s3Config.secretAccessKey };
         }
       }
-      return testS3ConnectionConfig(config);
+      return s3ConfigRefusal(bridge, config) ?? testS3ConnectionConfig(config);
     }
   );
 

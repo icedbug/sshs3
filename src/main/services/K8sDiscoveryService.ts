@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type * as k8s from '@kubernetes/client-node';
 import { loadK8sClient } from './k8sClient';
-import { loadKubeConfigForContext, getExecAuthUserNames } from './k8sKubeConfig';
+import { loadKubeConfigForContext, getExecAuthUserNames, readKubeConfig } from './k8sKubeConfig';
 import type {
   K8sClusterNode,
   K8sContainerNode,
@@ -64,11 +64,8 @@ export class K8sDiscoveryService {
     if (this.kc) return this.kc;
     const { KubeConfig } = await loadK8sClient();
     const kc = new KubeConfig();
-    if (this.kubeConfigPath) {
-      kc.loadFromFile(this.kubeConfigPath);
-    } else {
-      kc.loadFromDefault();
-    }
+    // The file this service was given. On a web server never the server's own (see readKubeConfig).
+    readKubeConfig(kc, this.kubeConfigPath);
     this.kc = kc;
     this.checkExecAuthChange(kc);
     return kc;

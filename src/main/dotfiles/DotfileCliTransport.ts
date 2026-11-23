@@ -4,6 +4,7 @@ import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import { SmartcardDetector } from '../smartcard/SmartcardDetector';
 import type { IDotfileTransport } from './DotfileSyncService';
 import { quoteShellArg } from '../search/shellQuote';
+import { sshClientFileArgs } from '../web/tenantBoundary';
 
 // chmod mode must be a plain octal permission string (e.g. "644", "0750").
 // Dotfile pool entries can arrive from remote profile sync — a compromised
@@ -62,6 +63,7 @@ export class DotfileCliTransport implements IDotfileTransport {
     if (hasControlSocket && this.controlPath) {
       const target = this.config.username ? `${this.config.username}@${this.config.host}` : this.config.host;
       args = [
+        ...sshClientFileArgs(this.config),
         '-o',
         `ControlPath=${this.controlPath}`,
         '-o',

@@ -1,4 +1,6 @@
+import { app as electronApp } from 'electron';
 import type { HubRequest, HubSnapshot } from '../../../shared/types/aiHub';
+import { packageVersion } from '../appVersion';
 import type { McpTokenRecord, McpTokenStore } from '../McpTokenStore';
 import {
   MCP_TOOLS,
@@ -50,7 +52,16 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
   '2025-03-26',
   '2024-11-05',
 ];
-export const SERVER_INFO = { name: 'sshs3', title: "sshs3 — this team's servers", version: '1.0.0' };
+/** What this server says it is. The version is the app's own: Electron's on the desktop, the package's on a web server. */
+export function serverInfo(): { name: string; title: string; version: string } {
+  let version: string | undefined;
+  try {
+    version = electronApp?.getVersion?.();
+  } catch {
+    // No Electron app here: the package's version below.
+  }
+  return { name: 'sshs3', title: "sshs3 — this team's servers", version: version || packageVersion() };
+}
 
 /** Where a modern request carries what the handshake used to agree. */
 const META_VERSION = 'io.modelcontextprotocol/protocolVersion';
@@ -111,6 +122,11 @@ export interface McpEndpointDeps {
       }
     | undefined
   >;
+  /**
+   * Whether the account a key belongs to may still use it: there, and not turned off. Asked for every
+   * request. Without it (the desktop app, one person) every key's owner is usable.
+   */
+  ownerUsable?: (userId: string) => boolean;
   /** Switched off: the endpoint answers 404, as if it were not there. */
   enabled: () => boolean;
   /** How many calls a key may make. Its own clock, so a test can drive it. */
@@ -216,7 +232,7 @@ const describe = (token: McpTokenRecord): Record<string, unknown> => ({
   capabilities: { tools: {}, resources: {}, prompts: {} },
   instructions: SERVER_INSTRUCTIONS,
   // What this key may do, so an agent does not have to find out by being refused.
-  _meta: { [META_SERVER_INFO]: SERVER_INFO, 'io.sshs3/scopes': token.scopes },
+  _meta: { [META_SERVER_INFO]: serverInfo(), 'io.sshs3/scopes': token.scopes },
   ttlMs: LIST_TTL_MS,
   cacheScope: 'private',
 });
@@ -256,7 +272,7 @@ async function handleRpc(
       protocolVersion: version,
       // Tools, read-only KB/runbook resources, and starter/skill prompts. Never sampling.
       capabilities: { tools: {}, resources: {}, prompts: {} },
-      serverInfo: SERVER_INFO,
+      serverInfo: serverInfo(),
       instructions: SERVER_INSTRUCTIONS,
     });
   }
@@ -477,7 +493,9 @@ export async function handleMcpHttp(req: McpHttpRequest, deps: McpEndpointDeps):
 
   const auth = header(req, 'authorization');
   const raw = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
-  const token = deps.tokens.verify(raw, now);
+  const verified = deps.tokens.verify(raw, now);
+  // A key of an account that was turned off or removed is answered like a wrong key.
+  const token = verified && (deps.ownerUsable?.(verified.userId) ?? true) ? verified : undefined;
   if (!token)
     return json(
       401,

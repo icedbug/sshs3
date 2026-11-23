@@ -120,7 +120,9 @@ export function McpKeysPanel({
           name,
           scopes,
           serverId: serverId.trim() || undefined,
-          expiresInDays: expiresInDays || undefined,
+          // "Never" is said in so many words: without it the server gives a key 30 days.
+          expiresInDays,
+          neverExpires: expiresInDays === 0,
           tools: narrow && only.length ? only : undefined,
         }),
       });

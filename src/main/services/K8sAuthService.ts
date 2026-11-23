@@ -5,6 +5,7 @@ import https from 'node:https';
 import http from 'node:http';
 import { URL } from 'node:url';
 import { loadK8sClient } from './k8sClient';
+import { isWebServerProcess } from '../web/tenantBoundary';
 import type { K8sLoginOptions, K8sLoginResult } from '../../shared/types/kubernetes';
 
 /**
@@ -210,6 +211,8 @@ export async function validateClusterAndToken(options: {
  */
 export function resolveKubeConfigWritePath(explicitPath?: string, envValue = process.env.KUBECONFIG): string {
   if (explicitPath) return explicitPath;
+  // On a web server the process' kubeconfig is the server's own: a sign-in is written to an account's file or not at all.
+  if (isWebServerProcess()) throw new Error('Kubernetes was not set up for an account of this server, so the sign-in is not saved.');
   const first = (envValue ?? '').split(path.delimiter).find((p) => p.trim() !== '');
   return first ?? path.join(os.homedir(), '.kube', 'config');
 }

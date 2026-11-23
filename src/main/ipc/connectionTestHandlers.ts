@@ -10,21 +10,29 @@ import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { S3Config, SFTPConfig } from '../../shared/types/storage';
 import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 import type { IpcBridge } from '../IpcBridge';
+import { s3ConfigRefusal } from './ipcHelpers';
 
 /** The part of IpcBridge this handler group may use. */
-export type ConnectionTestHost = Pick<IpcBridge, 'promptHostKeyTrust' | 'registerHandler'> & {
+export type ConnectionTestHost = Pick<IpcBridge, 'confineS3Config' | 'confineSshConfig' | 'promptHostKeyTrust' | 'registerHandler'> & {
   smartcard: Pick<SmartcardCoordinator, 'prepareSftpSshCaConfig'>;
 };
 
 export function registerConnectionTestHandlers(bridge: ConnectionTestHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.CONNECTION_TEST_SSH,
-    async (_event, config: SSHConnectionConfig): Promise<{ success: boolean; error?: string }> => {
-      if (!config || !config.host?.trim()) {
+    async (_event, asked: SSHConnectionConfig): Promise<{ success: boolean; error?: string }> => {
+      if (!asked || !asked.host?.trim()) {
         return { success: false, error: 'Hostname / IP is required' };
       }
-      if (!config.username?.trim()) {
+      if (!asked.username?.trim()) {
         return { success: false, error: 'Username is required' };
+      }
+      // On a web server: checked as the account's own connection before any file it names is looked at.
+      let config: SSHConnectionConfig;
+      try {
+        config = bridge.confineSshConfig(asked);
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
 
       if (config.authType === 'smartcard') {
@@ -60,6 +68,7 @@ export function registerConnectionTestHandlers(bridge: ConnectionTestHost): void
 
       try {
         const port = config.port ?? 22;
+        // Confined again below: the copy lists its fields one by one, which leaves the account's ssh files behind.
         let sftpConfig: SFTPConfig = {
           id: `test-${crypto.randomUUID()}`,
           name: 'Test SSH',
@@ -76,6 +85,7 @@ export function registerConnectionTestHandlers(bridge: ConnectionTestHost): void
           proxy: config.proxy,
           useSshCa: config.useSshCa,
         };
+        sftpConfig = bridge.confineSshConfig(sftpConfig);
         if (bridge.smartcard) {
           sftpConfig = await bridge.smartcard.prepareSftpSshCaConfig(sftpConfig);
         }
@@ -100,7 +110,10 @@ export function registerConnectionTestHandlers(bridge: ConnectionTestHost): void
     }
   );
 
-  bridge.registerHandler(IPC_CHANNELS.CONNECTION_TEST_S3, async (_event, config: S3Config) => testS3ConnectionConfig(config));
+  bridge.registerHandler(
+    IPC_CHANNELS.CONNECTION_TEST_S3,
+    async (_event, config: S3Config) => s3ConfigRefusal(bridge, config) ?? testS3ConnectionConfig(config)
+  );
 }
 
 /** Shared by the generic "Test Connection" handler above and Team Vault's own test-target

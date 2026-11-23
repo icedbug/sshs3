@@ -412,7 +412,8 @@ describe('Web Security Overhaul: Heartbeat, Per-Session Routing & Backpressure',
     const tenant = await server.tenants.getOrCreateTenant(user);
 
     const largeBlob = 'S'.repeat(3 * 1024 * 1024); // > 2 MB single RPC payload
-    tenant.ipcMain.handle('test:large-snapshot', async () => ({ payload: largeBlob }));
+    // A web client reaches only listed channels, so the big answer is given by one that is on the list.
+    tenant.ipcMain.handle('app:get-version', async () => ({ payload: largeBlob }));
 
     const getTicket = async () => {
       const r = await fetch(`${baseUrl}/api/ws-ticket`, {
@@ -427,7 +428,7 @@ describe('Web Security Overhaul: Heartbeat, Per-Session Routing & Backpressure',
     const rpcReply = new Promise<any>((resolve, reject) => {
       healthyWs.onopen = () => {
         healthyWs.send(
-          JSON.stringify({ id: 'snap-1', type: 'invoke', channel: 'test:large-snapshot', args: [] }),
+          JSON.stringify({ id: 'snap-1', type: 'invoke', channel: 'app:get-version', args: [] }),
         );
       };
       healthyWs.onmessage = (ev) => {

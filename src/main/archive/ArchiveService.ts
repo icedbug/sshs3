@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { IStorageProvider } from '../../shared/types/storage';
 import { isMissingPathError } from '../ipc/ipcHelpers';
@@ -7,8 +8,10 @@ import { SFTPStorageProvider } from '../storage/SFTPStorageProvider';
 import { detectArchiveKind, stripArchiveExtension } from '../../shared/archiveNames';
 import {
   archiveExtension,
+  archiveRefusal,
   buildCompressCommand,
   buildExtractCommand,
+  buildListCommands,
   defaultArchiveBaseName,
   isAcceptedExit,
   isSafeSegment,
@@ -38,6 +41,47 @@ function execLocal(command: ArchiveCommand): Promise<void> {
       reject(new Error(stderr.trim() || summarizeExecError(err, `${command.file} failed`)));
     });
   });
+}
+
+/** What a listing command printed. An archive too big to list is one this does not unpack. */
+function listLocal(command: ArchiveCommand): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command.file, command.args, { maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      if (!err) return resolve(String(stdout));
+      reject(new Error(String(stderr).trim() || summarizeExecError(err, `${command.file} could not read the archive`)));
+    });
+  });
+}
+
+/**
+ * Removes every link under `dir` that the unpacking left there: a symbolic link, and a file that has
+ * another name outside `dir` (a hard link). The listing is checked before unpacking, so this finds
+ * nothing unless the tool unpacked something its listing did not show. Links are never followed.
+ */
+export async function removeLinksUnder(dir: string): Promise<void> {
+  const byFile = new Map<string, { names: string[]; links: number }>();
+  const walk = async (current: string): Promise<void> => {
+    for (const entry of await fsp.readdir(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        await fsp.unlink(full).catch(() => undefined);
+      } else if (entry.isDirectory()) {
+        await walk(full);
+      } else {
+        const stat = await fsp.lstat(full);
+        if (stat.nlink > 1) {
+          const key = `${stat.dev}:${stat.ino}`;
+          const seen = byFile.get(key) ?? { names: [], links: stat.nlink };
+          seen.names.push(full);
+          byFile.set(key, seen);
+        }
+      }
+    }
+  };
+  await walk(dir);
+  // Every name of the file is inside the folder: an ordinary hard link between two unpacked files.
+  for (const { names, links } of byFile.values())
+    if (names.length < links) for (const name of names) await fsp.unlink(name).catch(() => undefined);
 }
 
 function targetFor(provider: IStorageProvider): ArchiveTarget {
@@ -118,10 +162,19 @@ export async function extractArchive(provider: IStorageProvider, archivePath: st
     pathExists(provider, target.join(parent, candidate))
   );
   const destDir = target.join(parent, folderName);
+  // An account's folder on a web server: nothing that could lead out of it is unpacked into it.
+  const confined = provider instanceof LocalStorageProvider && provider.confined;
+  if (confined) {
+    const list = buildListCommands(kind, absArchive, target.platform);
+    const refusal = archiveRefusal(await listLocal(list.names), await listLocal(list.kinds));
+    if (refusal) throw new Error(refusal);
+  }
   await provider.createFolder(destDir);
   try {
     await target.run(buildExtractCommand(kind, absArchive, destDir, target.platform));
+    if (confined) await removeLinksUnder(destDir);
   } catch (err) {
+    if (confined) await removeLinksUnder(destDir).catch(() => undefined);
     // Only an empty folder is removed; anything already unpacked stays for the user to look at.
     const leftovers = await provider.list(destDir).catch(() => undefined);
     if (leftovers?.length === 0) await provider.delete(destDir, true).catch(() => undefined);

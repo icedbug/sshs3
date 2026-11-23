@@ -1,6 +1,24 @@
 import { getBaseName, joinPaths } from '../transfer/TransferPipeline';
-import type { StorageType } from '../../shared/types/storage';
+import type { S3Config, StorageType } from '../../shared/types/storage';
 import type { K8sProfile, K8sWebLoginOptions } from '../../shared/types/kubernetes';
+import type { IpcBridge } from '../IpcBridge';
+
+/**
+ * On a web server: why this S3 connection is not tried for the account (it would read the server's own
+ * files, see IpcBridge.confineS3Config), as a test result. Nothing on the desktop, and nothing when it may be tried.
+ */
+export function s3ConfigRefusal(
+  bridge: Partial<Pick<IpcBridge, 'confineS3Config'>>,
+  config: S3Config
+): { success: false; error: string } | undefined {
+  if (!config || typeof config !== 'object') return undefined;
+  try {
+    bridge.confineS3Config?.(config);
+    return undefined;
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 /** True when any leaf pane of a saved session's pane tree uses the given auth type. */
 export function paneTreeHasAuthType(node: unknown, authType: string): boolean {

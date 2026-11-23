@@ -38,6 +38,8 @@ import { DirectorySyncProfileStore } from '../dirsync/DirectorySyncProfileStore'
 import { SyncConfigStore } from '../services/SyncConfigStore';
 import { TeamVaultConfigStore } from '../services/TeamVaultConfigStore';
 import { TeamVaultService } from '../services/TeamVaultService';
+import { setWebServerProcess } from './tenantBoundary';
+import { WEB_ALLOWED_CHANNELS, WEB_CHANNEL_REFUSED, WEB_FIXED_ANSWERS } from './webIpcChannels';
 import {
   ensureKeyPairAt,
   evaluatePeerApproval,
@@ -99,6 +101,11 @@ export class VirtualIpcMain extends EventEmitter {
 
   removeHandler(channel: string): void {
     this.handlers.delete(channel);
+  }
+
+  /** Every channel a handler is registered for. */
+  channels(): string[] {
+    return [...this.handlers.keys()];
   }
 
   async invoke(channel: string, ...args: unknown[]): Promise<unknown> {
@@ -369,6 +376,8 @@ export class WebTenantManager {
     /** The server's accounts, as far as deciding who may approve for whom needs them. */
     private readonly accounts?: () => PeerAccount[],
   ) {
+    // From here on ssh and Kubernetes work only with an account's own files, never the server's (tenantBoundary.ts).
+    setWebServerProcess(true);
     this.sharedDir = path.join(baseDataDir, 'shared-workspace');
     this.teamBoard = new FileQueueStore(path.join(this.sharedDir, 'board'));
     this.teamChat = new ChatBridge(path.join(baseDataDir, 'team-chat'), {
@@ -1036,6 +1045,12 @@ export class WebTenantManager {
       channel: string,
       ...args: unknown[]
     ): Promise<unknown> => {
+      // Only what is on the list reaches a handler: the handlers were written for the person who owns
+      // the machine, and a web client is one account among several (webIpcChannels.ts).
+      if (typeof channel !== 'string') throw new Error(WEB_CHANNEL_REFUSED);
+      const fixed = WEB_FIXED_ANSWERS.get(channel);
+      if (fixed) return fixed();
+      if (!WEB_ALLOWED_CHANNELS.has(channel)) throw new Error(WEB_CHANNEL_REFUSED);
       const sender = clientMap.get(clientId)?.sender ?? null;
       const result = await virtualIpcMain.invokeWithSender(sender, channel, ...args);
       if (
@@ -1361,8 +1376,13 @@ export class WebTenantManager {
     });
   }
 
-  async disposeTenant(userId: string): Promise<void> {
-    // The chat agent is the server's own: it is stopped with the server, never removed with an account.
+  /**
+   * Stops what runs for an account (its hub with its schedules and runs, its terminals, its
+   * connections) and keeps everything it has. For an account that was turned off: it starts again,
+   * as it was, when the account is turned on and signs in.
+   */
+  async stopTenant(userId: string): Promise<void> {
+    // The chat agent is the server's own: it is stopped with the server, never with an account.
     if (userId.startsWith(SERVICE_ACCOUNT_PREFIX)) return;
     const pending = this.tenants.get(userId);
     const resolved =
@@ -1383,6 +1403,12 @@ export class WebTenantManager {
       await resolved.hub.dispose().catch(() => {});
       await resolved.bridge.dispose().catch(() => {});
     }
+  }
+
+  async disposeTenant(userId: string): Promise<void> {
+    // The chat agent is the server's own: it is stopped with the server, never removed with an account.
+    if (userId.startsWith(SERVICE_ACCOUNT_PREFIX)) return;
+    await this.stopTenant(userId);
     const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '');
     if (safeId) {
       const userDir = path.join(this.baseDataDir, 'users', safeId);

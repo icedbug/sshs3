@@ -11,7 +11,7 @@ import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 /** The part of IpcBridge this handler group may use. */
 export type AppDataHost = Pick<
   IpcBridge,
-  'clipboardHistoryStore' | 'listWindows' | 'moveTab' | 'openWindow' | 'profileSyncService' | 'takeHandoff' | 'windowKeyOf' | 'registerHandler' | 'scheduleAutoSync' | 'sessionStore' | 'settingsStore' | 'snippetStore'
+  'clipboardHistoryStore' | 'listWindows' | 'moveTab' | 'openWindow' | 'profileSyncService' | 'takeHandoff' | 'windowKeyOf' | 'registerHandler' | 'scheduleAutoSync' | 'sessionStore' | 'settingsStore' | 'snippetStore' | 'tenantHomeDir'
 > & {
   smartcard: Pick<SmartcardCoordinator, 'refreshAgentSshConfig'>;
 };
@@ -133,7 +133,8 @@ export function registerSettingsHandlers(bridge: AppDataHost): void {
     IPC_CHANNELS.SETTINGS_SAVE,
     async (_event, settings: Partial<AppSettings>): Promise<AppSettings> => {
       const saved = await bridge.settingsStore.saveSettings(settings);
-      if ('logLevel' in settings) setLogLevel(resolveLogLevel(saved.logLevel));
+      // The log is the whole process' own: on a web server one account's setting does not change it for everybody.
+      if ('logLevel' in settings && !bridge.tenantHomeDir) setLogLevel(resolveLogLevel(saved.logLevel));
       // autoSync refreshes the agent block itself afterwards (and removes it when turned off). A demo
       // instance never rewrites the real ~/.ssh/config from its own demo profiles.
       if ('autoSyncLocalSshConfig' in settings) {

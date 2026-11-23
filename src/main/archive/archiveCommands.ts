@@ -92,6 +92,42 @@ export function buildExtractCommand(
   return { file: 'tar', args: ['-xf', archivePath, '-C', destDir, '--no-same-owner'] };
 }
 
+/**
+ * The two listings a web server reads before it unpacks an archive into an account's folder: the member
+ * names, one per line, and the long listing whose lines start with the member's kind, as `ls -l` does.
+ */
+export function buildListCommands(kind: ArchiveKind, archivePath: string, platform: NodeJS.Platform): { names: ArchiveCommand; kinds: ArchiveCommand } {
+  if (kind === 'zip' && platform !== 'win32' && platform !== 'darwin') {
+    return {
+      names: { file: 'unzip', args: ['-Z', '-1', archivePath] },
+      kinds: { file: 'unzip', args: ['-Z', archivePath] },
+    };
+  }
+  return { names: { file: 'tar', args: ['-tf', archivePath] }, kinds: { file: 'tar', args: ['-tvf', archivePath] } };
+}
+
+/**
+ * Why an archive with these listings is not unpacked into an account's folder, or nothing when it may be.
+ * A symbolic link in it could point anywhere on the server, a hard link gives a second name to a file
+ * the account cannot otherwise reach, and a name that climbs with `..` or starts at the root lands
+ * outside the folder. A line of the long listing starts with the member's kind: `l` is a symbolic link
+ * and `h` a hard link, for GNU tar, bsdtar and zipinfo alike. A member name cannot change the first
+ * letter of its own line, so a name that looks like a listing line only makes this stricter.
+ */
+export function archiveRefusal(names: string, kinds: string): string | undefined {
+  for (const line of kinds.split(/\r?\n/)) {
+    if (line.startsWith('l') && /^l[rwxsStT-]{9}/.test(line)) return 'This archive holds a link to another place. An archive with links is not unpacked on the sshs3 web server.';
+    if (line.startsWith('h') && /^h[rwxsStT-]{9}/.test(line)) return 'This archive holds a hard link. An archive with links is not unpacked on the sshs3 web server.';
+  }
+  for (const name of names.split(/\r?\n/)) {
+    if (!name) continue;
+    if (name.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(name) || name.split(/[\\/]/).includes('..')) {
+      return 'This archive holds a file that would be unpacked outside its folder. It is not unpacked on the sshs3 web server.';
+    }
+  }
+  return undefined;
+}
+
 /** One POSIX shell line for a remote `ssh host <line>` invocation: `cd <cwd> && prog 'arg' ...`. */
 export function toShellCommand(command: ArchiveCommand): string {
   const run = [command.file, ...command.args.map(quoteShellArg)].join(' ');

@@ -940,7 +940,11 @@ is off until switched on in Settings, and it answers nothing without one of that
 person's keys. In the web app, Settings and the account dialog both show the
 server's `/api/mcp` address, setup snippets for Claude Code and Cursor, and
 personal key management. A key is shown once, acts as them, and can be taken
-back. A request that carries an `Origin` header is refused before the key is
+back. A key stops working after 30 days unless another time is chosen when it
+is made. It works for ever only when the request says so (`neverExpires`, or
+"Never" in Settings, which sends 0 days); a request that leaves the time out
+gets 30 days, also when the assistant makes the key (`create_mcp_key`). A
+request that carries an `Origin` header is refused before the key is
 read, which is what keeps a web page on the same machine from reaching it.
 
 A key says what it may do: read, write tickets, or ask for a command on one

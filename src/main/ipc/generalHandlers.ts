@@ -10,7 +10,7 @@ import type { IpcBridge } from '../IpcBridge';
 import { elevatedShellExecutable, elevatedStartCommand, isUacDeclined } from './elevatedShell';
 
 /** The part of IpcBridge this handler group may use. */
-export type GeneralHost = Pick<IpcBridge, 'getUpdateService' | 'registerHandler' | 'profileStore' | 'tenantHomeDir'>;
+export type GeneralHost = Pick<IpcBridge, 'getUpdateService' | 'registerHandler' | 'profileStore' | 'localFilesDir'>;
 
 const execFileAsync = promisify(execFile);
 
@@ -37,7 +37,8 @@ export function registerGeneralHandlers(bridge: GeneralHost): void {
   });
 
   bridge.registerHandler(IPC_CHANNELS.APP_GET_HOMEDIR, async () => {
-    return bridge.tenantHomeDir || os.homedir();
+    // On a web server "home" is the one folder the account's local files are in, so the file pane opens there.
+    return bridge.localFilesDir || os.homedir();
   });
 
   bridge.registerHandler(IPC_CHANNELS.APP_GET_PLATFORM, async () => {

@@ -388,6 +388,8 @@ export class McpPart {
           scopes: (request.scopes ?? []).filter((x): x is "read" | "tickets" | "run" => ["read", "tickets", "run"].includes(x)),
           serverId: request.serverId,
           expiresInDays: request.expiresInDays,
+          // Never only when the request says so: the field for it, or 0 days, which is what "Never" in the settings sends.
+          neverExpires: request.neverExpires === true || request.expiresInDays === 0,
           tools: request.tools,
         });
         // The only time the key itself leaves this process.

@@ -126,6 +126,28 @@ interface WebSessionRecord {
 
 const sessionHash = (token: string): string => crypto.createHash('sha256').update(token).digest('hex');
 
+/**
+ * Sign-ins of an account that ended: one of them (signing out), all but one (a new password, which
+ * keeps the sign-in it was changed from), or all (turned off, removed). `only` and `except` are the
+ * keys of sessions (WebAuthService.sessionKey), never the tokens.
+ */
+export interface SessionsEnded {
+  userId: string;
+  only?: string;
+  except?: string;
+}
+
+/** The limiter's answer. `first` is true once per address or account and minute: when it starts refusing. */
+export class TooManySignInAttempts extends Error {
+  constructor(readonly first: boolean) {
+    super('Too many sign-in attempts. Wait a minute and try again.');
+    this.name = 'TooManySignInAttempts';
+  }
+}
+
+/** A salt for the password work done for a name that has no account, so both cases take as long. */
+const NO_ACCOUNT_SALT = '00'.repeat(16);
+
 interface StoredAuthData {
   version: 1;
   users: WebUserRecord[];
@@ -525,7 +547,10 @@ export class WebAuthService {
   };
   private initialized = false;
   private writeQueue: Promise<void> = Promise.resolve();
-  private loginAttempts = new Map<string, { count: number; resetAt: number }>();
+  private loginAttempts = new Map<string, { count: number; resetAt: number; refusing?: boolean }>();
+  /** When the failed attempts are next looked through for ones that have run out. */
+  private attemptsSweepAt = 0;
+  private sessionsEndedListener?: (ended: SessionsEnded) => void;
 
   constructor(private readonly baseDataDir: string) {
     this.authFilePath = path.join(baseDataDir, 'web-users.json');
@@ -596,6 +621,42 @@ export class WebAuthService {
 
   hasAnyUsers(): boolean {
     return this.data.users.length > 0;
+  }
+
+  /**
+   * Whoever holds connections that were opened with a sign-in is told here when sign-ins end, so that
+   * they are closed with it: a WebSocket is checked when it is opened and would otherwise stay open.
+   */
+  onSessionsEnded(listener: (ended: SessionsEnded) => void): void {
+    this.sessionsEndedListener = listener;
+  }
+
+  private sessionsEnded(ended: SessionsEnded): void {
+    try {
+      this.sessionsEndedListener?.(ended);
+    } catch {
+      // Closing connections must never undo the sign-out that caused it.
+    }
+  }
+
+  /** What a session is known by here: the hash of its token. Nothing can be signed in with it. */
+  sessionKey(token?: string | null): string | undefined {
+    return token ? sessionHash(token) : undefined;
+  }
+
+  /** Whether the session with this key still holds: it exists, has not run out, and its account is there and on. */
+  isSessionActive(key: string | undefined): boolean {
+    if (!key) return false;
+    const now = Date.now();
+    const session = this.data.sessions.find((s) => s.hash === key && s.expiresAt > now);
+    if (!session) return false;
+    const user = this.data.users.find((u) => u.id === session.userId);
+    return Boolean(user && !user.disabled);
+  }
+
+  /** How many addresses and accounts have failed attempts counted against them right now. */
+  countedSignInAttempts(): number {
+    return this.loginAttempts.size;
   }
 
   /** How many accounts this server has. */
@@ -796,14 +857,25 @@ export class WebAuthService {
     // Per caller and per account: behind a proxy every caller is the proxy, and a guesser who spreads
     // over many addresses still meets the account's own limit.
     const accountKey = `account:${username}`;
+    // Counts that have run out are forgotten, at most once a minute: every address that ever failed
+    // would otherwise stay in memory until the server stops.
+    if (now >= this.attemptsSweepAt) {
+      this.attemptsSweepAt = now + 60_000;
+      for (const [key, rate] of this.loginAttempts) if (rate.resetAt <= now) this.loginAttempts.delete(key);
+    }
     for (const key of [clientIp, accountKey]) {
       const rate = this.loginAttempts.get(key);
-      if (rate && rate.resetAt > now && rate.count >= (key === accountKey ? 10 : 30))
-        throw new Error('Too many sign-in attempts. Wait a minute and try again.');
+      if (rate && rate.resetAt > now && rate.count >= (key === accountKey ? 10 : 30)) {
+        const first = !rate.refusing;
+        rate.refusing = true;
+        throw new TooManySignInAttempts(first);
+      }
     }
 
     const user = this.data.users.find((u) => u.username === username);
     if (!user || !user.passwordHash || !user.passwordSalt) {
+      // The same password work as for a name that has an account: how long the answer takes says nothing about which names exist.
+      hashPassword(passwordInput, NO_ACCOUNT_SALT);
       this.recordFailedAttempt(clientIp, now);
       throw new Error('Wrong user name or password');
     }
@@ -871,6 +943,7 @@ export class WebAuthService {
     const before = this.data.sessions.length;
     this.data.sessions = this.data.sessions.filter((s) => s.userId !== userId);
     const removed = before - this.data.sessions.length;
+    this.sessionsEnded({ userId });
     if (removed > 0) {
       await this.save();
     }
@@ -970,6 +1043,7 @@ export class WebAuthService {
     const before = this.data.sessions.length;
     this.data.sessions = this.data.sessions.filter((s) => s.userId !== user.id);
     const revokedSessions = before - this.data.sessions.length;
+    this.sessionsEnded({ userId: user.id });
     await this.save();
     return { deprovisioned: true, userId: user.id, revokedSessions };
   }
@@ -987,7 +1061,9 @@ export class WebAuthService {
     if (!token) return;
     const before = this.data.sessions.length;
     const hash = sessionHash(token);
+    const ended = this.data.sessions.find((s) => s.hash === hash);
     this.data.sessions = this.data.sessions.filter((s) => s.hash !== hash);
+    if (ended) this.sessionsEnded({ userId: ended.userId, only: hash });
     if (this.data.sessions.length !== before) {
       await this.save();
     }
@@ -1029,6 +1105,7 @@ export class WebAuthService {
     this.data.sessions = this.data.sessions.filter(
       (s) => s.userId !== targetUserId,
     );
+    this.sessionsEnded({ userId: targetUserId });
     await this.save();
   }
 
@@ -1094,6 +1171,7 @@ export class WebAuthService {
     // A new password ends every other sign-in: whoever had the old one is out, not for another 30 days.
     const keep = keepSessionToken ? sessionHash(keepSessionToken) : undefined;
     this.data.sessions = this.data.sessions.filter((s) => s.userId !== userId || s.hash === keep);
+    this.sessionsEnded(keep ? { userId, except: keep } : { userId });
     await this.save();
   }
 
@@ -1115,13 +1193,23 @@ export class WebAuthService {
       throw new Error('The invite link is not valid, or has expired');
     }
 
-    const user = await this.createUserInternal({
-      username: input.username,
-      password: input.password,
-      displayName: input.displayName,
-      role: invite.role,
-    });
+    // The use is taken now, before anything is waited for: several requests with the same invite at
+    // once each find it with the uses that are really left. It is given back when no account was made.
     invite.usedCount += 1;
+    let user: WebUserRecord;
+    try {
+      user = await this.createUserInternal({
+        username: input.username,
+        password: input.password,
+        displayName: input.displayName,
+        role: invite.role,
+      });
+    } catch (error) {
+      // When in doubt the use stays taken: an invite makes too few accounts rather than too many.
+      const wanted = input.username.trim().toLowerCase();
+      if (!this.data.users.some((u) => u.username === wanted && u.createdAt >= now)) invite.usedCount -= 1;
+      throw error;
+    }
     await this.save();
 
     const sessionToken = await this.createSession(user.id);

@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import net from 'node:net';
 import * as AgentRegistry from './AgentRegistry';
+import { isWebServerProcess } from '../web/tenantBoundary';
 
 const execFileAsync = promisify(execFile);
 
@@ -436,7 +437,9 @@ export class AgentLifecycleManager {
       },
       onOrphanSshMux: async (controlPath, host) => {
         try {
-          if (fs.existsSync(controlPath)) {
+          // On a web server nobody knows which account a left-over socket was: it is only removed (below),
+          // and its ssh ends on its own when ControlPersist runs out.
+          if (fs.existsSync(controlPath) && !isWebServerProcess()) {
             await new Promise<void>((resolve) => {
               const sshBinary = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
               execFile(sshBinary, ['-S', controlPath, '-O', 'exit', '--', host || 'dummy'], { timeout: 3000 }, () => resolve());

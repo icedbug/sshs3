@@ -78,10 +78,12 @@ function run(binary: string, args: string[], stdin?: string): Promise<string> {
  * known_hosts: scans the host's keys directly and compares fingerprints. Null when the key is unchanged
  * or cannot be checked (unreachable host, jump host or proxy in between).
  */
-export async function probeChangedHostKey(host: string, port: number): Promise<HostKeyChangedInfo | null> {
+export async function probeChangedHostKey(host: string, port: number, knownHostsFile?: string): Promise<HostKeyChangedInfo | null> {
   try {
     assertSafeHost(host);
-    const known = parseKeygenFingerprints(await run(keygenBinary(), ['-F', knownHostsPattern(host, port), '-l']));
+    const known = parseKeygenFingerprints(
+      await run(keygenBinary(), ['-F', knownHostsPattern(host, port), '-l', ...knownHostsFileArgs(knownHostsFile)])
+    );
     if (known.size === 0) return null;
     const scannedKeys = await run(keyscanBinary(), ['-T', '5', '-p', String(port), '--', host]);
     const scanned = parseKeygenFingerprints(await run(keygenBinary(), ['-l', '-f', '-'], scannedKeys));
@@ -92,17 +94,24 @@ export async function probeChangedHostKey(host: string, port: number): Promise<H
 }
 
 /** Removes every known_hosts entry for the host (`ssh-keygen -R`), so the next connection asks about the new key. */
-export async function removeKnownHost(host: string, port: number): Promise<void> {
+export async function removeKnownHost(host: string, port: number, knownHostsFile?: string): Promise<void> {
   assertSafeHost(host);
-  await run(keygenBinary(), ['-R', knownHostsPattern(host, port)]);
+  await run(keygenBinary(), ['-R', knownHostsPattern(host, port), ...knownHostsFileArgs(knownHostsFile)]);
+}
+
+/** `-f <file>` for ssh-keygen: one account's known hosts on a web server. Without it, the person's own `~/.ssh/known_hosts`. */
+function knownHostsFileArgs(knownHostsFile?: string): string[] {
+  return knownHostsFile ? ['-f', knownHostsFile] : [];
 }
 
 export interface HostKeyChangedDeps {
   promptHostKeyTrust: (info: HostKeyPromptInfo) => Promise<boolean>;
   /** Writes a notice into the session's terminal. */
   notify: (message: string) => void;
-  probeChangedHostKey?: (host: string, port: number) => Promise<HostKeyChangedInfo | null>;
-  removeKnownHost?: (host: string, port: number) => Promise<void>;
+  probeChangedHostKey?: (host: string, port: number, knownHostsFile?: string) => Promise<HostKeyChangedInfo | null>;
+  removeKnownHost?: (host: string, port: number, knownHostsFile?: string) => Promise<void>;
+  /** Web server only: the account's own known hosts file. */
+  knownHostsFile?: string;
 }
 
 /**
@@ -113,7 +122,9 @@ export async function handleHostKeyChanged(
   target: { host: string; port: number },
   deps: HostKeyChangedDeps
 ): Promise<boolean> {
-  const changed = await (deps.probeChangedHostKey ?? probeChangedHostKey)(target.host, target.port);
+  // Only on a web server is a file named; the desktop app asks about the person's own known hosts as before.
+  const ownFile: [string] | [] = deps.knownHostsFile ? [deps.knownHostsFile] : [];
+  const changed = await (deps.probeChangedHostKey ?? probeChangedHostKey)(target.host, target.port, ...ownFile);
   if (!changed) {
     deps.notify(
       `\r\n\x1b[33m[sshs3: could not confirm the key change independently. ` +
@@ -130,7 +141,7 @@ export async function handleHostKeyChanged(
   });
   if (!replace) return false;
   try {
-    await (deps.removeKnownHost ?? removeKnownHost)(target.host, target.port);
+    await (deps.removeKnownHost ?? removeKnownHost)(target.host, target.port, ...ownFile);
   } catch (err) {
     deps.notify(`\r\n\x1b[31m[sshs3: could not remove the old host key: ${(err as Error).message}]\x1b[0m\r\n`);
     return false;

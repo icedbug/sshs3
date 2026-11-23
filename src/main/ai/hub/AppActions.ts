@@ -302,6 +302,8 @@ function scrubK8sValue(value: unknown, depth = 0): unknown {
 
 async function handleK8sInspect(
   p: Record<string, unknown>,
+  /** On a web server: the account's own kubeconfig, used whatever the request says. */
+  accountKubeConfigPath?: string,
 ): Promise<Record<string, unknown>> {
   const op = only(rawOperation(p, "cluster_triage"), [
     "cluster_triage",
@@ -309,7 +311,7 @@ async function handleK8sInspect(
     "pod_logs",
     "pod_metrics",
   ]);
-  const kubeConfigPath = optStr(p, "kubeConfigPath");
+  const kubeConfigPath = accountKubeConfigPath ?? optStr(p, "kubeConfigPath");
   const discovery = new K8sDiscoveryService(kubeConfigPath);
   let requestedContext = optStr(p, "context") || optStr(p, "contextName");
   if (!requestedContext) {
@@ -2444,7 +2446,7 @@ export async function handleAppAction(
 
       case "sshs3_k8s_inspect": {
         if (hub.chatFence(task)) throw new Error("A run asked for from chat does not reach Kubernetes clusters.");
-        return await handleK8sInspect(p);
+        return await handleK8sInspect(p, hub.host.accountKubeConfigPath);
       }
 
       case "file_patch":

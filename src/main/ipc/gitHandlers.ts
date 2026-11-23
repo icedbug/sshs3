@@ -14,10 +14,17 @@ const DISABLED_BY_POLICY = 'Disabled by your administrator.';
 /** The part of IpcBridge this handler group may use. */
 export type GitHost = Pick<
   IpcBridge,
-  'dotfilePoolStore' | 'policy' | 'profileStore' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'storageRegistry'
+  'dotfilePoolStore' | 'policy' | 'profileStore' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'storageRegistry' | 'tenantHomeDir'
 >;
 
+/** What a web server answers when git is asked to run on the server's own disk. */
+const NO_GIT_ON_SERVER = 'Git runs on your own servers here, not on the sshs3 server itself.';
+
 export function registerGitHandlers(bridge: GitHost): void {
+  // On a web server "local" is the server's own disk, where git would run as the server's user in any
+  // folder a client names. Only a connected server of the account's own is a place for git there.
+  const onServerItself = (providerId?: string): boolean => Boolean(bridge.tenantHomeDir) && (!providerId || providerId === 'local');
+
   bridge.registerHandler(
     IPC_CHANNELS.GIT_FETCH_PUBLIC_KEYS,
     async (_event, request: FetchGitKeysRequest): Promise<FetchGitKeysResult> => {
@@ -52,6 +59,8 @@ export function registerGitHandlers(bridge: GitHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.GIT_GET_STATUS,
     async (_event, directoryPath: string, providerId?: string): Promise<GitRepoStatus> => {
+      // Asked for every folder the file pane shows, so this is an answer, not an error.
+      if (onServerItself(providerId)) return { isRepo: false };
       return await GitStatusService.getStatus(directoryPath, providerId, bridge.storageRegistry);
     }
   );
@@ -59,6 +68,7 @@ export function registerGitHandlers(bridge: GitHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.GIT_CLONE,
     async (_event, request: GitCloneRequest): Promise<GitOperationResult> => {
+      if (onServerItself(request?.providerId)) return { success: false, error: NO_GIT_ON_SERVER };
       if (request.sftpConfig) {
         const config = await bridge.restoreSavedSecrets(request.sftpConfig);
         request.sftpConfig = await bridge.resolveProxyJumpConfig(config);
@@ -70,6 +80,7 @@ export function registerGitHandlers(bridge: GitHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.GIT_PULL,
     async (_event, directoryPath: string, providerId?: string): Promise<GitOperationResult> => {
+      if (onServerItself(providerId)) return { success: false, error: NO_GIT_ON_SERVER };
       // Remote panes are identified by `sftp-<profileId>`. The connection is resolved from the saved
       // profile here, never taken from the renderer.
       let sftpConfig: SSHConnectionConfig | undefined;

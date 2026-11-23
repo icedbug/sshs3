@@ -20,6 +20,7 @@ import type {
   WriteStreamOptions,
 } from '../../shared/types/storage';
 import { defineTargetSettled, defineTargetTouched } from './targetTouched';
+import { isInside } from '../web/tenantBoundary';
 
 const execFileAsync = promisify(execFile);
 
@@ -27,6 +28,12 @@ export interface LocalStorageProviderOptions {
   id?: string;
   name?: string;
   basePath?: string;
+  /**
+   * Web server only: `basePath` is one account's folder, and nothing outside it may be reached. Every
+   * path is then followed through links before it is used, the home folder is the base folder, and the
+   * server's disks are not listed.
+   */
+  confined?: boolean;
 }
 
 /**
@@ -198,9 +205,12 @@ export class LocalStorageProvider extends BaseStorageProvider {
   readonly name: string;
   readonly type: StorageType = 'local';
   readonly basePath?: string;
+  /** See LocalStorageProviderOptions.confined. */
+  readonly confined: boolean;
 
   constructor(options?: LocalStorageProviderOptions | string, name?: string) {
     super();
+    this.confined = typeof options === 'object' && options !== null && options.confined === true && !!options.basePath;
     if (typeof options === 'object' && options !== null) {
       this.id = options.id ?? 'local';
       this.name = options.name ?? 'Local Storage';
@@ -228,6 +238,11 @@ export class LocalStorageProvider extends BaseStorageProvider {
     if (this.basePath) {
       const withSep = this.basePath.endsWith(path.sep) ? this.basePath : this.basePath + path.sep;
       if (resolved !== this.basePath && !resolved.startsWith(withSep)) {
+        throw new Error(`Path is outside the allowed base directory: ${remotePath}`);
+      }
+      // The check above reads the path as text. A link inside the folder (unpacked from an archive, say)
+      // can still lead out of it, so on a web server the path is followed to where it really is.
+      if (this.confined && !isInside(this.basePath, resolved)) {
         throw new Error(`Path is outside the allowed base directory: ${remotePath}`);
       }
     }
@@ -278,6 +293,8 @@ export class LocalStorageProvider extends BaseStorageProvider {
         const isSymlink = entry.isSymbolicLink();
 
         try {
+          // On a web server a link is listed as a link and never followed: what it points at may be outside.
+          if (this.confined && isSymlink) throw new Error('A link is not followed here');
           const itemStats = await fsp.stat(entryFullPath);
           const isDir = itemStats.isDirectory();
           results[index] = {
@@ -486,7 +503,8 @@ export class LocalStorageProvider extends BaseStorageProvider {
   }
 
   async getHomeDir(): Promise<string> {
-    return os.homedir();
+    // The account's own folder, never the server user's home.
+    return this.confined && this.basePath ? this.basePath : os.homedir();
   }
 
   async getSpace(remotePath: string): Promise<SpaceInfo | undefined> {
@@ -495,6 +513,8 @@ export class LocalStorageProvider extends BaseStorageProvider {
 
   /** Windows drive letters, or real mounted filesystems on Linux/macOS, each with free/total space. */
   async listVolumes(): Promise<VolumeInfo[]> {
+    // The server's disks and mounts are the server's business.
+    if (this.confined) return [];
     if (process.platform === 'win32') {
       return listWindowsVolumes();
     }

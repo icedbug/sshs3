@@ -134,11 +134,12 @@ describe('web tenant: one window per person, replies to the client that asked', 
     expect(onDisk.windows ?? []).toEqual([]);
 
     // Search results, dir-sync progress, file tail ...: sent with bridge.sendToSender(event.sender, ...).
-    tenant.ipcMain.handle('test:reply', async (event: unknown) => {
+    // A web client reaches only listed channels, so the test's handler takes the place of one that is on the list.
+    tenant.ipcMain.handle('app:get-hostname', async (event: unknown) => {
       const sender = (event as { sender: Electron.WebContents }).sender;
       return tenant.bridge.sendToSender(sender, 'search:result', { hit: 1 });
     });
-    await expect(tenant.invokeFromClient(c2.id, 'test:reply')).resolves.toBe(true);
+    await expect(tenant.invokeFromClient(c2.id, 'app:get-hostname')).resolves.toBe(true);
     expect(c2.received).toContainEqual({ channel: 'search:result', args: [{ hit: 1 }] });
     expect(c3.received.some((e) => e.channel === 'search:result')).toBe(false);
   });
@@ -183,7 +184,8 @@ describe('web server: frames are classified by their own type', () => {
     // The answer is sent right behind a burst of output: the socket is backed up when it goes out.
     // How much the operating system's own buffers take first differs from machine to machine (megabytes,
     // with large TCP buffers), so output is sent until the server itself is holding some and drops it.
-    tenant.ipcMain.handle('test:echo', async () => {
+    // A web client reaches only listed channels, so the test's handler takes the place of one that is on the list.
+    tenant.ipcMain.handle('app:get-hostname', async () => {
       for (let i = 0; i < 2000 && server.getWsStats().totalDroppedStreamFrames === 0; i++)
         tenant.sendToSession('sess-flood', 'terminal:data', 'sess-flood', chunk);
       // e.g. a recorded event in a result: its JSON contains "channel":"terminal:data" verbatim.
@@ -194,7 +196,7 @@ describe('web server: frames are classified by their own type', () => {
     sock.pause();
     sock.write(maskedTextFrame(JSON.stringify({ type: 'subscribe', sessionId: 'sess-flood' })));
     await new Promise((r) => setTimeout(r, 30));
-    sock.write(maskedTextFrame(JSON.stringify({ id: 'rpc-echo-1', type: 'invoke', channel: 'test:echo', args: [] })));
+    sock.write(maskedTextFrame(JSON.stringify({ id: 'rpc-echo-1', type: 'invoke', channel: 'app:get-hostname', args: [] })));
     await vi.waitFor(() => expect(server.getWsStats().totalDroppedStreamFrames).toBeGreaterThan(0));
     await new Promise((r) => setTimeout(r, 60));
     const chunks: Buffer[] = [];

@@ -31,9 +31,10 @@ visits.
 | `SSHS3_WORKFORCE=1` | Start every user's hub at server start. |
 | `SSHS3_DATA_DIR` | Where users, settings and history are kept. Mount a volume. |
 | `SSHS3_ADMIN_USER`, `SSHS3_ADMIN_PASSWORD` | Create the first user at start instead of in the browser. |
-| `SSHS3_MASTER_KEY` | Encrypts stored credentials. Unset, a key is generated in the data directory. |
+| `SSHS3_MASTER_KEY` | A passphrase that encrypts stored credentials. Unset, a key is generated in the data directory. See [The credential key](#the-credential-key). |
 | `SSHS3_WEB_PORT`, `SSHS3_WEB_HOST` | Where it listens. |
-| `SSHS3_PUBLIC_URL` | The address people reach the server at, for links in notifications and in chat. See [Notifications](#notifications-and-answering-from-a-phone) and [The team's chat](#the-teams-chat). |
+| `SSHS3_PUBLIC_URL` | The address people reach the server at, for links in notifications and in chat. It also counts as the server's own page when a request is checked (see [Behind a reverse proxy](#behind-a-reverse-proxy)). See [Notifications](#notifications-and-answering-from-a-phone) and [The team's chat](#the-teams-chat). |
+| `SSHS3_ALLOWED_ORIGINS` | More addresses the page may be opened from, separated by commas, each with its scheme (`https://sshs3.example.com`). |
 | `SSHS3_MATTERMOST_ACTION_FROM` | The IP addresses Mattermost's server posts button presses from, exactly as this server sees them, separated by commas. Host names and ranges are not matched. See [The team's chat](#the-teams-chat). |
 
 Put it behind TLS and do not expose it to the internet as it is: it holds
@@ -232,6 +233,12 @@ server you name when you make it. What that is held to:
 A key acts as the person who made it and sees exactly what they see. It is
 kept as a hash, so it cannot be read back; "Take it back" stops it at once.
 
+A key stops working after 30 days unless you choose another time when you make
+it. It works for ever only when "Never" is chosen (the request then says
+`neverExpires: true`); leaving the time out gives 30 days. The same holds for a
+key the app's own assistant makes for you. A key also stops working while its
+owner's account is turned off, and for good when the account is removed.
+
 What the endpoint does and does not do:
 
 - It takes the key in the `Authorization` header and nothing else. A session
@@ -251,14 +258,114 @@ Checked against both official MCP clients over real HTTP. Not checked: Claude
 Code, Cursor and Codex themselves, and the newer protocol against anything but
 the SDK that implements it.
 
+## Accounts are kept apart
+
+One server process serves every account, so the server's own files and the
+other accounts' files are on the same disk. What a signed-in person can reach:
+
+- **Their own folder, and nothing else of the server's disk.** "Local files"
+  in the file manager is the folder `users/<account>/files` in the data
+  directory. A path is followed through every link before it is used, and one
+  that ends outside the folder is refused. An archive that holds a symbolic
+  link, a hard link, or a name that leaves its folder (`..`, a path from the
+  root) is not unpacked there. Git does not run on the server's own disk, only
+  on a server the person connected to.
+- **Only what the web page is meant to call.** The page and the desktop app
+  share their handlers. A web client reaches the ones on a list
+  (`src/main/web/webIpcChannels.ts`); the rest answer "This is not available
+  on the sshs3 web server." Not available in the browser: reading local files
+  into a dotfile pool by path, importing the server user's `~/.ssh/config`,
+  git signing settings, the server's own log, smartcards and security keys,
+  AWS SSO sign-in, sign-in to a certificate authority or to OpenShift through
+  a browser on the server, SSH tunnels and Kubernetes port forwards (they
+  would listen on the server), opening a Team Vault with a smartcard (the
+  recovery key works), and updating the app.
+- **Their own SSH files.** Every ssh process started for an account is
+  started with a config file of the account's own (`users/<account>/.ssh/`).
+  It names the account's known hosts file and its key, and that is all ssh
+  reads beside the command line the app builds. The `~/.ssh` of the user the
+  server runs as is never read, and nothing is written there. The server's
+  own ssh agent is not used. The hosts sshs3 writes into the account's
+  `.ssh/config` (as it does on the desktop) are not read by these processes,
+  so a host name saved there cannot change where a connection goes or which
+  key it uses. A key file a server profile names
+  has to be in the account's own folder; a profile that names another file is
+  refused when it connects. From the browser only the terminal type and the
+  language settings (`TERM`, `COLORTERM`, `LANG`, `LC_*`) reach the ssh
+  process.
+- **Their own Kubernetes sign-ins.** Each account has its own kubeconfig
+  (`users/<account>/.kube/config`). The server's `KUBECONFIG` and
+  `~/.kube/config` are never read, and an entry that signs in by running a
+  program is left out.
+
+After an update from a version before this one:
+
+- **Host keys are asked about again.** Host keys used to be kept in the server
+  user's `~/.ssh/known_hosts`, one file for everybody. Each account now starts
+  with none, so the first connection to each server asks whether its key is
+  the right one. Compare it with the key you know before you accept it.
+- **Kubernetes clusters are signed in to again**, each person for themselves.
+  What is in the server's own kubeconfig is not shown to anybody.
+- The server user's `~/.ssh/config` still has the block sshs3 wrote there
+  before. Nothing reads it any more; you can remove the block.
+
+Not held to an account's folder: what a person does on a server they are
+connected to, and what the AI workspace's own requests do (they have their own
+rules, see `docs/ai-hub.md`).
+
+## The credential key
+
+Saved passwords and keys are encrypted with one key. With `SSHS3_MASTER_KEY`
+set, that key is made from the passphrase with scrypt and a salt that is kept
+in the data directory (`server-master.salt`). Keep the salt with the data: the
+passphrase alone does not open a copy of the data without it. Without
+`SSHS3_MASTER_KEY` a random key is kept in the data directory
+(`server-master.key`).
+
+A server that already used `SSHS3_MASTER_KEY` keeps working: what an earlier
+version encrypted is still opened, and is encrypted the new way the next time
+it is saved. The same holds when a passphrase is set on a server that used the
+key file before, as long as the key file is still there.
+
+## Behind a reverse proxy
+
+- A request that changes something (it signs in, adds an account, makes a
+  key) and comes from a browser has to come from the server's own page. The
+  browser says which page sent it (the `Origin` header), and that has to be
+  the address in the request's `Host`, the one in `SSHS3_PUBLIC_URL`, or one in
+  `SSHS3_ALLOWED_ORIGINS`. A proxy that changes `Host` needs one of the two
+  variables set, or signing in is refused with "Origin not allowed".
+- The server counts failed sign-ins per address and per account. Behind a
+  proxy every request has the proxy's address, so the limit per address counts
+  everybody together: 30 failed sign-ins in a minute, from anybody, and the
+  next ones wait. The limit per account (10 in a minute) still works for each
+  account. The server does not read the caller's address from a header such
+  as `X-Forwarded-For`; there is no setting for that yet. Limit sign-in
+  attempts per caller in the proxy.
+
 ## Who signed in, and what was done
 
 The server keeps its own tamper-evident log of sign-ins: setup, every sign-in,
 every failed one (the password tried is never written), sign-out, and accounts
-added or removed. Each user's agents keep theirs as in the desktop app:
+added or removed. When the limit on failed sign-ins starts to refuse an
+address or an account, that is written once; the attempts it then refuses are
+not written one by one. The log is kept in files of at most about 5 MB in
+`audit/` in the data directory: `audit-server.jsonl` is the current one, and
+the five before it are kept as `audit-server-1.jsonl` (the newest) to
+`audit-server-5.jsonl`. Older ones are removed. Each file begins by naming the
+last entry of the file before it, so a file that was changed or cut shows.
+Each user's agents keep theirs as in the desktop app:
 Changes → Audit log shows it, checks it and exports it, and finished terminal
 recordings are sealed into it. See "The audit log and terminal recordings" in
 `docs/ai-hub.md`.
+
+Signing out closes the connections of that sign-in. A new password signs out
+the account's other sign-ins and closes their connections; so does turning an
+account off or removing it. A turned-off account's background work (its
+schedules, its runs) stops with it and is not started when the server starts;
+its keys for its own agents and its alert address are refused until it is
+turned on again. An invite for a number of people makes that many
+accounts and no more, also when it is used by several at the same moment.
 
 ## What to know
 

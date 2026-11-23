@@ -8,7 +8,7 @@ import type { IpcBridge } from '../IpcBridge';
 /** The part of IpcBridge this handler group may use. */
 export type DotfileHost = Pick<
   IpcBridge,
-  'dotfilePoolStore' | 'pendingDotfilesSyncPrompts' | 'registerHandler' | 'scheduleAutoSync' | 'storageRegistry'
+  'dotfilePoolStore' | 'localFilesDir' | 'pendingDotfilesSyncPrompts' | 'registerHandler' | 'scheduleAutoSync' | 'storageRegistry'
 >;
 
 export function registerDotfileHandlers(bridge: DotfileHost): void {
@@ -85,7 +85,7 @@ export function registerDotfileHandlers(bridge: DotfileHost): void {
       }
 
       const remotePath =
-        options.targetRemotePath || defaultDotfileRemotePath(options.filePath, os.homedir());
+        options.targetRemotePath || defaultDotfileRemotePath(options.filePath, bridge.localFilesDir ?? os.homedir());
 
       const added = await bridge.dotfilePoolStore.addFileToPool(options.poolId, {
         remotePath,

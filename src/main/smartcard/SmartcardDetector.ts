@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { DetectedSmartcardLib, SSHConnectionConfig } from '../../shared/types/ssh';
 import { isAllowedExtraOption } from '../ssh/blockedSshDirectives';
 import { createLogger } from '../log';
+import { sshClientFileArgs } from '../web/tenantBoundary';
 const smartcardLog = createLogger('smartcard');
 
 export interface DetectOptions {
@@ -395,7 +396,8 @@ export class SmartcardDetector {
       throw new Error('Invalid SSH port: port must be between 1 and 65535');
     }
 
-    const args: string[] = [];
+    // On a web server: the account's own ssh files instead of the server user's ~/.ssh, or no ssh at all.
+    const args: string[] = [...sshClientFileArgs(config)];
 
     // OpenSSH connection multiplexing (master mode, Unix only)
     if (controlPath && process.platform !== 'win32') {

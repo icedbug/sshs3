@@ -207,7 +207,9 @@ describe('the chat agent account on a web server', () => {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'resources/list' }),
     });
-    expect(JSON.stringify(await rpc.json())).toContain('no longer on this server');
+    // It is answered like a wrong key: the key's owner is not an account that is there and turned on.
+    expect(rpc.status).toBe(401);
+    expect(JSON.stringify(await rpc.json())).toContain('A key is needed');
   }, 30_000);
 
   it('cannot be removed: the request is refused and nothing is stopped', async () => {
@@ -267,8 +269,9 @@ describe('the chat agent account on a web server', () => {
     expect(rotated).not.toBe(first);
     expect(rotated).toMatch(/^ssh-ed25519 \S+ svc:chat-agent@sshs3-web$/);
     if (process.platform !== 'win32') expect((await fs.stat(path.join(sshDir, 'id_ed25519'))).mode & 0o777).toBe(0o600);
-    // Written whole: no temporary files left beside the key.
-    expect((await fs.readdir(sshDir)).sort()).toEqual(['id_ed25519', 'id_ed25519.pub']);
+    // Written whole: no temporary files left beside the key. The two config files are the account's own
+    // ssh files: the hosts sshs3 saved for it, and the file its ssh is started with.
+    expect((await fs.readdir(sshDir)).sort()).toEqual(['config', 'id_ed25519', 'id_ed25519.pub', 'sshs3_config']);
     expect(await server.tenants.chatAgentPublicKey()).toBe(rotated);
     expect(await fs.readFile(path.join(sshDir, 'id_ed25519'), 'utf8')).not.toBe(before);
     expect((await fs.readFile(path.join(sshDir, 'id_ed25519.pub'), 'utf8')).trim()).toBe(rotated);

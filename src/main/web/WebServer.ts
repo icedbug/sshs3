@@ -6,7 +6,8 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setWebDataDir } from './electronShim';
-import { SERVICE_ACCOUNT_PREFIX, WebAuthService, type WebUserPublic } from './WebAuthService';
+import { SERVICE_ACCOUNT_PREFIX, TooManySignInAttempts, WebAuthService, type SessionsEnded, type WebUserPublic } from './WebAuthService';
+import { SignInJournal } from './SignInJournal';
 import { WebTenantManager } from './WebTenantManager';
 import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
 import { ChatAgentStore } from './chatAgent/ChatAgentStore';
@@ -15,7 +16,6 @@ import type { AgentBotApi } from './chatAgent/AgentBotApi';
 import type { ChatTransportFactory } from './chatAgent/ChatAgentService';
 import { isDemoMode } from '../demo/demoMode';
 import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
-import { AuditLog } from '../ai/hub/AuditLog';
 import { verifyStandardWebhook, WEBHOOK_TOLERANCE_SECONDS } from '../ai/hub/Notifier';
 import { createLogger } from '../log';
 import { createWsSender } from './wsSender';
@@ -141,13 +141,32 @@ export function isAllowedWsOrigin(
   return Boolean(reqHostname) && originHostname === reqHostname && originPort === reqPort;
 }
 
+/** A request whose body cannot be used: answered with this status and these plain words, never with a parser's. */
+class BadRequestBody extends Error {
+  constructor(readonly status: 400 | 413, message: string) {
+    super(message);
+  }
+}
+
 async function readJsonBody(
   req: http.IncomingMessage,
   maxBytes = 256_000,
 ): Promise<Record<string, unknown>> {
-  const raw = (await readRawBody(req, maxBytes)).trim();
+  let raw: string;
+  try {
+    raw = (await readRawBody(req, maxBytes)).trim();
+  } catch {
+    throw new BadRequestBody(413, 'The request is too large.');
+  }
   if (!raw) return {};
-  return JSON.parse(raw) as Record<string, unknown>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new BadRequestBody(400, 'The request body is not valid JSON.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new BadRequestBody(400, 'The request body must be a JSON object.');
+  return parsed as Record<string, unknown>;
 }
 
 async function readRawBody(
@@ -395,11 +414,15 @@ interface WsTicketRecord {
   userId: string;
   expiresAt: number;
   origin?: string;
+  /** The key of the sign-in the ticket was asked with (WebAuthService.sessionKey). */
+  session?: string;
 }
 
 interface WsConnectionEntry {
   socket: Duplex;
   userId: string;
+  /** The key of the sign-in this connection was opened with: when that sign-in ends, so does the connection. */
+  session?: string;
   clientId: number;
   isAlive: boolean;
   awaitingPong: boolean;
@@ -434,6 +457,8 @@ export interface Sshs3WebServerOptions {
   wsHighWaterBytes?: number;
   /** Hard cap on writableLength + queued bytes before dropping stream chunks or closing slow sockets (default: 16777216). */
   wsMaxBufferedBytes?: number;
+  /** For tests: how large a file of the sign-in journal gets, and how many are kept. */
+  signInJournal?: { maxBytes?: number; keep?: number };
 }
 
 export class Sshs3WebServer {
@@ -452,7 +477,7 @@ export class Sshs3WebServer {
    * removed. Each person's hub keeps its own log of what was run; this one is
    * about the door.
    */
-  public readonly signIns: AuditLog;
+  public readonly signIns: SignInJournal;
   private readonly staticDir: string;
   private httpServer?: http.Server;
   private boundPort = 0;
@@ -475,7 +500,9 @@ export class Sshs3WebServer {
     this.chatAgent = new ChatAgentStore(options.dataDir, {
       usable: (accountId) => this.auth.accountsBrief().some((a) => a.id === accountId && !a.disabled),
     });
-    this.signIns = new AuditLog(path.join(options.dataDir, 'audit'), 'server');
+    this.signIns = new SignInJournal(path.join(options.dataDir, 'audit'), options.signInJournal);
+    // A WebSocket is checked when it is opened. When the sign-in it was opened with ends, it is closed.
+    this.auth.onSessionsEnded((ended) => this.closeSocketsOf(ended));
     this.chatAnswering = new ChatAnswering({
       dataDir: options.dataDir,
       links: this.chatAgent,
@@ -527,10 +554,46 @@ export class Sshs3WebServer {
   private getAllowedOrigins(): string[] {
     if (this.options.allowedOrigins?.length) return this.options.allowedOrigins;
     const raw = process.env.SSHS3_ALLOWED_ORIGINS || '';
-    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+    const listed = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    // The address people are told to use (SSHS3_PUBLIC_URL) is the page's origin behind a proxy that changes Host.
+    const publicUrl = publicUrlFromEnv();
+    return publicUrl ? [...listed, new URL(publicUrl).origin] : listed;
   }
 
-  private issueWsTicket(userId: string, originHeader?: string | string[]): {
+  /**
+   * Whether a request that changes something may come from the page that sent it. A browser names
+   * that page in Origin on every such request; a page on another origin of the same site still gets
+   * the session cookie sent along (SameSite=Lax), so the cookie alone says nothing about who asks.
+   * Without an Origin (a script, curl) there is no page to check, and a request that carries a key in
+   * Authorization and no cookie was not made by a browser on somebody's behalf.
+   */
+  private originAllowed(req: http.IncomingMessage): boolean {
+    if (req.headers.origin === undefined) return true;
+    return isAllowedWsOrigin(req.headers.origin, req.headers.host, this.getAllowedOrigins());
+  }
+
+  /** Closes the WebSockets that were opened with sign-ins that have ended. */
+  private closeSocketsOf(ended: SessionsEnded): void {
+    for (const entry of Array.from(this.activeWsEntries.values())) {
+      if (entry.userId !== ended.userId) continue;
+      if (ended.only !== undefined && entry.session !== ended.only) continue;
+      if (ended.except !== undefined && entry.session === ended.except) continue;
+      this.reapWsEntry(entry, 'Signed out');
+    }
+    // A ticket asked for with a sign-in that has ended opens nothing either.
+    for (const [ticket, record] of this.wsTickets) {
+      if (record.userId !== ended.userId) continue;
+      if (ended.only !== undefined && record.session !== ended.only) continue;
+      if (ended.except !== undefined && record.session === ended.except) continue;
+      this.wsTickets.delete(ticket);
+    }
+    // Every sign-in ended because the account was turned off: what runs for it in the background stops
+    // too. After the connections were closed above, so that each was told why.
+    if (ended.only === undefined && ended.except === undefined && this.auth.accountsBrief().some((a) => a.id === ended.userId && a.disabled))
+      void this.tenants.stopTenant(ended.userId).catch((err) => log.warn('Could not stop a turned-off account', err));
+  }
+
+  private issueWsTicket(userId: string, originHeader?: string | string[], session?: string): {
     ticket: string;
     expiresAt: number;
     expiresInMs: number;
@@ -550,11 +613,11 @@ export class Sshs3WebServer {
       typeof originHeader === 'string' && originHeader.trim()
         ? originHeader.trim().toLowerCase()
         : undefined;
-    this.wsTickets.set(ticket, { userId, expiresAt, ...(origin ? { origin } : {}) });
+    this.wsTickets.set(ticket, { userId, expiresAt, ...(origin ? { origin } : {}), ...(session ? { session } : {}) });
     return { ticket, expiresAt, expiresInMs: ttlMs };
   }
 
-  private consumeWsTicket(ticket: string, originHeader?: string | string[]): string | null {
+  private consumeWsTicket(ticket: string, originHeader?: string | string[]): { userId: string; session?: string } | null {
     const clean = ticket.trim();
     if (!clean) return null;
     const entry = this.wsTickets.get(clean);
@@ -568,17 +631,20 @@ export class Sshs3WebServer {
         return null;
       }
     }
-    return entry.userId;
+    // The sign-in it was asked with ended in the meantime (signed out, new password, account turned off).
+    if (entry.session && !this.auth.isSessionActive(entry.session)) return null;
+    return { userId: entry.userId, ...(entry.session ? { session: entry.session } : {}) };
   }
 
-  private reapWsEntry(entry: WsConnectionEntry): void {
+  /** Closes a connection. With `policy`, the client is told why (1008): its sign-in ended, it is not a fault. */
+  private reapWsEntry(entry: WsConnectionEntry, policy?: string): void {
     if (entry.pongTimer) {
       clearTimeout(entry.pongTimer);
       entry.pongTimer = undefined;
     }
     try {
       if (!entry.socket.destroyed && entry.socket.writable) {
-        entry.socket.write(encodeWsControlFrame(0x8));
+        entry.socket.write(policy ? encodeWsControlFrame(0x8, wsClosePayload(1008, policy)) : encodeWsControlFrame(0x8));
       }
     } catch {
       // ignore
@@ -603,6 +669,11 @@ export class Sshs3WebServer {
       for (const entry of Array.from(this.activeWsEntries.values())) {
         if (entry.socket.destroyed || !entry.socket.writable) {
           this.reapWsEntry(entry);
+          continue;
+        }
+        // Also a sign-in that simply ran out: the connection goes with it.
+        if (entry.session && !this.auth.isSessionActive(entry.session)) {
+          this.reapWsEntry(entry, 'Signed out');
           continue;
         }
         if (entry.awaitingPong) {
@@ -648,11 +719,9 @@ export class Sshs3WebServer {
 
     const server = http.createServer((req, res) => {
       void this.handleHttpRequest(req, res).catch((err) => {
-        if (!res.headersSent) {
-          sendJson(res, 500, {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+        if (res.headersSent) return;
+        if (err instanceof BadRequestBody) sendJson(res, err.status, { error: err.message });
+        else sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
       });
     });
 
@@ -754,7 +823,8 @@ export class Sshs3WebServer {
       // Held now, so the same request sent twice at once is taken once.
       this.hookSeenIds.set(seenKey, now);
     }
-    const user = userId && secret ? (await this.auth.listUsers()).find((u) => u.id === userId) : undefined;
+    // A turned-off account takes no alerts: its address answers like one that does not exist.
+    const user = userId && secret ? (await this.auth.listUsers()).find((u) => u.id === userId && !u.disabled) : undefined;
     const tenant = user ? await this.tenants.getOrCreateTenant(user).catch(() => undefined) : undefined;
     const result = tenant ? await tenant.hub.receiveAlert(secret, body) : undefined;
     if (!result) {
@@ -832,6 +902,8 @@ export class Sshs3WebServer {
   async wakeUsers(): Promise<number> {
     let awake = 0;
     for (const user of await this.auth.listUsers()) {
+      // A turned-off account does no background work.
+      if (user.disabled) continue;
       try {
         await this.tenants.getOrCreateTenant(user);
         awake++;
@@ -911,9 +983,11 @@ export class Sshs3WebServer {
           return configured.length ? [...configured, 'localhost', '127.0.0.1'] : undefined;
         },
         enabled: () => process.env.SSHS3_MCP !== '0',
+        // A key works as long as its owner's account is there and turned on.
+        ownerUsable: (userId) => this.auth.accountsBrief().some((a) => a.id === userId && !a.disabled),
         hubFor: async (userId) => {
           const user = (await this.auth.listUsers()).find((u) => u.id === userId);
-          if (!user) return undefined;
+          if (!user || user.disabled) return undefined;
           const tenant = await this.tenants.getOrCreateTenant(user);
           return {
             request: (r) => tenant.hub.request(r),
@@ -951,7 +1025,9 @@ export class Sshs3WebServer {
           createdBy: user.displayName || user.username,
           scopes: MCP_SCOPES.filter((s) => asked.includes(s)) as McpScope[],
           serverId: body.serverId ? String(body.serverId) : undefined,
-          expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : undefined,
+          // Without a number of days the key stops working after 30. It never stops only when asked for in so many words.
+          expiresInDays: typeof body.expiresInDays === 'number' && body.expiresInDays > 0 ? body.expiresInDays : undefined,
+          neverExpires: body.neverExpires === true,
           tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
         });
         // The only time the key itself is ever sent anywhere.
@@ -980,6 +1056,11 @@ export class Sshs3WebServer {
       return cookies[SESSION_COOKIE_NAME]!;
     }
     return null;
+  }
+
+  /** A request that carries a key in Authorization and no session cookie: no browser sent it on somebody's behalf. */
+  private signedByKeyOnly(req: http.IncomingMessage): boolean {
+    return Boolean(req.headers.authorization?.startsWith('Bearer ')) && !parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
   }
 
   private async authenticateRequest(
@@ -1018,6 +1099,13 @@ export class Sshs3WebServer {
     // Somebody's own agent, over MCP. Its own key in the Authorization header; no session, no cookie.
     if (pathname === '/api/mcp') {
       await this.handleMcpEndpoint(req, res, method);
+      return;
+    }
+
+    // Everything below is asked by the server's own page. A request that changes something and names
+    // the page it comes from (Origin) has to name this server (see originAllowed).
+    if (pathname.startsWith('/api/') && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS' && !this.signedByKeyOnly(req) && !this.originAllowed(req)) {
+      sendJson(res, 403, { error: 'Origin not allowed' });
       return;
     }
 
@@ -1070,10 +1158,15 @@ export class Sshs3WebServer {
           String(body.password || ''),
           clientIp,
         ).catch(async (err: unknown) => {
-          // A failed attempt is written down too: a run of them is what an incident looks like.
-          await this.signIns
-            .append({ kind: 'sign-in', actor: String(body.username || '(no name)').slice(0, 80), what: 'failed to sign in', outcome: 'refused', detail: `from ${clientIp}` })
-            .catch(() => undefined);
+          const name = String(body.username || '(no name)').slice(0, 80);
+          // A failed attempt is written down too: a run of them is what an incident looks like. Once the
+          // limiter refuses, that is written once: every further attempt it refuses would only fill the journal.
+          if (!(err instanceof TooManySignInAttempts))
+            await this.signIns.append({ kind: 'sign-in', actor: name, what: 'failed to sign in', outcome: 'refused', detail: `from ${clientIp}` }).catch(() => undefined);
+          else if (err.first)
+            await this.signIns
+              .append({ kind: 'sign-in', actor: name, what: 'too many failed sign-ins: further attempts are refused for a minute', outcome: 'refused', detail: `from ${clientIp}` })
+              .catch(() => undefined);
           throw err;
         });
         await this.signIns
@@ -1156,7 +1249,7 @@ export class Sshs3WebServer {
           sendJson(res, 401, { error: 'Workspace session changed' });
           return;
         }
-        const issued = this.issueWsTicket(user.id, req.headers.origin);
+        const issued = this.issueWsTicket(user.id, req.headers.origin, this.auth.sessionKey(this.extractSessionToken(req)));
         sendJson(res, 200, issued);
         return;
       }
@@ -1416,16 +1509,19 @@ export class Sshs3WebServer {
     }
 
     let user: WebUserPublic | null = null;
+    let session: string | undefined;
     if (url.searchParams.has('ticket')) {
-      const ticketUserId = this.consumeWsTicket(
+      const ticket = this.consumeWsTicket(
         url.searchParams.get('ticket') || '',
         req.headers.origin,
       );
-      if (ticketUserId) {
-        user = await this.auth.getUserById(ticketUserId);
+      if (ticket) {
+        user = await this.auth.getUserById(ticket.userId);
+        session = ticket.session;
       }
     } else {
       user = await this.authenticateRequest(req);
+      session = this.auth.sessionKey(this.extractSessionToken(req));
     }
 
     if (!user) {
@@ -1450,6 +1546,12 @@ export class Sshs3WebServer {
     // Gone while it was signed in and its workspace was set up: there is nobody to answer, and a client
     // added now would never be removed (its 'close' has already been).
     if (socket.destroyed) return;
+    // Signed out while the workspace was being set up: the connection is not opened.
+    if (session && !this.auth.isSessionActive(session)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     const highWaterBytes = Math.max(1024, this.options.wsHighWaterBytes ?? 256 * 1024);
     const maxBufferedBytes = Math.max(
       highWaterBytes * 2,
@@ -1459,6 +1561,7 @@ export class Sshs3WebServer {
     const entry: WsConnectionEntry = {
       socket,
       userId: user.id,
+      ...(session ? { session } : {}),
       clientId: 0,
       isAlive: true,
       awaitingPong: false,
@@ -1508,6 +1611,8 @@ export class Sshs3WebServer {
           } catch {
             return;
           }
+          // JSON that is not an object ("null", a number) is no message.
+          if (!parsed || typeof parsed !== 'object') return;
           if (parsed.type === 'ping') {
             sendFrame(JSON.stringify({ type: 'pong', ts: parsed.ts ?? Date.now() }));
             return;
@@ -1524,6 +1629,11 @@ export class Sshs3WebServer {
             return;
           }
           if (parsed.type === 'invoke' && parsed.id && parsed.channel) {
+            // Nothing is done for a sign-in that has ended, also in the moment before its connection is closed.
+            if (entry.session && !this.auth.isSessionActive(entry.session)) {
+              this.reapWsEntry(entry, 'Signed out');
+              return;
+            }
             try {
               const result = await tenant.invokeFromClient(
                 clientId,

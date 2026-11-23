@@ -1,5 +1,7 @@
 import type * as k8s from '@kubernetes/client-node';
+import fs from 'node:fs';
 import { loadK8sClient } from './k8sClient';
+import { isWebServerProcess } from '../web/tenantBoundary';
 
 /**
  * Names of kubeconfig users configured with an `exec:` credential plugin —
@@ -32,11 +34,7 @@ export function getExecAuthUserNames(kc: k8s.KubeConfig): Set<string> {
 export async function loadKubeConfigForContext(contextName: string, kubeConfigPath?: string): Promise<k8s.KubeConfig> {
   const { KubeConfig } = await loadK8sClient();
   const base = new KubeConfig();
-  if (kubeConfigPath) {
-    base.loadFromFile(kubeConfigPath);
-  } else {
-    base.loadFromDefault();
-  }
+  readKubeConfig(base, kubeConfigPath);
 
   const kc = new KubeConfig();
   kc.loadFromOptions({
@@ -46,4 +44,36 @@ export async function loadKubeConfigForContext(contextName: string, kubeConfigPa
     currentContext: contextName,
   });
   return kc;
+}
+
+/**
+ * Reads the kubeconfig a service works with into `kc`. On the desktop: the file it was given, else the
+ * person's own (KUBECONFIG or ~/.kube/config).
+ *
+ * On a web server one process serves every account, so the process' own kubeconfig is the server's and
+ * is never read: a service has to be given the account's own file, and without one it is refused. A
+ * file that is not there yet is an account that has not signed in to a cluster: no contexts. A user
+ * entry that signs in by running a program is left out, because that program would run on the server.
+ */
+export function readKubeConfig(kc: k8s.KubeConfig, kubeConfigPath?: string): void {
+  if (!isWebServerProcess()) {
+    if (kubeConfigPath) kc.loadFromFile(kubeConfigPath);
+    else kc.loadFromDefault();
+    return;
+  }
+  if (!kubeConfigPath) throw new Error('Kubernetes was not set up for an account of this server, so no cluster is read.');
+  if (!fs.existsSync(kubeConfigPath)) {
+    kc.loadFromOptions({ contexts: [], clusters: [], users: [], currentContext: '' });
+    return;
+  }
+  kc.loadFromFile(kubeConfigPath);
+  const runsProgram = (user: k8s.User): boolean => Boolean((user as { exec?: unknown }).exec || (user as { authProvider?: unknown }).authProvider);
+  if (kc.getUsers().some(runsProgram)) {
+    kc.loadFromOptions({
+      contexts: kc.getContexts(),
+      clusters: kc.getClusters(),
+      users: kc.getUsers().filter((user) => !runsProgram(user)),
+      currentContext: kc.getCurrentContext(),
+    });
+  }
 }

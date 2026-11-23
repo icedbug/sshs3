@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { restrictPrivateKeyFile } from './WebAuthService';
+import { packageVersion } from './appVersion';
 
 let configuredDataDir =
   process.env.SSHS3_DATA_DIR || path.join(os.homedir(), '.sshs3-server');
@@ -21,15 +22,58 @@ export function getWebDataDir(): string {
 
 let cachedMasterKey: Buffer | null = null;
 
+/**
+ * What a credential sealed with the key from SSHS3_MASTER_KEY starts with. The key is made from the
+ * passphrase with scrypt and a salt kept beside the data, so a passphrase cannot be tried against a
+ * stolen data folder at the speed of a hash. Earlier versions took one SHA-256 of the passphrase and
+ * wrote no mark: what they sealed has none, and is still opened with that older key (see decryptString).
+ */
+const PASSPHRASE_SEAL = Buffer.from('S3K2');
+
+/** The salt for the passphrase, made once per data folder. It is not a secret. */
+function passphraseSalt(): Buffer {
+  const saltPath = path.join(configuredDataDir, 'server-master.salt');
+  const read = (): Buffer => {
+    const raw = fs.readFileSync(saltPath, 'utf8').trim();
+    if (!/^[a-fA-F0-9]{32}$/.test(raw)) throw new Error('The saved salt of the credential key is invalid.');
+    return Buffer.from(raw, 'hex');
+  };
+  fs.mkdirSync(configuredDataDir, { recursive: true, mode: 0o700 });
+  try {
+    return read();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  try {
+    // 'wx': another process that got there first keeps its salt, and this one reads it.
+    fs.writeFileSync(saltPath, crypto.randomBytes(16).toString('hex'), { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  return read();
+}
+
+function passphrase(): string | undefined {
+  return process.env.SSHS3_MASTER_KEY?.trim() || undefined;
+}
+
+/** The key earlier versions made from the passphrase: one SHA-256, no salt. Only ever used to open what they sealed. */
+function olderPassphraseKey(phrase: string): Buffer {
+  return crypto.createHash('sha256').update(phrase, 'utf8').digest();
+}
+
 function getOrCreateMasterKey(): Buffer {
   if (cachedMasterKey) return cachedMasterKey;
-  if (process.env.SSHS3_MASTER_KEY?.trim()) {
-    cachedMasterKey = crypto
-      .createHash('sha256')
-      .update(process.env.SSHS3_MASTER_KEY.trim(), 'utf8')
-      .digest();
+  const phrase = passphrase();
+  if (phrase) {
+    cachedMasterKey = crypto.scryptSync(phrase, passphraseSalt(), 32, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
     return cachedMasterKey;
   }
+  return fileMasterKey(true)!;
+}
+
+/** The key kept in the data folder. `create` false: only read, for opening what was sealed before a passphrase was set. */
+function fileMasterKey(create: boolean): Buffer | undefined {
   const keyPath = path.join(configuredDataDir, 'server-master.key');
   function restrictKey(file: string): void {
     if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
@@ -42,10 +86,12 @@ function getOrCreateMasterKey(): Buffer {
     return Buffer.from(raw, 'hex');
   }
   fs.mkdirSync(configuredDataDir, { recursive: true, mode: 0o700 });
+  let key: Buffer;
   try {
-    cachedMasterKey = readKey();
+    key = readKey();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!create) return undefined;
     // Publish a complete, private file without overwriting a key created by another process.
     const temporary = keyPath + '.' + crypto.randomUUID();
     const fd = fs.openSync(temporary, 'wx', 0o600);
@@ -62,9 +108,24 @@ function getOrCreateMasterKey(): Buffer {
       fs.closeSync(fd);
       fs.unlinkSync(temporary);
     }
-    cachedMasterKey = readKey();
+    key = readKey();
   }
-  return cachedMasterKey;
+  if (create) cachedMasterKey = key;
+  return key;
+}
+
+function seal(key: Buffer, plainText: string): Buffer {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), encrypted]);
+}
+
+function open(key: Buffer, sealed: Buffer): string {
+  if (sealed.length < 28) throw new Error('Invalid encrypted payload length');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, sealed.subarray(0, 12));
+  decipher.setAuthTag(sealed.subarray(12, 28));
+  return Buffer.concat([decipher.update(sealed.subarray(28)), decipher.final()]).toString('utf8');
 }
 
 export const safeStorage = {
@@ -78,31 +139,41 @@ export const safeStorage = {
     }
   },
   encryptString(plainText: string): Buffer {
-    const key = getOrCreateMasterKey();
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-    const encrypted = Buffer.concat([
-      cipher.update(plainText, 'utf8'),
-      cipher.final(),
-    ]);
-    const tag = cipher.getAuthTag();
-    return Buffer.concat([iv, tag, encrypted]);
+    const sealed = seal(getOrCreateMasterKey(), plainText);
+    // With a passphrase: marked, so it is known to be sealed with the key scrypt makes.
+    return passphrase() ? Buffer.concat([PASSPHRASE_SEAL, sealed]) : sealed;
   },
+  /**
+   * Opens what encryptString sealed, now or in an earlier version. With a passphrase set, in this order:
+   * the scrypt key (what is sealed now, marked), the single SHA-256 of the passphrase (what earlier
+   * versions sealed), and the key file in the data folder (what was sealed before a passphrase was
+   * set at all). Whatever is saved again is sealed the current way.
+   */
   decryptString(encrypted: Buffer): string {
     const buf = Buffer.isBuffer(encrypted) ? encrypted : Buffer.from(encrypted);
     if (buf.length < 28) {
       throw new Error('Invalid encrypted payload length');
     }
-    const key = getOrCreateMasterKey();
-    const iv = buf.subarray(0, 12);
-    const tag = buf.subarray(12, 28);
-    const ciphertext = buf.subarray(28);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]).toString('utf8');
+    const phrase = passphrase();
+    if (!phrase) return open(getOrCreateMasterKey(), buf);
+    const attempts: Array<() => string> = [];
+    if (buf.subarray(0, PASSPHRASE_SEAL.length).equals(PASSPHRASE_SEAL)) attempts.push(() => open(getOrCreateMasterKey(), buf.subarray(PASSPHRASE_SEAL.length)));
+    // No mark, or bytes that only look like one: sealed by an earlier version.
+    attempts.push(() => open(olderPassphraseKey(phrase), buf));
+    attempts.push(() => {
+      const fileKey = fileMasterKey(false);
+      if (!fileKey) throw new Error('No key file');
+      return open(fileKey, buf);
+    });
+    let failure: unknown;
+    for (const attempt of attempts) {
+      try {
+        return attempt();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    throw failure;
   },
 };
 
@@ -113,7 +184,7 @@ class HeadlessApp extends EventEmitter {
   setName(_name: string): void {}
   setDesktopName(_name: string): void {}
   getVersion(): string {
-    return process.env.npm_package_version || '0.96.34';
+    return packageVersion();
   }
   getAppPath(): string {
     return process.cwd();

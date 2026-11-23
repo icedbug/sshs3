@@ -22,6 +22,7 @@ import type {
 } from "../../../shared/types/storage";
 import type { TeamVaultPayload } from "../../../shared/types/teamVault";
 import type { InventoryTarget } from "./ContextService";
+import { sshClientFileArgs } from "../../web/tenantBoundary";
 import { boundedContext, clip, maskContext, safeError } from "./privacy";
 import {
   appendDemoActivity,
@@ -1003,6 +1004,7 @@ export function createHub(
         return (error as NodeJS.ErrnoException).code !== "ESRCH";
       }
     },
+    accountKubeConfigPath: bridge.tenantKubeConfigPath,
     openSchedule: async (schedule, label) => {
       let id: string;
       if (schedule.profileId === "local") {
@@ -1077,7 +1079,7 @@ export function createHub(
       if (live?.controlPath && process.platform !== "win32" && fs.existsSync(live.controlPath) && !live.config.host.startsWith("-") && !live.controlPath.startsWith("-")) {
         const viaTab = await runWithStdin(
           sshBinary,
-          ["-S", live.controlPath, "-T", "-o", "ControlMaster=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none", "--", live.config.host, "sh -s"],
+          [...sshClientFileArgs(live.config), "-S", live.controlPath, "-T", "-o", "ControlMaster=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none", "--", live.config.host, "sh -s"],
           script,
           process.env,
           timeoutMs,

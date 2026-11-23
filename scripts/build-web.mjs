@@ -41,9 +41,12 @@ async function buildClient() {
 }
 
 async function buildServer() {
+  // The server says which version it is (web/appVersion.ts): written into the bundle here.
+  const { version } = JSON.parse(await fs.readFile(path.join(rootDir, 'package.json'), 'utf8'));
   await build({
     configFile: false,
     root: rootDir,
+    define: { __SSHS3_VERSION__: JSON.stringify(version) },
     resolve: {
       alias: {
         electron: path.resolve(rootDir, 'src/main/web/electronShim.ts'),

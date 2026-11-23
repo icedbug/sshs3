@@ -7,7 +7,7 @@ import { SimStorageProvider } from "../sim/SimStorageProvider";
 import { simWorld } from "../sim/SimWorld";
 import { DemoStorageProvider } from '../demo/DemoStorageProvider';
 import { isDemoTarget } from '../demo/demoMode';
-import type { IStorageProvider, SFTPConfig } from '../../shared/types/storage';
+import type { IStorageProvider, S3Config, SFTPConfig } from '../../shared/types/storage';
 import type { StorageConnectConfig } from '../../shared/types/ipc';
 import type { SshHostVerifier } from '../ssh/HostKeyVerifier';
 
@@ -24,6 +24,15 @@ export interface StorageRegistryOptions {
    * disk of the server, other users' data and keys included.
    */
   localSandbox?: string;
+  /**
+   * On a web server: makes an SFTP connection one account's own (its ssh files, only its own key
+   * files) before ssh is started for it. See IpcBridge.confineSshConfig.
+   */
+  confineSftp?: (config: SFTPConfig) => SFTPConfig;
+  /** On a web server: checks an S3 connection before it is made (what reads the server's own files is refused). */
+  confineS3?: (config: S3Config) => S3Config;
+  /** On a web server: the account's own kubeconfig, the only one its pod file connections read. */
+  kubeConfigPath?: string;
 }
 
 export class StorageRegistry {
@@ -65,6 +74,7 @@ export class StorageRegistry {
           name: config.name || 'Local Storage',
           // The sandbox, not what the client asked for, when there is one.
           basePath: sandbox ?? config.localBasePath,
+          confined: Boolean(sandbox),
         });
         break;
       }
@@ -87,18 +97,19 @@ export class StorageRegistry {
           });
           break;
         }
-        const port = config.sftpConfig.port ?? 22;
-        const hostVerifier = this.options.sftpHostVerifierFactory?.(config.sftpConfig.host, port);
+        const sftpConfig = this.options.confineSftp ? this.options.confineSftp(config.sftpConfig) : config.sftpConfig;
+        const port = sftpConfig.port ?? 22;
+        const hostVerifier = this.options.sftpHostVerifierFactory?.(sftpConfig.host, port);
         provider = new SFTPStorageProvider(
           {
-            ...config.sftpConfig,
+            ...sftpConfig,
             id: config.id,
-            name: config.name || config.sftpConfig.name,
+            name: config.name || sftpConfig.name,
           },
           undefined,
           hostVerifier,
-          this.options.sftpPinPromptHandlerFactory?.(config.sftpConfig),
-          this.options.sftpPresenceFactory?.(config.sftpConfig),
+          this.options.sftpPinPromptHandlerFactory?.(sftpConfig),
+          this.options.sftpPresenceFactory?.(sftpConfig),
           connection.controlPath
         );
         break;
@@ -116,10 +127,11 @@ export class StorageRegistry {
           });
           break;
         }
+        const s3Config = this.options.confineS3 ? this.options.confineS3(config.s3Config) : config.s3Config;
         provider = new S3StorageProvider({
-          ...config.s3Config,
+          ...s3Config,
           id: config.id,
-          name: config.name || config.s3Config.name,
+          name: config.name || s3Config.name,
         });
         break;
       }
@@ -127,7 +139,7 @@ export class StorageRegistry {
         if (!config.k8sConfig) {
           throw new Error(`Kubernetes storage config is required for provider "${config.id}"`);
         }
-        provider = new K8sPodStorageProvider(config.k8sConfig);
+        provider = new K8sPodStorageProvider(config.k8sConfig, this.options.kubeConfigPath);
         break;
       }
       default: {
