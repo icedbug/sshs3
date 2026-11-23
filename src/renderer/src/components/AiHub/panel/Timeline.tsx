@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { GitFork, Pencil, RotateCcw, Terminal } from "lucide-react";
 import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS } from "@shared/types/aiHub";
 import { AnsiLogView, DiffViewer } from "../DiffViewer";
 import { copyToClipboard, RichMarkdownContent } from "../RichMarkdownContent";
 import { AnswerSources } from "../AnswerSources";
 import { ChangeProof } from "../ChangeProof";
+import { ChangeReveal, ChangeSecretInputs } from "../ChangeSecrets";
 import { lastUserMessageId } from "./panelHelpers";
 import type { PanelState } from "./usePanelState";
 
@@ -13,6 +15,8 @@ import type { PanelState } from "./usePanelState";
  * A piece of the chat panel (AiHubPanel). What it shows is the panel's own state, `p`: see usePanelState.
  */
 export function Timeline({ p }: { p: PanelState }): JSX.Element {
+  // What is typed for a setting's secrets, by change. Kept here only until the approval is sent.
+  const [secretValues, setSecretValues] = useState<Record<string, Record<string, string>>>({});
   const {
     timeline,
     activeAgent,
@@ -371,6 +375,14 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                         })()}
                       </div>
                       {item.change.status === "pending" && (
+                        <ChangeSecretInputs
+                          change={item.change}
+                          values={secretValues[item.change.id] ?? {}}
+                          onChange={(next) => setSecretValues({ ...secretValues, [item.change!.id]: next })}
+                        />
+                      )}
+                      {item.change.status !== "pending" && <ChangeReveal taskId={task.id} change={item.change} act={act} />}
+                      {item.change.status === "pending" && (
                         <div className="ai-approval-actions">
                           <input
                             type="text"
@@ -382,15 +394,21 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                           <button
                             className="ai-primary"
                             disabled={busy}
-                            onClick={() =>
+                            onClick={() => {
+                              const changeId = item.change!.id;
+                              const typed = secretValues[changeId];
                               void act({
                                 action: "approve",
                                 taskId: task.id,
-                                changeId: item.change!.id,
+                                changeId,
                                 approved: true,
-                                note: approvalNotes[item.change!.id]?.trim() || undefined,
-                              })
-                            }
+                                note: approvalNotes[changeId]?.trim() || undefined,
+                                ...(item.change!.secretFields?.length && typed ? { secrets: typed } : {}),
+                              }).then((sent) => {
+                                // Sent: what was typed is not kept in the window any longer.
+                                if (sent) setSecretValues((all) => Object.fromEntries(Object.entries(all).filter(([id]) => id !== changeId)));
+                              });
+                            }}
                           >
                             Approve
                           </button>

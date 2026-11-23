@@ -786,7 +786,9 @@ Guarded:
   switched on by a run that does not;
 - where the team's workspace is synced to, disconnecting it, and a folder that
   is synced to a bucket;
-- reading a local folder or a bucket prefix into the shared knowledge base.
+- reading a local folder or a bucket prefix into the shared knowledge base;
+- the settings in "Every setting from the conversation" below: nearly all of
+  them.
 
 Not guarded: everything else, including an agent or a schedule that asks before
 each command. A conversation in Advice mode still runs no command and writes no
@@ -801,6 +803,66 @@ Beside the gate:
 - **`APP_OPS` lists every operation** the management tools offer, as read,
   change, guard or guard-if. A test compares it with the tool schemas, so a
   new operation has to be given a place before it ships.
+
+### Every setting from the conversation (`AppSettingsActions.ts`)
+
+What the settings cards set up, a person can also ask the assistant for in a
+conversation in the app. `AppSettingsActions.ts` holds these operations. Each
+sends the same request its settings card sends, so the same checks hold: who
+may change it, what an address may be, what a token must look like.
+
+| Tool | What it sets up |
+| --- | --- |
+| `sshs3_manage_app_and_settings` | Also: model profiles (`list_model_profiles`, `save_model_profile`, `delete_model_profile`, `test_model`), the rules for everyone on a team server (`get_team_rules`, `update_team_rules`), `restore_builtin_agents`, `forget_history`. |
+| `sshs3_agent_and_mcp_manage` | Also: external agents' programs (`save_runner`, `delete_runner`, `test_runner`), what an MCP tool may do unasked (`set_mcp_tool_policy`), this app's own MCP server and its keys (`set_local_mcp_server`, `list_mcp_keys`, `create_mcp_key`, `revoke_mcp_key`). |
+| `sshs3_manage_team_chat` | The context bot (`context_*`: connect, test, disconnect, which channels it reads, read back, forget, how long messages are kept) and the agent bot (`agent_*`: connect, disconnect, answering on or off, direct messages, limits and budget, one channel's rule, its model, its SSH key, its conversations, a try in the simulated chat). `link_code` and `unlink` for a person's own chat account. |
+| `sshs3_manage_alerts_and_integrations` | Notification channels, quiet hours and reminders, Jira and Confluence, what is collected from servers, the address monitoring sends alerts to, and which agent starts on which alert. |
+
+Each tool's `status` (or `list_*`, `get_*`) reads what is set up, with no
+address or token in it, and asks nobody.
+
+**What waits for a person.** Every operation above that changes something is
+guarded, except these, which only narrow or try: testing a connection, reading
+a chosen channel further back, stopping the context bot from reading a
+channel, taking a channel away from the agent bot, ending one's own chat link,
+syncing Jira now, and collecting server facts now. A test checks that each
+operation classed `guard` in `APP_OPS` asks, whatever the call carries.
+
+**Who may.** The request decides, as it does from the settings card. A member
+who approves a change to the agent bot or to the rules for everyone gets the
+same refusal the card gives, and nothing is changed.
+
+**Secrets stay out of the conversation.** What a person writes in a
+conversation is sent to the model's provider, so a token must not be written
+there.
+
+- *A secret a setting needs* (a bot token, an API key, a webhook address) is
+  not a parameter of any of these tools. `guardAsk` lists it in
+  `GuardAsk.secrets`, the change carries the names in `secretFields`, and the
+  approval card in the conversation shows a hidden field for each
+  (`ChangeSecrets.tsx`). The values travel with the `approve` request, are
+  held in memory until the waiting tool reads them once
+  (`HubService.changeSecrets`), and are never stored or sent to the model.
+  Left empty, the secret already saved is kept. The inbox and the terminal
+  bar do not offer Approve for such a change: they send the person to the
+  conversation.
+- *A secret a setting makes* (a new MCP key, a chat link code, the alert
+  hook's address) is not in what the tool answers. It is kept in memory
+  (`HubService.changeReveals`), the change is marked `reveal`, and the card
+  shows it once when the person asks (`change-reveal`). After a restart it is
+  gone, and the person makes a new one.
+
+**Not from Slack or Mattermost.** A conversation asked for from chat, a
+ticket's run and a schedule's run are given none of these tools
+(`MANAGEMENT_TOOLS`, `CHAT_APP_TOOLS`).
+
+**Not offered, on purpose.** Switching demo mode, quitting the app, and
+approving a change: those are a person's own actions. `test_model` asks only
+the model that is set up, never an address the call names.
+
+Tests: `tests/main/settingsFromChat.test.ts` (through a real hub, and through
+the real web server with an administrator and a member) and
+`tests/renderer/changeSecrets.test.tsx`.
 
 Not guarded, on purpose, and worth knowing: an agent can create a ticket for
 another agent, and the heartbeat runs it in that agent's mode. That is the

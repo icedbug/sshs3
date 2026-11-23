@@ -545,6 +545,9 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      // The chat bots, and notifications and connections: settings a conversation can change too.
+      "sshs3_manage_team_chat",
+      "sshs3_manage_alerts_and_integrations",
       "sshs3_hypotheses",
       // The agent's own task list is part of every normal run.
       "todo_write",
@@ -581,6 +584,9 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      // The chat bots, and notifications and connections: settings a conversation can change too.
+      "sshs3_manage_team_chat",
+      "sshs3_manage_alerts_and_integrations",
       "sshs3_hypotheses",
       // The agent's own task list is part of every normal run.
       "todo_write",
@@ -622,6 +628,9 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      // The chat bots, and notifications and connections: settings a conversation can change too.
+      "sshs3_manage_team_chat",
+      "sshs3_manage_alerts_and_integrations",
       "sshs3_hypotheses",
       // The agent's own task list is part of every normal run.
       "todo_write",

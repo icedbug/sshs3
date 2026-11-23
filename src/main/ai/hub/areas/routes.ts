@@ -19,6 +19,7 @@ export const AREA_OF = {
   takeover: "conversations",
   arm: "conversations",
   approve: "safety",
+  "change-reveal": "safety",
   "memory-save": "memory",
   "memory-delete": "memory",
   "memory-feedback": "memory",

@@ -12,6 +12,7 @@ import {
 import type { HubSnapshot } from "@shared/types/aiHub";
 import { copyToClipboard } from "../../lib/clipboard";
 import { ChangeProof } from "./ChangeProof";
+import { SECRETS_ELSEWHERE, takesSecrets } from "./ChangeSecrets";
 import { ChatWaitingList } from "./AgentInChatCard";
 import { TABULAR_NUMS_CLASS, TABULAR_NUMS_STYLE, type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -510,23 +511,31 @@ export function InboxView({
     );
 
     switch (item.kind) {
-      case "approval":
+      case "approval": {
+        // A setting that needs a token is approved on its own card, where the token is typed.
+        const needsSecrets = takesSecrets(hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId));
         return (
           <>
-            <button
-              type="button"
-              className="ai-btn-emerald"
-              onClick={() =>
-                void dispatch({
-                  action: "approve",
-                  taskId: item.taskId!,
-                  changeId: item.changeId!,
-                  approved: true,
-                })
-              }
-            >
-              Approve
-            </button>
+            {needsSecrets ? (
+              <small className="ai-hint" data-testid="ai-inbox-takes-secrets">
+                {SECRETS_ELSEWHERE}
+              </small>
+            ) : (
+              <button
+                type="button"
+                className="ai-btn-emerald"
+                onClick={() =>
+                  void dispatch({
+                    action: "approve",
+                    taskId: item.taskId!,
+                    changeId: item.changeId!,
+                    approved: true,
+                  })
+                }
+              >
+                Approve
+              </button>
+            )}
             <button
               type="button"
               className="ai-btn-danger"
@@ -568,6 +577,7 @@ export function InboxView({
             {snoozeControls}
           </>
         );
+      }
       case "peer": {
         // Another member's change: the answer goes to their run, and counts as this member's.
         const waiting = hub.peerApprovals?.find((p) => p.ownerId === item.ownerId && p.changeId === item.changeId);

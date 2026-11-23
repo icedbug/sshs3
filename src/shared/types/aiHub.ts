@@ -326,12 +326,30 @@ export interface AgentChangeStructuredCheck {
   equals?: string;
 }
 
+/** A secret a person types on an approval card. `key` is the setting's own name for it. */
+export interface ChangeSecretField {
+  key: string;
+  label: string;
+  optional?: boolean;
+}
+
 export interface AgentChange {
   id: string;
   /** "setting": a change to sshs3's own rules that an agent asked for and only a person can let through. */
   kind: "command" | "file" | "setting";
   /** Moves the fence agents run inside: asked about in every mode, whatever the safety policy says. */
   guard?: boolean;
+  /**
+   * Secrets this setting needs (a token, a key, a webhook address): their names only. The person types
+   * them on the approval card and they travel with the approval, never through the model. An optional
+   * one left empty keeps the secret already saved.
+   */
+  secretFields?: ChangeSecretField[];
+  /**
+   * Something made for the person alone (a key, a link code, a hook address) waits to be shown once on
+   * this card. Never the value itself: that is kept in memory until it is shown, and is gone after a restart.
+   */
+  reveal?: { label: string; shown?: boolean };
   forceApproval?: boolean;
   adminExceptionAvailable?: boolean;
   adminException?: { actorId: string; reason: string; at: number };
@@ -2154,6 +2172,8 @@ export interface HubReply {
   evidenceSource?: { callId: string; source: import("../answerSources").AnswerSource };
   /** What `runner-test` found for an external agent: whether its program is there and answers as an agent. */
   runnerProbe?: { id: string; ok: boolean; detail: string };
+  /** What a setting change made for the person alone, shown this once (`change-reveal`). */
+  changeReveal?: { label: string; value: string };
   /** A new code to link a chat account, shown this once. */
   chatLinkCode?: { service: ChatServiceName; code: string; expiresAt: number };
   /** Who the agent bot is, as the service said when its connection was saved. */
@@ -2396,7 +2416,18 @@ export type HubRequest =
   | { action: "task-read"; taskId: string; detail: "evidence-source"; callId: string; ref: string; digest: string }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
-  | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string; adminException?: boolean }
+  | {
+      action: "approve";
+      taskId: string;
+      changeId: string;
+      approved: boolean;
+      note?: string;
+      adminException?: boolean;
+      /** What the person typed for the change's `secretFields`, by key. Read once, never stored. */
+      secrets?: Record<string, string>;
+    }
+  /** Show, once, what a finished setting change made for the person alone (see `AgentChange.reveal`). */
+  | { action: "change-reveal"; taskId: string; changeId: string }
   /**
    * This member's answer to a change in another member's run that waits for a second person (one of
    * `peerApprovals`). The server checks that this member may give it; it counts as theirs.

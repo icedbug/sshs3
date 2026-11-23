@@ -649,14 +649,36 @@ export class SafetyPart {
       case "approve": {
         const actor = await this.resolveActorName();
         const approvalNote = typeof request.note === "string" && request.note.trim() ? clip(request.note.trim(), 1000) : undefined;
-        const resolved = this.broker.approve(
-          request.taskId,
-          request.changeId,
-          request.approved === true,
-          approvalNote,
-          // The account, not the name it shows: two people may share a name, one person may rename.
-          { actor, actorId: this.localApproverId(), adminException: request.adminException === true && this.host.teamAdmin?.() === true },
-        );
+        // A setting that needs a secret is approved together with it: the person types the token on the
+        // card, and it goes from here straight to the tool that waits. It is never part of a message.
+        const waiting = this.store.data.tasks.find((t) => t.id === request.taskId)?.changes.find((c) => c.id === request.changeId);
+        if (request.approved === true && waiting?.status === "pending" && waiting.secretFields?.length) {
+          const given: Record<string, unknown> = request.secrets && typeof request.secrets === "object" ? request.secrets : {};
+          const kept: Record<string, string> = {};
+          for (const field of waiting.secretFields) {
+            const raw = given[field.key];
+            const value = typeof raw === "string" ? raw.trim() : "";
+            if (!value && !field.optional) throw new Error(`This one needs ${field.label}. Type it on the approval card in the conversation.`);
+            if (value.length > 8192) throw new Error(`${field.label} is too long.`);
+            if (value) kept[field.key] = value;
+          }
+          this.changeSecrets.set(waiting.id, kept);
+        }
+        let resolved: boolean;
+        try {
+          resolved = this.broker.approve(
+            request.taskId,
+            request.changeId,
+            request.approved === true,
+            approvalNote,
+            // The account, not the name it shows: two people may share a name, one person may rename.
+            { actor, actorId: this.localApproverId(), adminException: request.adminException === true && this.host.teamAdmin?.() === true },
+          );
+        } catch (error) {
+          // Nothing waits for this answer any more: what was typed with it is not kept either.
+          this.changeSecrets.delete(request.changeId);
+          throw error;
+        }
         // Who answered is written down once the broker resolves or records the final decision.
         const change = this.store.data.tasks
           .find((t) => t.id === request.taskId)
@@ -665,6 +687,15 @@ export class SafetyPart {
           change.decidedBy = { name: actor, at: Date.now(), allowed: request.approved === true };
         }
         break;
+      }
+      case "change-reveal": {
+        const change = this.task(request.taskId).changes.find((c) => c.id === request.changeId);
+        if (!change?.reveal) throw new Error("There is nothing to show for this one.");
+        const kept = this.changeReveals.get(change.id);
+        this.changeReveals.delete(change.id);
+        change.reveal.shown = true;
+        // An empty value says it is gone: shown before, or sshs3 restarted since.
+        return { reply: { changeReveal: kept ?? { label: change.reveal.label, value: "" } } };
       }
       case "peer-approve": {
         if (!this.host.peerDecide) throw new Error("Approvals are not passed between people here.");

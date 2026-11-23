@@ -1,4 +1,4 @@
-import type { AgentMode, AgentSchedule, MissionAgent } from "../../../shared/types/aiHub";
+import type { AgentMode, AgentSchedule, ChangeSecretField, MissionAgent } from "../../../shared/types/aiHub";
 
 /**
  * The rules an agent runs under are not the agent's to change. Most of what
@@ -40,7 +40,11 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
   },
   sshs3_manage_app_and_settings: {
     fallback: "get_state",
-    ops: { get_state: "read", update_settings: "guard-if", configure_ai: "guard-if", update_shortcuts: "guard-if", update_safety_policy: "guard", list_dotfiles: "read", save_dotfile: "guard-if", delete_dotfile: "change", list_snippets: "read", save_snippet: "change", delete_snippet: "change", open_local_terminal: "change" },
+    ops: { get_state: "read", update_settings: "guard-if", configure_ai: "guard-if", update_shortcuts: "guard-if", update_safety_policy: "guard", list_dotfiles: "read", save_dotfile: "guard-if", delete_dotfile: "change", list_snippets: "read", save_snippet: "change", delete_snippet: "change", open_local_terminal: "change",
+      // Which model profiles there are, and the rules a team server's administrators set for everyone.
+      list_model_profiles: "read", save_model_profile: "guard", delete_model_profile: "guard", test_model: "change",
+      get_team_rules: "read", update_team_rules: "guard", restore_builtin_agents: "guard", forget_history: "guard",
+    },
   },
   sshs3_kb_manage: { fallback: "list", ops: { list: "read", add_document: "guard-if", delete_document: "change", ingest_local_folder: "guard", ingest_s3_prefix: "guard" } },
   sshs3_tickets: { fallback: "list", ops: { list: "read", read: "read", create: "change", comment: "change" } },
@@ -50,7 +54,34 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
   sshs3_investigate: { fallback: "investigate", ops: { investigate: "read" } },
   sshs3_agent_and_mcp_manage: {
     fallback: "list",
-    ops: { list: "read", run_workforce: "read", delegate_to_agent: "change", handoff_agent: "change", install_mcp_preset: "guard", save_infra_edge: "change", delete_infra_edge: "change", save_agent: "guard-if", delete_agent: "change", run_agent_mission: "guard-if", save_mcp_server: "guard", delete_mcp_server: "change", test_mcp_server: "change" },
+    ops: { list: "read", run_workforce: "read", delegate_to_agent: "change", handoff_agent: "change", install_mcp_preset: "guard", save_infra_edge: "change", delete_infra_edge: "change", save_agent: "guard-if", delete_agent: "change", run_agent_mission: "guard-if", save_mcp_server: "guard", delete_mcp_server: "change", test_mcp_server: "change",
+      // Programs that run as external agents, what an MCP tool may do unasked, and the keys other agents reach this app with.
+      save_runner: "guard", delete_runner: "guard", test_runner: "guard", set_mcp_tool_policy: "guard",
+      list_mcp_keys: "read", create_mcp_key: "guard", revoke_mcp_key: "guard", set_local_mcp_server: "guard",
+    },
+  },
+  // The two chat bots of a team server: the context bot that only reads, and the agent bot that answers.
+  sshs3_manage_team_chat: {
+    fallback: "status",
+    ops: {
+      status: "read",
+      context_connect: "guard", context_test: "change", context_disconnect: "guard", context_select_channel: "guard-if",
+      context_read_back: "change", context_forget: "guard", context_retention: "guard",
+      agent_connect: "guard", agent_disconnect: "guard", agent_settings: "guard", agent_set_channel: "guard", agent_remove_channel: "change",
+      agent_copy_model: "guard", agent_new_ssh_key: "guard", agent_conversations: "read", agent_conversation: "read", agent_try: "guard",
+      link_code: "guard", unlink: "guard-if",
+    },
+  },
+  // Where sshs3 sends word, what it is connected to, what it collects by itself, and what starts on an alert.
+  sshs3_manage_alerts_and_integrations: {
+    fallback: "status",
+    ops: {
+      status: "read",
+      save_notify_channel: "guard", delete_notify_channel: "guard", test_notify_channel: "change", notify_settings: "guard",
+      atlassian_connect: "guard", atlassian_test: "change", atlassian_disconnect: "guard", jira_sync_now: "change",
+      facts_configure: "guard", facts_collect_now: "change",
+      alert_hook_create: "guard", alert_hook_disable: "guard", alert_rules_save: "guard",
+    },
   },
 };
 
@@ -96,6 +127,11 @@ export interface GuardAsk {
   title: string;
   /** Exactly what would change. */
   detail: string;
+  /**
+   * Secrets the setting needs that the call did not carry. The person types them on the approval card,
+   * so a token never has to be written in the conversation, where the model's provider would read it.
+   */
+  secrets?: ChangeSecretField[];
 }
 
 const has = (p: Record<string, unknown>, key: string): boolean => p[key] !== undefined && p[key] !== null && p[key] !== "";
@@ -138,6 +174,174 @@ const REMOVES: Record<string, string> = {
   sshs3_agent_and_mcp_manage: "an agent, an MCP server or a dependency",
 };
 
+/** The same, for the tools whose deletes take away different kinds of thing. */
+const REMOVES_BY_OP: Record<string, string> = {
+  delete_model_profile: "a model profile",
+  delete_runner: "an external agent's program",
+  delete_notify_channel: "a notification channel",
+};
+
+/** A secret the call did not carry is asked for on the card. One it did carry is used, and never shown. */
+function askFor(payload: Record<string, unknown>, fields: ChangeSecretField[]): ChangeSecretField[] | undefined {
+  const missing = fields.filter((f) => !has(payload, f.key));
+  return missing.length ? missing : undefined;
+}
+/** A line saying a secret came with the call, without the secret. */
+const given = (payload: Record<string, unknown>, keys: string[]): string =>
+  keys
+    .filter((k) => has(payload, k))
+    .map((k) => `${k}: (given in the conversation, so the model's provider has read it)`)
+    .join("\n");
+const lines = (...parts: Array<string | undefined>): string => parts.filter((part): part is string => Boolean(part)).join("\n");
+
+/** The settings tools that are wholly about the rules agents run under: one question per operation. */
+function settingAsk(tool: string, op: string, payload: Record<string, unknown>, tainted: boolean): GuardAsk | undefined {
+  if (tool === "sshs3_manage_app_and_settings") {
+    if (op === "save_model_profile")
+      return {
+        title: "Add or change a model profile",
+        detail: lines(
+          show(payload, ["idOrName", "name", "provider", "model", "baseUrl", "apiProtocol", "activeRole", "egressPolicy"]),
+          given(payload, ["apiKey"]),
+          "Conversations that use this profile are sent to its address, with its key.",
+        ),
+        secrets: askFor(payload, [{ key: "apiKey", label: "the API key", optional: true }]),
+      };
+    if (op === "update_team_rules")
+      return {
+        title: "Change the rules for everyone on this server",
+        detail: lines(show(payload, ["requirePeerApprovalOnProd", "freezeCluster", "freezeHours", "freezeWhy", "endFreeze"]), "Only an administrator of the server can change these."),
+      };
+    if (op === "restore_builtin_agents") return { title: "Put the built-in agents back as they were", detail: "Changes made to the built-in agents are lost." };
+    if (op === "forget_history") return { title: "Forget every conversation's history", detail: "Conversations and what agents did in them are removed from this account. This cannot be undone." };
+    return undefined;
+  }
+
+  if (tool === "sshs3_agent_and_mcp_manage") {
+    if (op === "save_runner")
+      return {
+        title: "Add or change a program that runs as an external agent",
+        detail: lines(show(payload, ["idOrName", "name", "command", "args", "cwd"]), "The program is started on this computer, as you."),
+      };
+    if (op === "test_runner") return { title: "Start an external agent's program once, to see that it answers", detail: show(payload, ["idOrName", "id", "name"]) || op };
+    if (op === "set_mcp_tool_policy")
+      return {
+        title: "Change what an MCP tool may do without asking",
+        detail: lines(show(payload, ["serverIdOrName", "toolName", "policy"]), "allow: it runs unasked. ask: a person approves each call. deny: it never runs."),
+      };
+    if (op === "create_mcp_key")
+      return {
+        title: "Make a key that lets another agent reach this app",
+        detail: lines(show(payload, ["name", "scopes", "serverIdOrName", "expiresInDays", "tools"]), "The key is shown to you once, on this card. It is not given to the agent in this conversation."),
+      };
+    if (op === "revoke_mcp_key") return { title: "Take back a key another agent reaches this app with", detail: show(payload, ["idOrName", "id", "name"]) || op };
+    if (op === "set_local_mcp_server")
+      return { title: payload.enabled === false ? "Switch off this app's own MCP server" : "Switch on this app's own MCP server", detail: lines(show(payload, ["enabled", "port"]), "Other agents on this computer reach sshs3 through it, with a key.") };
+    return undefined;
+  }
+
+  if (tool === "sshs3_manage_team_chat") {
+    if (op === "context_connect")
+      return {
+        title: "Connect the context bot, which reads chosen channels",
+        detail: lines(show(payload, ["service", "baseUrl", "enabled"]), given(payload, ["token"]), "What the team writes in the channels you then choose is kept here and given to agents that search it."),
+        secrets: askFor(payload, [{ key: "token", label: "the context bot's token", optional: true }]),
+      };
+    if (op === "context_disconnect")
+      return { title: "Disconnect the context bot", detail: lines(show(payload, ["service", "forget"]), payload.forget === true ? "What it read is removed too." : undefined) };
+    if (op === "context_select_channel" && payload.selected !== false)
+      return { title: "Let the context bot read one more channel", detail: lines(show(payload, ["service", "channel"]), "What is written there is kept here and given to agents that search it.") };
+    if (op === "context_forget") return { title: "Remove what the context bot read", detail: show(payload, ["service", "channel"]) || "Everything it read, in every channel." };
+    if (op === "context_retention") return { title: "Change how long the team's chat is kept", detail: lines(show(payload, ["days"]), "Messages older than this are removed.") };
+    if (op === "agent_connect")
+      return {
+        title: "Connect the agent bot, which answers people in chat",
+        detail: lines(show(payload, ["service", "baseUrl", "enabled"]), given(payload, ["token", "appToken"]), "It must be its own Slack app or bot account, not the context bot's."),
+        secrets: askFor(payload, [
+          { key: "token", label: "the agent bot's token", optional: true },
+          ...(text(payload, "service").toLowerCase() === "slack" ? [{ key: "appToken", label: "the Slack app-level token (xapp-)", optional: true }] : []),
+        ]),
+      };
+    if (op === "agent_disconnect") return { title: "Disconnect the agent bot", detail: show(payload, ["service"]) || op };
+    if (op === "agent_settings")
+      return {
+        title: "Change how the agent bot answers in chat",
+        detail:
+          show(payload, ["enabled", "dmsEnabled", "dmsUnlinked", "dmsServers", "dmsClusters", "personNewPerHour", "personMessagesPerHour", "channelPerHour", "concurrentRuns", "monthlyTokenBudget", "approvalWaitMinutes"]) || op,
+      };
+    if (op === "agent_set_channel")
+      return {
+        title: "Let people in a chat channel ask the agent bot",
+        detail: lines(
+          show(payload, ["service", "channelId", "channelName", "servers", "clusters", "reach", "agentId", "approvers", "historyFrom"]),
+          "Anyone in that channel can then make the agent work on these servers, as far as the reach allows.",
+        ),
+      };
+    if (op === "agent_copy_model") return { title: "Give the chat agent your model", detail: "Its conversations are then sent to your model's address, with your key and your data policy." };
+    if (op === "agent_new_ssh_key") return { title: "Make a new SSH key for the agent bot", detail: "The old key stops working. The new public key must be added on every server the bot may reach." };
+    if (op === "agent_try")
+      return {
+        title: "Write to the agent bot in a simulated chat",
+        detail: lines(show(payload, ["channel", "as", "text"]), "The chat agent really runs, with its own model and servers. Nothing is sent to Slack or Mattermost."),
+      };
+    if (op === "link_code")
+      return {
+        title: "Make a code that links a chat account to your sshs3 account",
+        detail: lines(show(payload, ["service"]), "Whoever sends the code to the agent bot can then approve in chat as you. It is shown to you once, on this card, and not given to the agent in this conversation."),
+      };
+    // Taking away one's own link is ordinary; somebody else's is an administrator's decision.
+    if (op === "unlink" && (has(payload, "chatUserId") || tainted)) return { title: "Unlink a person's chat account", detail: show(payload, ["service", "chatUserId"]) || op };
+    return undefined;
+  }
+
+  if (tool === "sshs3_manage_alerts_and_integrations") {
+    if (op === "save_notify_channel")
+      return {
+        title: "Add or change where notifications are sent",
+        detail: lines(
+          show(payload, ["idOrName", "kind", "name", "enabled", "events", "includeCommand", "alertMinSeverity"]),
+          given(payload, ["url", "secret"]),
+          "What waits for an answer is sent to that address, with the command when includeCommand is on.",
+        ),
+        secrets: askFor(payload, [
+          { key: "url", label: "the channel's address (the webhook URL)", optional: true },
+          ...(text(payload, "kind").toLowerCase() === "webhook" ? [{ key: "secret", label: "the secret that signs the webhook", optional: true }] : []),
+        ]),
+      };
+    if (op === "notify_settings")
+      return {
+        title: "Change the notification settings",
+        detail: lines(show(payload, ["publicUrl", "reminderMinutes", "quietHours", "noiseBudgetPerHour"]), has(payload, "publicUrl") ? "Links in notifications point to this address." : undefined),
+      };
+    if (op === "atlassian_connect")
+      return {
+        title: `Connect ${text(payload, "product").toLowerCase() === "confluence" ? "Confluence" : "Jira"}`,
+        detail: lines(
+          show(payload, ["product", "variant", "baseUrl", "email", "enabled", "projects", "doneTransition", "closeOnApprove"]),
+          given(payload, ["token"]),
+          "sshs3 then reads from that address as you, and writes ticket comments and moves there.",
+        ),
+        secrets: askFor(payload, [{ key: "token", label: "the API token", optional: true }]),
+      };
+    if (op === "atlassian_disconnect") return { title: "Disconnect Jira or Confluence", detail: show(payload, ["product"]) || op };
+    if (op === "facts_configure")
+      return {
+        title: "Change what sshs3 collects from servers by itself",
+        detail: lines(show(payload, ["enabled", "intervalHours", "exclude", "watchPaths"]), "It runs read-only commands on every server that is not excluded, on a timer, and reads the watched files."),
+      };
+    if (op === "alert_hook_create")
+      return {
+        title: "Make an address that monitoring can send alerts to",
+        detail: "Whoever has the address can make alerts appear here. A new one replaces the old. It is shown to you once, on this card.",
+      };
+    if (op === "alert_hook_disable") return { title: "Switch off the address monitoring sends alerts to", detail: "Alerts sent to it are refused from then on." };
+    if (op === "alert_rules_save")
+      return { title: "Change which agent starts on which alert", detail: lines(show(payload, ["rules"]), "An agent named here starts by itself when a matching alert arrives.") };
+    return undefined;
+  }
+  return undefined;
+}
+
 export function guardAsk(
   tool: string,
   payload: Record<string, unknown>,
@@ -156,9 +360,14 @@ export function guardAsk(
   // the model meant to name.
   if (op.startsWith("delete") && spec.ops[op] !== "read")
     return {
-      title: `Remove ${REMOVES[tool] ?? "something"} from this workspace`,
+      title: `Remove ${REMOVES_BY_OP[op] ?? REMOVES[tool] ?? "something"} from this workspace`,
       detail: show(payload, ["idOrName", "idOrTitle", "id", "name", "title", "folderName", "cluster", "s3ProfileId", "edgeId"]),
     };
+
+  // The operations that are wholly about sshs3's own rules and connections. Asked by the operation's
+  // name: each has a handler of its own, which takes no other operation's fields.
+  const setting = settingAsk(tool, op, payload, tainted);
+  if (setting) return setting;
 
   if (tool === "sshs3_manage_server" && tainted) {
     if (op === "save_tunnel")

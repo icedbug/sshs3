@@ -4,6 +4,7 @@ import type { AgentChange, AgentTask, HubRequest, HubSnapshot, ShellKind } from 
 import type { NativeToolState } from "@shared/types/nativeHermes";
 import { hubRequest, useHub } from "../../lib/aiHub";
 import { HighlightedCode } from "./DiffViewer";
+import { SECRETS_ELSEWHERE, takesSecrets } from "./ChangeSecrets";
 
 export interface TerminalControlProps {
   sessionId: string | null;
@@ -244,16 +245,23 @@ function TerminalControlBar({
           )}
 
           <div className="flex flex-wrap items-center gap-1.5">
-            <button
-              type="button"
-              className="ai-btn-emerald inline-flex items-center gap-1 rounded px-2 py-0.5"
-              data-testid="terminal-approve-once-btn"
-              disabled={busy}
-              onClick={onApproveOnce}
-            >
-              <Check size={12} aria-hidden="true" />
-              Approve Once
-            </button>
+            {takesSecrets(pending) ? (
+              // A setting that needs a token is approved on its own card, where the token is typed.
+              <small className="text-app-ink-faint" data-testid="terminal-approval-takes-secrets">
+                {SECRETS_ELSEWHERE}
+              </small>
+            ) : (
+              <button
+                type="button"
+                className="ai-btn-emerald inline-flex items-center gap-1 rounded px-2 py-0.5"
+                data-testid="terminal-approve-once-btn"
+                disabled={busy}
+                onClick={onApproveOnce}
+              >
+                <Check size={12} aria-hidden="true" />
+                Approve Once
+              </button>
+            )}
 
             {safePrefix && onAllowPrefix && (
               <button

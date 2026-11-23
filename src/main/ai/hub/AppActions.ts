@@ -52,6 +52,7 @@ import {
 import type { AppActionHost } from "./HubService";
 import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan } from "./PlanMode";
 import { guardAsk } from "./AppGuard";
+import { SETTINGS_OPS, handleSettingsOp, isSettingsOp, type SettingsCtx } from "./AppSettingsActions";
 
 /**
  * The agent's sshs3 tools and MCP calls: what each `sshs3_*` tool does when a
@@ -691,6 +692,8 @@ export async function handleAppAction(
     // What moves the fence agents run inside waits for a person, in every mode (see AppGuard.ts).
     const ask = guardAsk(request.action, p, task, { agents: hub.getAgentsList(), schedules: hub.store.data.schedules });
     let guarded: AgentChange | undefined;
+    // What the person typed on the approval card for the secrets this setting needs. Never part of a message.
+    let typed: Record<string, string> = {};
     if (ask) {
       guarded = {
         id: crypto.randomUUID(),
@@ -699,6 +702,7 @@ export async function handleAppAction(
         target: "sshs3",
         description: clip(ask.title, 300),
         command: boundedContext(ask.detail, 3000),
+        ...(ask.secrets?.length ? { secretFields: ask.secrets } : {}),
         status: "pending",
         riskLevel: "modify",
         riskReason: "Changes the rules agents run under. Only a person can approve it.",
@@ -709,10 +713,24 @@ export async function handleAppAction(
         guarded.status = "denied";
         throw new Error("Only a person can change this, in the app.");
       }
-      await authorize(guarded);
+      try {
+        await authorize(guarded);
+      } finally {
+        typed = hub.takeChangeSecrets(guarded.id);
+      }
       guarded.status = "running";
       hub.changed();
     }
+    const settingsCtx: SettingsCtx = {
+      secret: (key) => typed[key] ?? (typeof p[key] === "string" && (p[key] as string).trim() ? (p[key] as string).trim() : undefined),
+      reveal: (label, value) => {
+        // Only a change a person approved has a card to show it on.
+        if (!guarded) return false;
+        hub.keepChangeReveal(guarded.id, label, value);
+        guarded.reveal = { label };
+        return true;
+      },
+    };
     try {
       const result = await dispatch();
       if (guarded) guarded.status = "completed";
@@ -723,6 +741,10 @@ export async function handleAppAction(
         guarded.output = boundedContext(error instanceof Error ? error.message : String(error), 600);
       }
       throw error;
+    } finally {
+      typed = {};
+      // The card has done its work: its fields are not asked for again.
+      if (guarded?.secretFields) delete guarded.secretFields;
     }
 
     async function dispatch(): Promise<unknown> {
@@ -1372,7 +1394,9 @@ export async function handleAppAction(
       }
 
       case "sshs3_manage_app_and_settings": {
-        const op = only(rawOperation(p, "get_state"), [
+        const asked = rawOperation(p, "get_state");
+        if (isSettingsOp(request.action, asked)) return handleSettingsOp(hub, request.action, asked, p, settingsCtx);
+        const op = only(asked, [
           "get_state",
           "update_settings",
           "configure_ai",
@@ -2665,7 +2689,9 @@ export async function handleAppAction(
       }
 
       case "sshs3_agent_and_mcp_manage": {
-        const op = only(rawOperation(p, "list"), [
+        const asked = rawOperation(p, "list");
+        if (isSettingsOp(request.action, asked)) return handleSettingsOp(hub, request.action, asked, p, settingsCtx);
+        const op = only(asked, [
           "list",
           "run_workforce",
           "delegate_to_agent",
@@ -2908,6 +2934,12 @@ export async function handleAppAction(
         await hub.request({ action: "mcp-test", id: match.id });
         const updated = hub.getMcpServersList().find((s) => s.id === match.id);
         return { ok: true, server: updated ? withoutSecrets(updated) : undefined };
+      }
+
+      case "sshs3_manage_team_chat":
+      case "sshs3_manage_alerts_and_integrations": {
+        const op = only(rawOperation(p, "status"), [...SETTINGS_OPS[request.action]]);
+        return handleSettingsOp(hub, request.action, op, p, settingsCtx);
       }
 
       default:

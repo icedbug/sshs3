@@ -940,6 +940,13 @@ export class HubService {
   localMcpError?: string;
 
   auditLog?: AuditLog;
+  /**
+   * What a person typed on an approval card for the secrets a setting needs, by change id. Memory only:
+   * the tool that waited for the approval reads it once, and it is dropped when that tool ends.
+   */
+  readonly changeSecrets = new Map<string, Record<string, string>>();
+  /** What a setting change made for the person alone (a key, a code), until it is shown once. Memory only. */
+  readonly changeReveals = new Map<string, { label: string; value: string }>();
   readonly writingAudit = new Set<string>();
   readonly restoringChanges = new Set<string>();
   auditShipper?: AuditShipper;
@@ -1315,6 +1322,16 @@ export class HubService {
       pagesWithUse: this.pagesWithUse.bind(this),
       commentTicket: (id: string, author: string, text: string): void =>
         this.putTicket(withComment(this.ticket(id), author, text)),
+      /** The secrets a person typed when approving this change. Read once: they are gone after. */
+      takeChangeSecrets: (changeId: string): Record<string, string> => {
+        const given = this.changeSecrets.get(changeId) ?? {};
+        this.changeSecrets.delete(changeId);
+        return given;
+      },
+      /** Keeps what a change made for the person alone, to be shown once on its card. */
+      keepChangeReveal: (changeId: string, label: string, value: string): void => {
+        this.changeReveals.set(changeId, { label, value });
+      },
     };
   }
 

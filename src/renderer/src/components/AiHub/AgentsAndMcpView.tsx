@@ -91,6 +91,8 @@ const NARROWABLE: { name: string; label: string }[] = [
   { name: "sshs3_manage_s3_and_sync", label: "Change storage and sync" },
   { name: "sshs3_manage_app_and_settings", label: "Change the app's own settings" },
   { name: "sshs3_agent_and_mcp_manage", label: "Change agents and MCP servers" },
+  { name: "sshs3_manage_team_chat", label: "Change the chat bots in Slack and Mattermost" },
+  { name: "sshs3_manage_alerts_and_integrations", label: "Change notifications, Jira and Confluence, and alerts" },
   { name: "sshs3_workspace_layout", label: "Open terminals and panes" },
 ];
 

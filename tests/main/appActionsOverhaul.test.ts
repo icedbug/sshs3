@@ -118,6 +118,9 @@ function createHarness(options: {
 
   const hub: AppActionHost = {
     recheckChange: vi.fn(),
+    // No card in these tests takes a secret or shows one.
+    takeChangeSecrets: () => ({}),
+    keepChangeReveal: vi.fn(),
     // No run here was asked for from chat.
     chatFence: () => undefined,
     // No chat bot in these tests: nothing is kept, so nothing can be searched.
