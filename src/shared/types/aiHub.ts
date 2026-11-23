@@ -1192,6 +1192,16 @@ export interface NotifyChannelView {
   secretUnread?: boolean;
 }
 
+/** Quiet hours as the settings card shows and sends them: "22:00" to "07:00" in a named time zone. */
+export interface NotifyQuietHours {
+  enabled: boolean;
+  start: string;
+  end: string;
+  timezone: string;
+  /** A critical alert is told about during quiet hours too. */
+  bypassCritical: boolean;
+}
+
 /** A channel as it is saved from the form. `url` and `secret` are sent only when they are set or changed. */
 export interface NotifyChannelInput {
   id?: string;
@@ -2356,6 +2366,10 @@ export interface HubSnapshot {
     publicUrlFixed: boolean;
     /** Minutes after which a waiting approval is told about once more. 0: never. */
     reminderMinutes: number;
+    /** Left out when no quiet hours are set. */
+    quietHours?: NotifyQuietHours;
+    /** The most notifications an hour. Left out when there is no limit. */
+    noiseBudgetPerHour?: number;
   };
   /** The pages agents read. Bodies are shortened here; `kb-page-read` returns one in full. */
   /** The local MCP listener: whether it is on, where it answers, and this person's keys. */
@@ -2666,7 +2680,8 @@ export type HubRequest =
   | { action: "chat-answering-answer"; taskId: string; id: string; kind: "change" | "plan"; approved: boolean; note?: string }
   /** An administrator, in the demo or before a bot is connected: a message to the agent bot in a simulated chat. */
   | { action: "chat-answering-try"; channel: string; as: "me" | "guest"; text: string; thread?: string }
-  | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
+  /** `quietHours` with `enabled` false or left out, or null, switches quiet hours off. The hub checks each field itself. */
+  | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number; quietHours?: Partial<NotifyQuietHours> | null; noiseBudgetPerHour?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }
   | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string; env?: string[] } }

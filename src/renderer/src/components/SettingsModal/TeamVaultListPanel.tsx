@@ -1,5 +1,5 @@
 import { writeClipboardText } from '../../lib/clipboard';
-import { DesktopOnly } from '../ui/DesktopOnly';
+import { DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Check,
@@ -510,6 +510,8 @@ export const TeamVaultListPanel: React.FC = () => {
                       {busyVaultId === v.vaultId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Lock className="h-3.5 w-3.5" />}
                     </button>
                   ) : (
+                    // The saved identity is a card or a key file on the computer the app runs on.
+                    !desktopOnlyHere() &&
                     v.selfRecipientId &&
                     v.selfIdentityFilePath && (
                       <button

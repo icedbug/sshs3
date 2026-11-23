@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ConfirmProvider } from "../../src/renderer/src/components/ConfirmDialog";
 import { LandingView } from "../../src/renderer/src/components/LandingView";
 
 const snapshot = {
@@ -29,22 +30,27 @@ afterEach(() => {
   delete (window as unknown as { multissh?: unknown }).multissh;
 });
 
+const landing = (
+  <LandingView
+    recentSSH={[]}
+    onConnectRecentSSH={vi.fn()}
+    onConnectSFTP={vi.fn()}
+    onQuickConnectSSH={vi.fn()}
+    onQuickStartTerminal={vi.fn()}
+    onNewTab={vi.fn()}
+    onOpenProfiles={vi.fn()}
+    onNewProfile={vi.fn()}
+    onOpenSyncBootstrap={vi.fn()}
+    onNavigateToTabBar={vi.fn()}
+  />
+);
+
+// The start page asks before it removes a server, through the app's own dialog.
 const renderLanding = (): void => {
-  render(
-    <LandingView
-      recentSSH={[]}
-      onConnectRecentSSH={vi.fn()}
-      onConnectSFTP={vi.fn()}
-      onQuickConnectSSH={vi.fn()}
-      onQuickStartTerminal={vi.fn()}
-      onNewTab={vi.fn()}
-      onOpenProfiles={vi.fn()}
-      onNewProfile={vi.fn()}
-      onOpenSyncBootstrap={vi.fn()}
-      onNavigateToTabBar={vi.fn()}
-    />,
-  );
+  render(<ConfirmProvider>{landing}</ConfirmProvider>);
 };
+
+const removals = (): unknown[] => aiHubRequest.mock.calls.map(([request]) => request).filter((request) => request.action === "server-delete");
 
 const openEditor = async (): Promise<void> => {
   renderLanding();
@@ -73,6 +79,7 @@ describe("the start page says when a server could not be saved, removed or added
     await openEditor();
     fail = "Only an administrator can remove a shared server.";
     fireEvent.click(screen.getByTestId("delete-server-btn-srv-1"));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Remove node" }));
     expect(await screen.findByTestId("server-action-error")).toHaveTextContent("Not removed. Only an administrator can remove a shared server.");
     expect(screen.getByTestId("delete-server-btn-srv-1")).toBeInTheDocument();
   });
@@ -87,5 +94,50 @@ describe("the start page says when a server could not be saved, removed or added
     expect(await screen.findByTestId("add-node-error")).toHaveTextContent("Not added. A server with that name is already saved.");
     expect(screen.getByPlaceholderText("e.g. k8s-worker-02")).toHaveValue("worker-9");
     expect(screen.getByPlaceholderText("e.g. 10.20.2.115")).toHaveValue("10.9.9.9");
+  });
+});
+
+describe("Remove node on the start page asks before it removes a saved server", () => {
+  it("one click removes nothing: it asks, names the server and says who loses it", async () => {
+    await openEditor();
+    fireEvent.click(screen.getByTestId("delete-server-btn-srv-1"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent('Remove "api-01" from the workspace? It is removed for everybody who shares it. This cannot be undone.');
+    expect(removals()).toEqual([]);
+
+    // Cancel: still there, still nothing sent, and the editor is as it was.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(removals()).toEqual([]);
+    expect(screen.getByTestId("delete-server-btn-srv-1")).toBeInTheDocument();
+  });
+
+  it("removes the server once the question is answered with yes", async () => {
+    await openEditor();
+    fireEvent.click(screen.getByTestId("delete-server-btn-srv-1"));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Remove node" }));
+    await waitFor(() => expect(removals()).toEqual([{ action: "server-delete", profileId: "srv-1" }]));
+    // Done: the editor closes.
+    await waitFor(() => expect(screen.queryByTestId("delete-server-btn-srv-1")).toBeNull());
+  });
+
+  it("says a server of one's own goes from one's own list only", async () => {
+    snapshot.workspaceServers[0].shared = false;
+    try {
+      await openEditor();
+      fireEvent.click(screen.getByTestId("delete-server-btn-srv-1"));
+      expect(await screen.findByRole("alertdialog")).toHaveTextContent('Remove "api-01" from your saved servers? This cannot be undone.');
+    } finally {
+      snapshot.workspaceServers[0].shared = true;
+    }
+  });
+
+  it("removes nothing where there is no dialog to ask with", async () => {
+    render(landing);
+    fireEvent.click(await screen.findByTitle("Edit cluster, node role, tags, description and local ~/.ssh"));
+    fireEvent.click(screen.getByTestId("delete-server-btn-srv-1"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(removals()).toEqual([]);
+    expect(screen.getByTestId("delete-server-btn-srv-1")).toBeInTheDocument();
   });
 });

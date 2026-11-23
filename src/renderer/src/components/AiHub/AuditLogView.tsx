@@ -323,27 +323,6 @@ export function AuditLogView({
       minute: "2-digit",
     });
 
-  // Derive SIEM / Webhook / S3 Anchor sink status from hub configuration.
-  const webhookSinks = (hub.notifications?.channels ?? []).filter(
-    (c) => c.kind === "webhook" && c.enabled,
-  );
-  const failedSink = webhookSinks.find((c) => c.last?.ok === false);
-  const siemBadge =
-    webhookSinks.length > 0
-      ? {
-          text: `SIEM sink: ${webhookSinks.map((c) => c.name).join(", ")}${failedSink ? " (delivery error)" : ""}`,
-          tone: failedSink ? "ai-badge-danger" : "ai-badge-success",
-        }
-      : hub.s3Workspace?.connected
-        ? {
-            text: `SIEM sink: S3 anchors (${hub.s3Workspace.bucket})`,
-            tone: "ai-badge-success",
-          }
-        : {
-            text: "SIEM sink: local only",
-            tone: "",
-          };
-
   // A green "verified" over nothing reads as proof, and an empty log has nothing to verify. The demo lab's
   // log stays empty until an agent's run does something: the notice says so, and says what is not recorded.
   const demo = hub.demoMode === true;
@@ -382,9 +361,6 @@ export function AuditLogView({
                       : `Chain broken at #${verification.problem?.seq ?? "?"}`}
               </span>
             )}
-            <span className={`ai-badge ${siemBadge.tone}`} data-testid="siem-sink-badge">
-              {siemBadge.text}
-            </span>
           </div>
           {demoEmpty ? (
             <span data-testid="audit-demo-notice">

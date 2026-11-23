@@ -56,7 +56,8 @@ export interface FilePaneContextMenuInput {
   isS3ObjectEntry: boolean;
   selectedAreAllFiles: boolean;
   handleOpen: (entry: FileEntry) => void;
-  handleOpenExternal: (entry: FileEntry) => Promise<void> | void;
+  /** Desktop app only: opens the file in the editor of the computer the app runs on. */
+  handleOpenExternal?: (entry: FileEntry) => Promise<void> | void;
   handleCut: () => void;
   handleCopy: () => void;
   handlePaste: () => void;
@@ -181,12 +182,16 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                     setEditorEntry(selectedEntries[0]);
                   },
                 },
-                {
-                  key: 'open-external',
-                  label: 'Open in External Editor',
-                  icon: ExternalLink,
-                  onSelect: () => void handleOpenExternal(selectedEntries[0]),
-                },
+                ...(handleOpenExternal
+                  ? [
+                      {
+                        key: 'open-external',
+                        label: 'Open in External Editor',
+                        icon: ExternalLink,
+                        onSelect: () => void handleOpenExternal(selectedEntries[0]),
+                      },
+                    ]
+                  : []),
               ]
             : []),
           {

@@ -11,6 +11,7 @@ import { isGlobalActionId, runGlobalAction } from './globalActions';
 import { OPEN_CLIPBOARD_HISTORY_EVENT } from './clipboardHistoryEvents';
 import { dispatchTerminalAction } from './terminalActionEvents';
 import { openTabMenuFor } from './tabMenuEvents';
+import { desktopOnlyHere } from '../components/ui/DesktopOnly';
 import {
   findAdjacentPane,
   getTopmostOverlay,
@@ -249,7 +250,10 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
               newTab: handleNewTab,
               openProfiles: () => openTopLevelModal(() => setProfilesModalOpen(true)),
               openSettings: () => openTopLevelModal(() => setSettingsModalOpen(true)),
-              newWindow: () => void window.multissh.windowNew(),
+              // A browser opens its own windows: the app's "new window" is the desktop's.
+              newWindow: () => {
+                if (!desktopOnlyHere()) void window.multissh.windowNew();
+              },
               showShortcuts: openShortcutsHelp,
             });
             break;

@@ -111,11 +111,13 @@ export const K8sLoginModal: React.FC<K8sLoginModalProps> = ({ open, onClose, onS
 
   // Browser sign-in is offered as a choice once the cluster is detected; otherwise the token form is all there is.
   // Detection never overrides a token the user already pasted.
-  const tokenRef = useRef(token);
-  tokenRef.current = token;
-  useEffect(() => {
-    if (webLogin.supported && !tokenRef.current.trim()) setMode('browser');
-  }, [webLogin.supported]);
+  // The choice is set while drawing, in the step in which detection changes, and not in an effect after it:
+  // an effect left one drawn frame in which browser sign-in was available and the token form still shown.
+  const [supportedSeen, setSupportedSeen] = useState(false);
+  if (webLogin.supported !== supportedSeen) {
+    setSupportedSeen(webLogin.supported);
+    if (webLogin.supported && !token.trim()) setMode('browser');
+  }
   const effectiveMode: LoginMode = webLogin.supported ? mode : 'token';
 
   // Escape cancels a pending browser sign-in first, otherwise it closes; a stray backdrop click would

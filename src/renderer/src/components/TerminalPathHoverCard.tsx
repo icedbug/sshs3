@@ -22,6 +22,7 @@ import { chooseHoverCardSide, hoverCardRoom, placeHoverCard } from '../lib/hover
 import { createRendererLogger } from '../lib/log';
 import { useCertificatePreview } from '../lib/useCertificatePreview';
 import { CertificatePreview } from './CertificatePreview';
+import { desktopOnlyHere } from './ui/DesktopOnly';
 
 export interface TerminalPathHoverCardProps {
   path: string;
@@ -252,7 +253,8 @@ export const TerminalPathHoverCard: React.FC<TerminalPathHoverCardProps> = ({
 
   // Local files are dragged out of the card in place; remote ones first ask to copy them here.
   const isLocalProvider = providerId === 'local';
-  const canDragOut = Boolean(providerId) && !networkPath && (isLocalProvider ? Boolean(window.multissh?.dragOutStart) : Boolean(onDragOut));
+  // In the browser the other app would be one on the server, so the handle is not shown there.
+  const canDragOut = !desktopOnlyHere() && Boolean(providerId) && !networkPath && (isLocalProvider ? Boolean(window.multissh?.dragOutStart) : Boolean(onDragOut));
   // Dragging the file icon, the preview or the handle all start the same flow; a remote drag opens the confirmation instead.
   const handleDragStart = (e: React.DragEvent) => {
     e.preventDefault();

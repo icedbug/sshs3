@@ -52,7 +52,7 @@ export class InboxPart {
   notificationsView(this: HubService): NonNullable<HubSnapshot["notifications"]> {
     const quiet = this.notifyStore.data.quietHours;
     const hhmm = (h: number, m = 0): string => `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-    // What the settings card reads back (it is not in the shared type yet): quiet hours as it sends them.
+    // What the settings card reads back: quiet hours as it sends them.
     const policy = {
       ...(quiet
         ? {
@@ -458,9 +458,8 @@ export class InboxPart {
         }
         if (request.reminderMinutes !== undefined) this.notifyStore.data.reminderMinutes = integer(request.reminderMinutes, 0, 60);
         // Quiet hours as the settings card sends them: "22:00" to "07:00" in a named time zone.
-        const policy = request as { quietHours?: unknown; noiseBudgetPerHour?: unknown };
-        if (policy.quietHours !== undefined) {
-          const q = policy.quietHours as { enabled?: unknown; start?: unknown; end?: unknown; timezone?: unknown; bypassCritical?: unknown } | null;
+        if (request.quietHours !== undefined) {
+          const q = request.quietHours;
           const time = (v: unknown): [number, number] | undefined => {
             const m = typeof v === "string" ? /^(\d{1,2}):(\d{2})$/.exec(v.trim()) : null;
             return m && Number(m[1]) < 24 && Number(m[2]) < 60 ? [Number(m[1]), Number(m[2])] : undefined;
@@ -488,8 +487,8 @@ export class InboxPart {
             };
           }
         }
-        if (policy.noiseBudgetPerHour !== undefined)
-          this.notifyStore.data.noiseBudgetPerHour = integer(policy.noiseBudgetPerHour as number, 0, 1000);
+        if (request.noiseBudgetPerHour !== undefined)
+          this.notifyStore.data.noiseBudgetPerHour = integer(request.noiseBudgetPerHour, 0, 1000);
         await this.notifyStore.save();
         break;
       }

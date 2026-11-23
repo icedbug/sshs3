@@ -4,6 +4,7 @@ import type { LocalShellType } from '@shared/types/ssh';
 import { describeIpcError } from '../lib/format';
 import { FOCUSABLE_OVERLAY_SELECTOR, isElementVisible, navigateInOverlay, type NavigationDirection } from '../lib/spatialNavigation';
 import { useHub } from '../lib/aiHub';
+import { desktopOnlyHere } from './ui/DesktopOnly';
 
 const SHELL_BUTTON_CLASS =
   'border border-border-subtle px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors';
@@ -22,21 +23,26 @@ const WindowsShellButton: React.FC<{
       ?.openElevatedShell?.(shell)
       .catch((err: unknown) => setError(describeIpcError(err, 'Could not start the elevated shell')));
   };
+  // The administrator shell is a window on the computer the app runs on. In the browser that is the
+  // server, so the shield is not drawn there.
+  const elevatedHere = !desktopOnlyHere();
   return (
     <span className="inline-flex flex-col items-center">
       <span className="inline-flex">
-        <button type="button" onClick={() => onOpen(shell)} title={title} className={`${SHELL_BUTTON_CLASS} rounded-l-lg`}>
+        <button type="button" onClick={() => onOpen(shell)} title={title} className={`${SHELL_BUTTON_CLASS} ${elevatedHere ? 'rounded-l-lg' : 'rounded-lg'}`}>
           {label}
         </button>
-        <button
-          type="button"
-          onClick={openElevated}
-          title={`Open ${label} as administrator (UAC prompt, separate window)`}
-          aria-label={`Open ${label} as administrator`}
-          className={`${SHELL_BUTTON_CLASS} -ml-px rounded-r-lg px-1.5`}
-        >
-          <Shield className="h-3.5 w-3.5" />
-        </button>
+        {elevatedHere && (
+          <button
+            type="button"
+            onClick={openElevated}
+            title={`Open ${label} as administrator (UAC prompt, separate window)`}
+            aria-label={`Open ${label} as administrator`}
+            className={`${SHELL_BUTTON_CLASS} -ml-px rounded-r-lg px-1.5`}
+          >
+            <Shield className="h-3.5 w-3.5" />
+          </button>
+        )}
       </span>
       {error && <span role="alert" className="mt-0.5 max-w-48 text-center text-2xs text-red-400">{error}</span>}
     </span>

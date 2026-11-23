@@ -2,6 +2,7 @@ import { openLink } from './openLink';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import { detectPortsInOutput, type PortDetectionResult } from './portDetection';
+import { desktopOnlyHere } from '../components/ui/DesktopOnly';
 
 export interface UsePortDetectionOptions {
   enabled?: boolean;
@@ -11,11 +12,15 @@ export interface UsePortDetectionOptions {
 }
 
 export function usePortDetection({
-  enabled = true,
+  enabled: enabledBySettings = true,
   customRegex,
   isRemote,
   config,
 }: UsePortDetectionOptions) {
+  // The pill opens a port on the computer the app runs on and then a page on "localhost". In the
+  // browser that computer is the server and "localhost" is the person's own machine, so the two never
+  // meet: no port is offered there.
+  const enabled = enabledBySettings && !desktopOnlyHere();
   const [detectedPorts, setDetectedPorts] = useState<PortDetectionResult[]>([]);
   const dismissedPortsRef = useRef<Set<number>>(new Set());
   const activeTunnelsRef = useRef<Map<number, { id: string; localPort: number }>>(new Map()); // remote port -> tunnel
@@ -79,6 +84,7 @@ export function usePortDetection({
 
   const handleForwardAndOpen = useCallback(
     async (port: number, protocol: 'http' | 'https') => {
+      if (desktopOnlyHere()) return;
       if (!isRemoteRef.current || !configRef.current) {
         // Local terminal session: directly open in browser
         const url = `${protocol}://localhost:${port}`;

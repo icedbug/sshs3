@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Download, Loader2, X } from 'lucide-react';
 import { useUpdateState } from '../lib/useUpdateState';
+import { desktopOnlyHere } from './ui/DesktopOnly';
 
 /**
  * Non-blocking banner shown when a new version is available. Nothing is
@@ -10,6 +11,10 @@ import { useUpdateState } from '../lib/useUpdateState';
 export const UpdateBanner: React.FC = () => {
   const state = useUpdateState();
   const [dismissedKey, setDismissedKey] = useState<string | null>(null);
+
+  // In the browser the app is the server's, and a new version is put there by whoever runs the
+  // server. Nobody who is signed in can download or install it, so nothing is shown.
+  if (desktopOnlyHere()) return null;
 
   if (state?.status === 'installing') {
     return (

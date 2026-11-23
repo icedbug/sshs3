@@ -94,6 +94,25 @@ describe('K8sLoginModal browser sign-in', () => {
     expect(screen.queryByLabelText('Paste oc login command')).not.toBeInTheDocument();
   });
 
+  it('selects browser sign-in in the same step in which it becomes available', async () => {
+    probe.mockResolvedValue({ supported: true });
+    renderModal();
+    const option = screen.getByRole('radio', { name: /sign in with browser/i });
+    // What the option looked like each time it changed while it was enabled.
+    const checkedWhileEnabled: (string | null)[] = [];
+    const observer = new MutationObserver(() => {
+      if (!option.hasAttribute('disabled')) checkedWhileEnabled.push(option.getAttribute('aria-checked'));
+    });
+    observer.observe(option, { attributes: true });
+    typeServer();
+    await waitFor(() => expect(option).toHaveAttribute('aria-checked', 'true'), { timeout: 3000 });
+    observer.disconnect();
+    // Never enabled and not chosen: there is no moment in which the token form is still drawn. A test that
+    // waited for "enabled" and then looked at the form used to catch that moment when the machine was busy.
+    expect(checkedWhileEnabled.length).toBeGreaterThan(0);
+    expect(checkedWhileEnabled).not.toContain('false');
+  });
+
   it('shows only the token form after choosing to use a token', async () => {
     probe.mockResolvedValue({ supported: true });
     renderModal();

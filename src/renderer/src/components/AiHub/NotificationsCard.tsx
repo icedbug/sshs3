@@ -1,29 +1,22 @@
 import { useState, type KeyboardEvent } from "react";
 import type {
-  HubRequest,
   HubSnapshot,
   NotifyChannelInput,
   NotifyChannelKind,
   NotifyChannelView,
   NotifyEventKind,
+  NotifyQuietHours,
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
 import type { Act } from "./panelShared";
 
-export interface QuietHoursConfig {
-  enabled: boolean;
-  start: string;
-  end: string;
-  timezone: string;
-  bypassCritical: boolean;
-}
+export type QuietHoursConfig = NotifyQuietHours;
 
 export interface NotificationPolicyConfig {
   quietHours: QuietHoursConfig;
 }
 
-type ExtendedNotifySettings = NonNullable<HubSnapshot["notifications"]> &
-  Partial<NotificationPolicyConfig>;
+type NotifySettings = NonNullable<HubSnapshot["notifications"]>;
 
 const POLICY_STORAGE_KEY = "sshs3.notifyPolicy.v1";
 
@@ -78,7 +71,7 @@ export function isInQuietHours(
   return currentMin >= startMin || currentMin < endMin;
 }
 
-function loadInitialPolicy(settings: ExtendedNotifySettings): NotificationPolicyConfig {
+function loadInitialPolicy(settings: NotifySettings): NotificationPolicyConfig {
   let stored: Partial<NotificationPolicyConfig> = {};
   if (typeof window !== "undefined") {
     try {
@@ -181,7 +174,7 @@ export function NotificationsCard({
   hub: HubSnapshot;
   act: Act;
 }): JSX.Element {
-  const settings: ExtendedNotifySettings = hub.notifications ?? {
+  const settings: NotifySettings = hub.notifications ?? {
     channels: [],
     publicUrl: "",
     publicUrlFixed: false,
@@ -273,11 +266,7 @@ export function NotificationsCard({
         // ignore storage failures
       }
     }
-    const payload = {
-      action: "notify-settings-save",
-      quietHours: policy.quietHours,
-    } as unknown as HubRequest;
-    const next = await act(payload);
+    const next = await act({ action: "notify-settings-save", quietHours: policy.quietHours });
     if (next) {
       setPolicyStatus("Quiet hours saved.");
     }

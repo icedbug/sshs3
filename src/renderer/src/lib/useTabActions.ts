@@ -15,6 +15,7 @@ import { extractHostnameFromTitle, isSameHost } from './terminalTitle';
 import type { OpenEditorTabDetail } from './editorTabEvents';
 import { statIfExists } from './storageLookup';
 import type { ConfirmOptions } from '../components/ConfirmDialog';
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../components/ui/DesktopOnly';
 
 export interface TabActionsContext {
   tabs: AppTab[];
@@ -314,6 +315,12 @@ export function useTabActions(ctx: TabActionsContext) {
         members.map((member) => prepareConnect(member, source, (profile) => window.multissh.profilesSaveSSH(profile)))
       ).catch(() => {});
 
+      // A tunnel listens on the computer the app runs on. In the browser that is the server, so the
+      // terminals open and the tunnels are left alone, and the person is told once.
+      if (desktopOnlyHere()) {
+        if (plan.tunnels.length > 0) notify?.(`The tunnels of these servers were not started. ${DESKTOP_ONLY_NOTE}`);
+        return;
+      }
       const results = await Promise.allSettled(plan.tunnels.map(({ config, tunnel }) => window.multissh.sshTunnelStart(config, tunnel)));
       const failures = results.flatMap((result, i) =>
         result.status === 'rejected'

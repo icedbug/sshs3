@@ -31,6 +31,7 @@ import type { SourceType } from './types';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
 import { useDialogFocus } from '../../lib/useDialogFocus';
 import { useConfirm } from '../ConfirmDialog';
+import { desktopOnlyHere } from '../ui/DesktopOnly';
 import { openEditorTab } from '../../lib/editorTabEvents';
 import { CodeEditor, type CodeEditorHandle } from '../Editor/CodeEditor';
 import {
@@ -423,6 +424,10 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
       setSaving(false);
     }
   }, [providerId, entry, content, readOnly, saving, tailModeActive, saveBlocked, onSaved]);
+
+  // The other program starts on the computer the app runs on. In the browser that is the server, so
+  // nothing here offers it.
+  const canOpenExternal = !desktopOnlyHere();
 
   // Launch external editor
   const handleOpenExternal = useCallback(async () => {
@@ -823,20 +828,22 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
             )}
 
             {/* Open in external editor */}
-            <button
-              type="button"
-              title={isDirectPreview ? 'Open in External App' : 'Open in External Editor (auto-uploads on save)'}
-              disabled={externalLaunching || loading}
-              onClick={() => void handleOpenExternal()}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-txt-primary hover:bg-app-surface-hover transition-colors"
-            >
-              {externalLaunching ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
-              ) : (
-                <ExternalLink className="h-3.5 w-3.5 text-sky-400" />
-              )}
-              <span className="hidden sm:inline">{isDirectPreview ? 'External App' : 'External Editor'}</span>
-            </button>
+            {canOpenExternal && (
+              <button
+                type="button"
+                title={isDirectPreview ? 'Open in External App' : 'Open in External Editor (auto-uploads on save)'}
+                disabled={externalLaunching || loading}
+                onClick={() => void handleOpenExternal()}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-txt-primary hover:bg-app-surface-hover transition-colors"
+              >
+                {externalLaunching ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                ) : (
+                  <ExternalLink className="h-3.5 w-3.5 text-sky-400" />
+                )}
+                <span className="hidden sm:inline">{isDirectPreview ? 'External App' : 'External Editor'}</span>
+              </button>
+            )}
 
             {/* Save button */}
             {!isDirectPreview && viewMode === 'source' && (
@@ -1036,13 +1043,15 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
                 Binary file detected. Plain text view might not render properly.
               </span>
             </div>
-            <button
-              type="button"
-              onClick={() => void handleOpenExternal()}
-              className="rounded bg-amber-800/40 px-2 py-0.5 text-xs font-semibold text-amber-200 hover:bg-amber-700/50"
-            >
-              Open in External App
-            </button>
+            {canOpenExternal && (
+              <button
+                type="button"
+                onClick={() => void handleOpenExternal()}
+                className="rounded bg-amber-800/40 px-2 py-0.5 text-xs font-semibold text-amber-200 hover:bg-amber-700/50"
+              >
+                Open in External App
+              </button>
+            )}
           </div>
         )}
 
@@ -1103,7 +1112,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               <PdfViewer
                 fileName={entry.name}
                 base64={base64}
-                onOpenExternal={handleOpenExternal}
+                onOpenExternal={canOpenExternal ? handleOpenExternal : undefined}
               />
             </Suspense>
           ) : isRasterImage ? (
@@ -1150,7 +1159,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               <HtmlPreview
                 fileName={entry.name}
                 htmlContent={content}
-                onOpenInBrowser={handleOpenExternal}
+                onOpenInBrowser={canOpenExternal ? handleOpenExternal : undefined}
               />
             </Suspense>
           ) : viewMode === 'preview' && isCsv ? (

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import { IS_WINDOWS } from '../../lib/platform';
 import { describeIpcError } from '../../lib/format';
+import { desktopOnlyHere } from '../ui/DesktopOnly';
 
 interface WindowsAgentPathNoticeProps {
   /** The PKCS#11 module currently chosen as the default; nothing is shown for Auto-detect (empty). */
@@ -21,8 +22,10 @@ export const WindowsAgentPathNotice: React.FC<WindowsAgentPathNoticeProps> = ({ 
   const [error, setError] = useState<string | null>(null);
   const [justFixed, setJustFixed] = useState(false);
 
+  // The ssh-agent and the PATH in question are those of the computer the app runs on. In the browser
+  // that is the server, and "Windows" would be the person's own machine: nothing is asked or shown.
   const check = useCallback(async () => {
-    if (!IS_WINDOWS || !libPath) {
+    if (!IS_WINDOWS || desktopOnlyHere() || !libPath) {
       setStatus(null);
       return;
     }
@@ -43,6 +46,8 @@ export const WindowsAgentPathNotice: React.FC<WindowsAgentPathNoticeProps> = ({ 
     void check();
   }, [check]);
 
+  if (!IS_WINDOWS || desktopOnlyHere() || !libPath) return null;
+
   const fix = async () => {
     setFixing(true);
     setError(null);
@@ -56,8 +61,6 @@ export const WindowsAgentPathNotice: React.FC<WindowsAgentPathNoticeProps> = ({ 
       setFixing(false);
     }
   };
-
-  if (!IS_WINDOWS || !libPath) return null;
 
   if (checking && !status) {
     return (

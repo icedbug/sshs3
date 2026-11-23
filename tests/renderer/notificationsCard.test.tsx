@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HubRequest, HubSnapshot } from "../../src/shared/types/aiHub";
+import type { HubRequest, HubSnapshot, NotifyQuietHours } from "../../src/shared/types/aiHub";
 import { NotificationsCard } from "../../src/renderer/src/components/AiHub/NotificationsCard";
 import { InboxView } from "../../src/renderer/src/components/AiHub/InboxView";
 
@@ -100,6 +100,32 @@ describe("notification channels", () => {
     expect(screen.getByLabelText("Public address")).toBeDisabled();
     expect(screen.getByText("Set by the administrator (SSHS3_PUBLIC_URL).")).toBeInTheDocument();
     expect(screen.getByText(/No channel yet/)).toBeInTheDocument();
+  });
+});
+
+describe("quiet hours", () => {
+  it("are read from the settings and sent back as they are, in the shared types all the way", async () => {
+    window.localStorage.removeItem("sshs3.notifyPolicy.v1");
+    const saved: NotifyQuietHours = { enabled: true, start: "21:30", end: "06:15", timezone: "Europe/Stockholm", bypassCritical: false };
+    // Written without a cast: this file stops compiling if the settings or the request lose the field.
+    const settings: NonNullable<HubSnapshot["notifications"]> = { channels: [], publicUrl: "", publicUrlFixed: false, reminderMinutes: 5, quietHours: saved, noiseBudgetPerHour: 12 };
+    const request: HubRequest = { action: "notify-settings-save", quietHours: saved };
+    const off: HubRequest = { action: "notify-settings-save", quietHours: null, noiseBudgetPerHour: 0 };
+    expect(off.action).toBe("notify-settings-save");
+
+    const act = vi.fn(async () => hub({ notifications: settings }));
+    try {
+      render(<NotificationsCard hub={hub({ notifications: settings })} act={act} />);
+      expect(screen.getByLabelText("Enable quiet hours")).toBeChecked();
+      expect(screen.getByLabelText("Quiet hours start")).toHaveValue("21:30");
+      expect(screen.getByLabelText("Quiet hours end")).toHaveValue("06:15");
+      expect(screen.getByLabelText("Quiet hours timezone")).toHaveValue("Europe/Stockholm");
+      fireEvent.click(screen.getByTestId("save-notify-policy-btn"));
+      await waitFor(() => expect(act).toHaveBeenCalledWith(request));
+      expect(await screen.findByText("Quiet hours saved.")).toBeInTheDocument();
+    } finally {
+      window.localStorage.removeItem("sshs3.notifyPolicy.v1");
+    }
   });
 });
 

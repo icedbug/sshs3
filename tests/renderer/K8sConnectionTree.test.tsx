@@ -113,6 +113,41 @@ describe('K8sConnectionTree', () => {
     });
   });
 
+  it.each([
+    ['desktop app', 'offer a port forward', false],
+    ['browser', 'offer no port forward', true],
+  ])('in the %s a pod and its container %s', async (_place, _what, inBrowser) => {
+    (window as any).__SSHS3_WEB_MODE__ = inBrowser ? true : undefined;
+    try {
+      renderTree(<K8sConnectionTree onBrowseFiles={vi.fn()} onExec={vi.fn()} onViewLogs={vi.fn()} />);
+      expect(await screen.findByText('minikube')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByText('minikube'));
+      });
+      expect(await screen.findByText('default')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByText('default'));
+      });
+      expect(await screen.findByText('nginx-pod')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByText('nginx-pod'));
+      });
+      expect(await screen.findByText('nginx')).toBeInTheDocument();
+      // What works in both places stays in both.
+      expect(screen.getByTitle('Browse container filesystem')).toBeInTheDocument();
+      if (inBrowser) {
+        // A port forward listens on the computer the app runs on: nothing offers one here.
+        expect(screen.queryByTitle('Port Forward into pod')).toBeNull();
+        expect(screen.queryByTitle('Port Forward to this container')).toBeNull();
+      } else {
+        expect(screen.getByTitle('Port Forward into pod')).toBeInTheDocument();
+        expect(screen.getByTitle('Port Forward to this container')).toBeInTheDocument();
+      }
+    } finally {
+      (window as any).__SSHS3_WEB_MODE__ = undefined;
+    }
+  });
+
   it('requests namespaces and pods once per expansion, also when React runs state updaters twice (StrictMode)', async () => {
     render(
       <React.StrictMode>

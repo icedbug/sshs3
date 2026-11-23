@@ -236,6 +236,31 @@ describe('useTabActions handleConnectSystem', () => {
     expect(notify.mock.calls[0][0]).toContain('address in use');
   });
 
+  it('in the browser opens the terminals, starts no tunnel and says once that tunnels are for the desktop app', async () => {
+    (window as unknown as { __SSHS3_WEB_MODE__?: boolean }).__SSHS3_WEB_MODE__ = true;
+    try {
+      const api = install({ sshTunnelStart: vi.fn().mockRejectedValue(new Error('This is not available on the sshs3 web server. It works in the desktop app.')) });
+      const notify = vi.fn();
+      const { result, setTabs } = setup([existing], undefined, notify);
+      await act(async () => {
+        await result.current.handleConnectSystem([server('1', 'web', { name: 'shop', tunnelIds: ['t1'] }, [tunnel('t1', 'db')]), server('2', 'api', { name: 'shop' })], 'personal');
+      });
+      expect(setTabs).toHaveBeenCalledTimes(1);
+      expect(api.sshTunnelStart).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledWith('The tunnels of these servers were not started. Only in the desktop app.');
+
+      // A system without tunnels: nothing to say.
+      notify.mockClear();
+      await act(async () => {
+        await result.current.handleConnectSystem([server('3', 'cache', { name: 'shop' })], 'personal');
+      });
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      (window as unknown as { __SSHS3_WEB_MODE__?: boolean }).__SSHS3_WEB_MODE__ = undefined;
+    }
+  });
+
   it('says nothing when every tunnel started or there are none', async () => {
     install();
     const notify = vi.fn();

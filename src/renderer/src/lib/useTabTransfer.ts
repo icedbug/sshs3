@@ -5,6 +5,7 @@ import { markDetached, queueAttach, unmarkDetached } from './liveSessions';
 import { createRendererLogger } from './log';
 import type { AppTab } from './tabs';
 import { adoptedTab, buildTabHandoff, canMoveTab } from './tabTransfer';
+import { desktopOnlyHere } from '../components/ui/DesktopOnly';
 
 const log = createRendererLogger('tab-transfer');
 
@@ -63,6 +64,8 @@ export function useTabTransfer(
 
   const moveTab = useCallback(
     async (tabId: string, target: MoveTabTarget) => {
+      // The other window is one of the desktop app's. A browser has its own tabs and windows.
+      if (desktopOnlyHere()) return;
       const tab = tabsRef.current.find((t) => t.id === tabId);
       if (!tab || !canMoveTab(tab) || !window.multissh?.windowMoveTab) return;
       const handoff = buildTabHandoff(tab);

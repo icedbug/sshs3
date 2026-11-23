@@ -1,5 +1,5 @@
 import { copyToClipboard } from '../../lib/clipboard';
-import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../ui/DesktopOnly';
+import { DESKTOP_ONLY_NOTE, DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -203,6 +203,9 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
   };
 
   const scanFido2ResidentKeys = async () => {
+    // The form scans by itself when a server uses a key that lives on the device. In the browser the
+    // key would be one plugged into the server, so nothing is scanned.
+    if (desktopOnlyHere()) return;
     setFido2Scanning(true);
     setFido2ScanError(null);
     try {
@@ -617,7 +620,10 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
         </div>
       )}
 
+      {/* A security key is read on the computer the app runs on. A server that already signs in with one
+          keeps its settings shown in the browser, switched off. */}
       {config.authType === 'fido2' && (
+        <DesktopOnly>
         <div className="flex flex-col gap-3 rounded-lg border border-border-subtle bg-app-surface-subtle p-3">
           <label className="flex items-center gap-2 cursor-pointer text-txt-primary font-medium">
             <input
@@ -906,6 +912,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
             )}
           </div>
         </div>
+        </DesktopOnly>
       )}
 
       {/* Outgoing Proxy Settings */}

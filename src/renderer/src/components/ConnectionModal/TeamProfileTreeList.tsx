@@ -18,6 +18,7 @@ import { buildTeamFolderTree, collectTeamFolderSuggestions, filterTeamFolderName
 import { filterSshProfiles, filterS3Profiles } from './connectionGrouping';
 import { describeIpcError } from '../../lib/format';
 import { useConfirm } from '../ConfirmDialog';
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../ui/DesktopOnly';
 
 /** One known team's worth of state this component owns — never shared across vaultIds, same
  * per-team isolation invariant `TeamVaultService`'s own `Map<vaultId, ...>` upholds on the main
@@ -476,7 +477,12 @@ export const TeamProfileTreeList = forwardRef<TeamProfileTreeListHandle, TeamPro
             >
               <Lock className="h-6 w-6 text-amber-400" />
               <p className="text-sm font-medium text-txt-secondary">{title} is locked</p>
-              {!entry.showManualUnlock && entry.unlockRecipientId && entry.unlockIdentityPath && status.selfRecipientId ? (
+              {desktopOnlyHere() ? (
+                // The card is read, and the identity file is looked for, on the computer the app runs on.
+                <p className="max-w-xs text-xs text-txt-muted" data-testid="desktop-only-note">
+                  Unlock with a card or an identity file: {DESKTOP_ONLY_NOTE} Here it opens with its recovery key, under Settings, Team Vault.
+                </p>
+              ) : !entry.showManualUnlock && entry.unlockRecipientId && entry.unlockIdentityPath && status.selfRecipientId ? (
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();

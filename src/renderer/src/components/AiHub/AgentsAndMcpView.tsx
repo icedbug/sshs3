@@ -16,6 +16,7 @@ import {
 import { AgentTestsView } from "./AgentTestsView";
 import { ConfirmButton } from "./ConfirmButton";
 import { type Act, modes } from "./panelShared";
+import { parseRunnerEnvNames } from "./runnerEnv";
 
 interface AgentDraft {
   id?: string;
@@ -179,9 +180,10 @@ export function AgentsAndMcpView({
   const [testingMcpId, setTestingMcpId] = useState("");
   const [mcpTestNotes, setMcpTestNotes] = useState<Record<string, string>>({});
   const [runnerDraft, setRunnerDraft] = useState<
-    { id: string; name: string; command: string; args: string; cwd: string; note?: string; existing?: boolean } | undefined
+    { id: string; name: string; command: string; args: string; cwd: string; env: string; note?: string; existing?: boolean } | undefined
   >();
   /** What the last Test of an external agent found, by its id; "testing" while it is asked. */
+  const runnerEnvProblem = runnerDraft ? parseRunnerEnvNames(runnerDraft.env).problem : undefined;
   const [runnerTests, setRunnerTests] = useState<Record<string, { ok: boolean; detail: string } | "testing">>({});
   const testRunner = async (id: string): Promise<void> => {
     setRunnerTests((now) => ({ ...now, [id]: "testing" }));
@@ -933,7 +935,7 @@ export function AgentsAndMcpView({
         <button
           type="button"
           onClick={() =>
-            setRunnerDraft(runnerDraft ? undefined : { id: "", name: "", command: "", args: "", cwd: "" })
+            setRunnerDraft(runnerDraft ? undefined : { id: "", name: "", command: "", args: "", cwd: "", env: "" })
           }
         >
           {runnerDraft ? "Close" : "Add an agent"}
@@ -945,7 +947,7 @@ export function AgentsAndMcpView({
         teammate sets up the same agent on theirs. The program is given the basics of this app&apos;s environment only
         (the path, your home folder, language, terminal, temporary folder and proxy settings), so its own sign-in in
         your home folder works as usual. A variable it needs beyond these, such as an API key, is passed when it is
-        listed for the agent: ask the assistant to add it.
+        named in the agent&apos;s settings here.
       </p>
       {runnerDraft && (
         <form
@@ -955,6 +957,9 @@ export function AgentsAndMcpView({
             e.preventDefault();
             const name = runnerDraft.name.trim();
             if (!name || !runnerDraft.command.trim()) return;
+            // The hub drops a name it does not take without a word, so nothing is saved until every name is one it takes.
+            const env = parseRunnerEnvNames(runnerDraft.env);
+            if (env.problem) return;
             void act({
               action: "runner-save",
               runner: {
@@ -963,6 +968,8 @@ export function AgentsAndMcpView({
                 command: runnerDraft.command.trim(),
                 args: runnerDraft.args.split(/\s+/).filter(Boolean),
                 cwd: runnerDraft.cwd.trim() || undefined,
+                // Always sent, also when empty: that is how a name is taken away again.
+                env: env.names,
               },
             }).then((next) => {
               if (next) setRunnerDraft(undefined);
@@ -1013,8 +1020,31 @@ export function AgentsAndMcpView({
             />
             <small>The checkout of the code. The agent reads and writes here with your user&apos;s rights.</small>
           </label>
+          <label>
+            Environment variables to pass (names only, never values)
+            <input
+              className="ai-mono"
+              aria-label="Environment variables to pass"
+              aria-invalid={runnerEnvProblem ? true : undefined}
+              aria-describedby="runner-env-help"
+              placeholder="ANTHROPIC_API_KEY, OPENAI_API_KEY"
+              autoComplete="off"
+              spellCheck={false}
+              value={runnerDraft.env}
+              onChange={(e) => setRunnerDraft({ ...runnerDraft, env: e.target.value })}
+            />
+            <small id="runner-env-help">
+              Names of variables the program is given on top of the basic ones, separated by commas or spaces: a key
+              the agent reads from the environment, such as ANTHROPIC_API_KEY, must be named here.
+            </small>
+            {runnerEnvProblem && (
+              <small role="alert" className="ai-warn" data-testid="runner-env-problem">
+                {runnerEnvProblem}
+              </small>
+            )}
+          </label>
           <div className="ai-card-actions">
-            <button type="submit" className="ai-btn-emerald">
+            <button type="submit" className="ai-btn-emerald" disabled={Boolean(runnerEnvProblem)}>
               Save
             </button>
             <button type="button" onClick={() => setRunnerDraft(undefined)}>
@@ -1032,6 +1062,7 @@ export function AgentsAndMcpView({
                 {r.command} {r.args.join(" ")}
               </small>
               <small>{r.cwd ? `Works in ${r.cwd}` : "No folder set: it cannot run yet"}</small>
+              {r.env?.length ? <small data-testid={`runner-env-${r.id}`}>Also given: {r.env.join(", ")}</small> : null}
               {(() => {
                 const test = runnerTests[r.id];
                 if (test === "testing") return <small data-testid={`runner-test-${r.id}`}>Starting it and waiting for its answer…</small>;
@@ -1057,6 +1088,7 @@ export function AgentsAndMcpView({
                   command: r.command,
                   args: r.args.join(" "),
                   cwd: r.cwd ?? "",
+                  env: (r.env ?? []).join(", "),
                   existing: true,
                 })
               }
@@ -1091,6 +1123,7 @@ export function AgentsAndMcpView({
                   command: p.command,
                   args: p.args.join(" "),
                   cwd: "",
+                  env: "",
                   note: p.note,
                 })
               }

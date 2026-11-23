@@ -28,6 +28,7 @@ import { recursiveFilterFiles, RECURSIVE_MAX_RESULTS } from '../../lib/recursive
 import { buildDragPayload, type PaneSide, type PaneSource, type SourceType } from './types';
 import { offersAwsSsoSignIn } from '@shared/types/aws';
 import { isListingStale } from '../../lib/staleListing';
+import { DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 import { comboFromKeyboardEvent } from '../../lib/shortcuts';
 import { DEFAULT_SHORTCUTS } from '@shared/types/settings';
 import { createRendererLogger } from '../../lib/log';
@@ -734,7 +735,9 @@ export const FilePane: React.FC<FilePaneProps> = ({
 
   const stopOutsideWatchRef = useRef<(() => void) | null>(null);
   useEffect(() => () => stopOutsideWatchRef.current?.(), []);
-  const canDragOut = source.sourceType !== 'local' && Boolean(window.multissh?.dragOutPrepare);
+  // A file can leave the app for another program on the computer the app runs on. In the browser that
+  // computer is the server, so nothing is offered there.
+  const canDragOut = !desktopOnlyHere() && source.sourceType !== 'local' && Boolean(window.multissh?.dragOutPrepare);
 
   const contextMenuItems: ContextMenuItem[] = buildContextMenuItems({
     contextMenuOpen: contextMenu !== null,
@@ -749,7 +752,8 @@ export const FilePane: React.FC<FilePaneProps> = ({
     isS3ObjectEntry,
     selectedAreAllFiles,
     handleOpen,
-    handleOpenExternal,
+    // The editor would start on the computer the app runs on: in the browser that is the server.
+    handleOpenExternal: desktopOnlyHere() ? undefined : handleOpenExternal,
     handleCut,
     handleCopy,
     handlePaste,
@@ -1018,14 +1022,16 @@ export const FilePane: React.FC<FilePaneProps> = ({
             <span className="truncate">{ssoLoginError ? `${error} ${ssoLoginError}` : error}</span>
           </div>
           {source.sourceType === 's3' && offersAwsSsoSignIn(error) && (
-            <button
-              type="button"
-              disabled={ssoSigningIn}
-              onClick={() => void handleSsoRelogin()}
-              className="ml-2 shrink-0 rounded-md bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-            >
-              {ssoSigningIn ? 'Waiting for browser…' : 'Sign in again'}
-            </button>
+            <DesktopOnly inline className="shrink-0">
+              <button
+                type="button"
+                disabled={ssoSigningIn}
+                onClick={() => void handleSsoRelogin()}
+                className="ml-2 shrink-0 rounded-md bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+              >
+                {ssoSigningIn ? 'Waiting for browser…' : 'Sign in again'}
+              </button>
+            </DesktopOnly>
           )}
           {source.sourceType !== 'local' && (
             <button
@@ -1059,7 +1065,8 @@ export const FilePane: React.FC<FilePaneProps> = ({
               : [entry];
             // Local files become a native OS drag so they can also be dropped outside sshs3
             // (in-app drops then arrive as OS file drops, see readOsFilePaths).
-            if (source.sourceType === 'local' && window.multissh?.dragOutStart) {
+            // In the browser there is no such drag: the file moves between the two panes as any other.
+            if (source.sourceType === 'local' && !desktopOnlyHere() && window.multissh?.dragOutStart) {
               e.preventDefault();
               void window.multissh.dragOutStart(items.map((it) => it.path)).catch(() => {});
               return true;

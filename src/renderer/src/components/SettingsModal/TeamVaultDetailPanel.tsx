@@ -24,6 +24,7 @@ import { formatDateTime } from '../../lib/dateFormat';
 import { parseTeamVaultJoinInfo } from '../../lib/teamVaultJoinInfo';
 import { useConfirm } from '../ConfirmDialog';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../ui/DesktopOnly';
 
 function emptyS3TargetDraft(): SyncTargetDraft {
   return { ...emptySyncTargetDraft(), type: 's3' };
@@ -90,7 +91,10 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
   // Recover using the saved recovery key text — guided alternative to "Use a different identity"
   // for someone who has only the printed/saved recovery identity, not a file path and not the
   // internal recipientId (both handled by teamVaultUnlockWithRecoveryText).
-  const [showRecoveryUnlock, setShowRecoveryUnlock] = useState(false);
+  // A card is read, and an identity file is looked for, on the computer the app runs on. In the
+  // browser that is the server, so the recovery key is the one way to open a vault there.
+  const cardHere = !desktopOnlyHere();
+  const [showRecoveryUnlock, setShowRecoveryUnlock] = useState(() => desktopOnlyHere());
   const [recoveryTextInput, setRecoveryTextInput] = useState('');
   const [recovering, setRecovering] = useState(false);
 
@@ -675,7 +679,11 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
                 Unlock to add, remove, or promote members
               </p>
 
-              {!showManualUnlock && status.selfRecipientId && status.selfIdentityFilePath ? (
+              {!cardHere ? (
+                <p className="text-xs text-txt-muted" data-testid="desktop-only-note">
+                  Unlock with a card or an identity file: {DESKTOP_ONLY_NOTE}
+                </p>
+              ) : !showManualUnlock && status.selfRecipientId && status.selfIdentityFilePath ? (
                 <>
                   <p className="text-xs text-txt-muted">
                     Unlock as <span className="text-txt-secondary">{status.selfRecipientId}</span>
@@ -754,7 +762,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
                   onClick={() => setShowRecoveryUnlock(true)}
                   className="text-xs text-txt-muted underline hover:text-txt-secondary"
                 >
-                  Lost your card? Recover using your saved recovery key...
+                  {cardHere ? 'Lost your card? Recover using your saved recovery key...' : 'Unlock with your saved recovery key...'}
                 </button>
               ) : (
                 <div className="space-y-2 border-t border-border-subtle pt-2">

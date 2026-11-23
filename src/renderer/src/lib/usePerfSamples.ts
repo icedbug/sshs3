@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PerfK8sTarget, PerfSample, PerfSshRaw } from '@shared/types/perf';
 import { computeK8sSample, computeSshSample, pushHistory, resolveIntervalMs } from './perfMetrics';
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../components/ui/DesktopOnly';
 
 export type PerfStatus = 'loading' | 'ok' | 'unavailable';
 
@@ -42,6 +43,9 @@ const recentLocalHistory = (): PerfSample[] => {
   return last && Date.now() - last.t <= LOCAL_HISTORY_MAX_AGE_MS ? localHistory : [];
 };
 
+/** What a local pane gets in the browser: the load of "this machine" would be the server's, which is not asked for. */
+const LOCAL_ELSEWHERE: PerfSamplesState = { history: [], status: 'unavailable', reason: DESKTOP_ONLY_NOTE };
+
 /** Test hook: forget the shared local history. */
 export function resetLocalPerfHistory(): void {
   localHistory = [];
@@ -53,6 +57,7 @@ export function resetLocalPerfHistory(): void {
  */
 export function usePerfSamples({ local, sshSessionId, k8sTarget, intervalSec, active }: Options): PerfSamplesState {
   const isLocal = Boolean(local) && !k8sTarget;
+  const localElsewhere = isLocal && desktopOnlyHere();
   const [state, setState] = useState<PerfSamplesState>(() => {
     const history = isLocal ? recentLocalHistory() : [];
     return { history, status: history.length ? 'ok' : 'loading' };
@@ -73,7 +78,7 @@ export function usePerfSamples({ local, sshSessionId, k8sTarget, intervalSec, ac
   }, [kind, local, isLocal, target, k8sKey]);
 
   useEffect(() => {
-    if (!active || (kind === 'ssh' && !local && !target) || !window.multissh) return undefined;
+    if (!active || (kind === 'ssh' && local && desktopOnlyHere()) || (kind === 'ssh' && !local && !target) || !window.multissh) return undefined;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let prev: PerfSshRaw | null = null;
@@ -125,5 +130,5 @@ export function usePerfSamples({ local, sshSessionId, k8sTarget, intervalSec, ac
     };
   }, [active, kind, local, target, k8sKey, intervalSec]);
 
-  return state;
+  return localElsewhere ? LOCAL_ELSEWHERE : state;
 }

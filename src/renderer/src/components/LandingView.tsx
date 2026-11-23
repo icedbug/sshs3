@@ -50,6 +50,7 @@ import { hubRequest, useHub } from '../lib/aiHub';
 import { describeIpcError } from '../lib/format';
 import { useSshCa } from '../lib/useSshCa';
 import { isWebBrowserMode } from '../lib/webClientBridge';
+import { useOptionalConfirm } from './ConfirmDialog';
 import { MASKED } from './AiHub/dataDestination';
 
 export interface LandingViewProps {
@@ -204,6 +205,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   onOpenSettings,
 }) => {
   const sshCa = useSshCa();
+  const confirm = useOptionalConfirm();
   const activeCaStatus = sshCaStatusProp ?? sshCa.status;
   const containerRef = useRef<HTMLDivElement>(null);
   const [quickConnect, setQuickConnect] = useState('');
@@ -708,6 +710,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
   };
 
   const handleDeleteServer = async (server: WorkspaceServerSummary) => {
+    // Removing cannot be taken back, so it asks first. Where the app's dialog is not around there is
+    // nobody to ask, and nothing is removed.
+    const sure = await confirm?.({
+      title: 'Remove node',
+      message:
+        server.shared === false
+          ? `Remove "${server.name}" from your saved servers? This cannot be undone.`
+          : `Remove "${server.name}" from the workspace? It is removed for everybody who shares it. This cannot be undone.`,
+      confirmLabel: 'Remove node',
+    });
+    if (!sure) return;
     setSavingMeta(true);
     setServerActionError(null);
     try {

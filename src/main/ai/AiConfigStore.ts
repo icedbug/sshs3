@@ -483,12 +483,10 @@ export class AiConfigStore {
       if (update.maxOutputTokens !== undefined) {
         next.maxOutputTokens = clampMaxOutput(update.maxOutputTokens);
       }
-      if (update.maxToolTurns !== undefined) {
-        next.maxToolTurns = Math.max(
-          2,
-          Math.min(80, Math.round(Number(update.maxToolTurns) || 20)),
-        );
-      }
+      // A run has no limit on how many times it goes round, so this is not a setting any more. A file
+      // saved before still has it: it is read without complaint and left out from this save on. An
+      // older window that still sends it is not refused, and what it sends is not kept.
+      delete next.maxToolTurns;
       if (update.reasoningEffort !== undefined) {
         if (REASONING_EFFORTS.includes(update.reasoningEffort)) {
           next.reasoningEffort = update.reasoningEffort;
@@ -824,10 +822,6 @@ export class AiConfigStore {
         typeof stored.maxOutputTokens === "number" && stored.maxOutputTokens >= 512
           ? stored.maxOutputTokens
           : 8192,
-      maxToolTurns:
-        typeof stored.maxToolTurns === "number" && stored.maxToolTurns >= 2
-          ? stored.maxToolTurns
-          : 20,
       reasoningEffort:
         stored.reasoningEffort && REASONING_EFFORTS.includes(stored.reasoningEffort)
           ? stored.reasoningEffort

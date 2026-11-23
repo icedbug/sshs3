@@ -29,6 +29,7 @@ import { TeamChatCard } from "./TeamChatCard";
 import { AgentInChatCard } from "./AgentInChatCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 import { sharingText } from "@shared/sharingText";
+import { CONTEXT_WINDOW_CHOICES, DEFAULT_CONTEXT_WINDOW, tooSmallForAgents } from "@shared/contextWindow";
 
 export { LABS_ENABLED_STORAGE_KEY };
 
@@ -123,7 +124,6 @@ export interface ConfigForm {
   contextWindowTokens: number;
   terminalContextChars: number;
   maxOutputTokens: number;
-  maxToolTurns: number;
   reasoningEffort: AiReasoningEffort;
   temperature: number;
 }
@@ -148,13 +148,37 @@ export function savedConfigForm(config: HubSnapshot["config"], mainProfile: Prov
     egressPolicy: config.egressPolicy ?? "standard",
     zdrConfirmed: Boolean(mainProfile?.zdrConfirmed ?? config.zdrConfirmed),
     piiScrubbing: config.piiScrubbing ?? "standard",
-    contextWindowTokens: config.contextWindowTokens ?? 128000,
+    contextWindowTokens: config.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW,
     terminalContextChars: config.terminalContextChars ?? 8000,
     maxOutputTokens: config.maxOutputTokens ?? 8192,
-    maxToolTurns: config.maxToolTurns ?? 20,
     reasoningEffort: mainProfile?.reasoningEffort ?? config.reasoningEffort ?? "medium",
     temperature: config.temperature ?? 0.2,
   };
+}
+
+/** How hard the model thinks before it answers: the same choices for the main model and for a saved one. */
+const REASONING_CHOICES: readonly { value: AiReasoningEffort; label: string }[] = [
+  { value: "low", label: "Low: fastest" },
+  { value: "medium", label: "Medium (default)" },
+  { value: "high", label: "High: for hard root-cause work" },
+];
+
+/** The three data rules, as the settings name them. */
+const DATA_RULE_NAMES: Record<AiEgressPolicy, string> = {
+  standard: "any service you set up",
+  "eu-pinned": "only services in the EU",
+  "local-only": "only this machine and your own network",
+};
+
+/**
+ * The data rule runs use when a saved model is the main model. It is combined the way the runs
+ * combine it (`AiConfigStore.getConfig`): the settings' rule wins unless it is "any service", then
+ * the saved model's own rule counts. Two different strict rules cannot both hold, and runs are refused.
+ */
+export function dataRuleRunsUse(settingsRule: AiEgressPolicy, savedModelRule: AiEgressPolicy | undefined): { rule: AiEgressPolicy; refused: boolean } {
+  const own = savedModelRule ?? "standard";
+  if (settingsRule !== "standard" && own !== "standard" && settingsRule !== own) return { rule: settingsRule, refused: true };
+  return { rule: settingsRule === "standard" ? own : settingsRule, refused: false };
 }
 
 /** Whether a field holds what is saved. An empty text and a value that was never set are the same. */
@@ -287,7 +311,7 @@ export function Settings({
   const form: ConfigForm = { ...saved, ...edits };
   const {
     enabled, provider, model, apiProtocol, url, embeddingModel, fastModel, actorName, egressPolicy, zdrConfirmed,
-    piiScrubbing, contextWindowTokens, terminalContextChars, maxOutputTokens, maxToolTurns, reasoningEffort, temperature,
+    piiScrubbing, contextWindowTokens, terminalContextChars, maxOutputTokens, reasoningEffort, temperature,
   } = form;
   const setField = <K extends keyof ConfigForm>(field: K, value: ConfigForm[K]): void => {
     setEdits((all) => ({ ...all, [field]: value }));
@@ -420,7 +444,6 @@ export function Settings({
           contextWindowTokens,
           terminalContextChars,
           maxOutputTokens,
-          maxToolTurns,
           temperature,
         },
         preferences: prefs,
@@ -472,6 +495,12 @@ export function Settings({
     });
   };
 
+  // A value saved earlier that is not offered any more (16k, or one the assistant set) stays in the
+  // list as itself: the field shows what is saved, and the person can keep it or leave it.
+  const contextWindowOptions = CONTEXT_WINDOW_CHOICES.includes(saved.contextWindowTokens)
+    ? CONTEXT_WINDOW_CHOICES
+    : [...CONTEXT_WINDOW_CHOICES, saved.contextWindowTokens].sort((a, b) => a - b);
+
   // The key the main model uses: the saved model's own, or the settings' key.
   const mainHasKey = mainProfile
     ? Boolean(mainProfile.hasApiKey) || (mainProfile.id === savedRoles?.primary && hub.config.hasApiKey)
@@ -485,6 +514,10 @@ export function Settings({
         : DEFAULT_PROVIDER_MODELS["openai-codex"]
       : DEFAULT_PROVIDER_MODELS[provider] ?? [];
 
+  // The card below shows what runs really do. With a saved model as the main model that is the two
+  // rules combined, not the rule in the field above alone.
+  const savedModelRule = mainProfile?.egressPolicy;
+  const runRule = dataRuleRunsUse(egressPolicy, savedModelRule);
   const dataFlow = useMemo(
     () =>
       describeActiveDataFlow(
@@ -492,14 +525,15 @@ export function Settings({
           provider,
           baseUrl: provider === "openai-codex" ? "" : url,
           model,
-          egressPolicy,
+          egressPolicy: runRule.rule,
           zdrConfirmed,
           piiScrubbing,
         },
         hub.s3Workspace,
       ),
-    [provider, url, model, egressPolicy, zdrConfirmed, piiScrubbing, hub.s3Workspace],
+    [provider, url, model, runRule.rule, zdrConfirmed, piiScrubbing, hub.s3Workspace],
   );
+  const dataFlowAllowed = dataFlow.egressValidation.allowed && !runRule.refused;
 
   return (
     // Not a form: the cards inside it have fields of their own, and Enter in one of them must not save this.
@@ -840,6 +874,22 @@ export function Settings({
                 </select>
               </label>
             </div>
+            <div className="ai-form-row">
+              <label>
+                Reasoning effort
+                <select
+                  aria-label="Profile reasoning effort"
+                  value={profileDraft.reasoningEffort}
+                  onChange={(e) => setProfileDraft({ ...profileDraft, reasoningEffort: e.target.value as AiReasoningEffort })}
+                >
+                  {REASONING_CHOICES.map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             {profileDraft.provider !== "openai-codex" && (
               <label>
                 API key (optional)
@@ -1023,12 +1073,29 @@ export function Settings({
               <small>{dataFlow.summary}</small>
             </div>
             <span
-              className={`ai-badge ${dataFlow.egressValidation.allowed ? "ai-badge-success" : "ai-badge-danger"}`}
+              className={`ai-badge ${dataFlowAllowed ? "ai-badge-success" : "ai-badge-danger"}`}
               data-testid="data-flow-status-badge"
             >
-              {dataFlow.egressValidation.allowed ? "Allowed by these settings" : "Stopped by these settings"}
+              {dataFlowAllowed ? "Allowed by these settings" : "Stopped by these settings"}
             </span>
           </div>
+
+          {mainProfile && runRule.refused && (
+            <ul className="ai-eval-checks" data-testid="data-flow-rule-conflict">
+              <li data-passed="no">
+                Runs are refused. The saved model "{mainProfile.name}" allows {DATA_RULE_NAMES[savedModelRule ?? "standard"]}, and
+                these settings allow {DATA_RULE_NAMES[egressPolicy]}. Make the two the same, or set one of them to any service.
+              </li>
+            </ul>
+          )}
+          {mainProfile && !runRule.refused && runRule.rule !== egressPolicy && (
+            <ul className="ai-eval-checks" data-testid="data-flow-run-rule">
+              <li data-passed="note">
+                Runs follow the rule of the saved model "{mainProfile.name}": {DATA_RULE_NAMES[runRule.rule]}. These settings
+                allow any service, so the saved model's own rule counts.
+              </li>
+            </ul>
+          )}
 
           {dataFlow.egressValidation.errors.length > 0 && (
             <ul className="ai-eval-checks" data-testid="data-flow-errors">
@@ -1271,13 +1338,21 @@ export function Settings({
                 value={String(contextWindowTokens)}
                 onChange={(e) => setContextWindowTokens(Number(e.target.value))}
               >
-                {[16384, 32768, 65536, 128000, 256000, 900000].map((n) => (
+                {contextWindowOptions.map((n) => (
                   <option key={n} value={n}>
-                    {Math.round(n / 1000)}k tokens{n === 128000 ? " (default)" : ""}
+                    {Math.round(n / 1000)}k tokens
+                    {n === DEFAULT_CONTEXT_WINDOW ? " (default)" : ""}
+                    {CONTEXT_WINDOW_CHOICES.includes(n) ? "" : " (saved earlier)"}
                   </option>
                 ))}
               </select>
               <small>Set it to what your model accepts. The conversation is condensed before it is full.</small>
+              {tooSmallForAgents(contextWindowTokens) && (
+                <small className="ai-warn" role="status" data-testid="context-window-too-small">
+                  Agents need more than this: their tools and instructions take most or all of it, and a run that does
+                  not fit ends at once. Choose {Math.round(CONTEXT_WINDOW_CHOICES[0] / 1000)}k tokens or more.
+                </small>
+              )}
             </label>
             <label>
               Terminal output given per terminal
@@ -1316,9 +1391,11 @@ export function Settings({
                 value={reasoningEffort}
                 onChange={(e) => setReasoningEffort(e.target.value as AiReasoningEffort)}
               >
-                <option value="low">Low: fastest</option>
-                <option value="medium">Medium (default)</option>
-                <option value="high">High: for hard root-cause work</option>
+                {REASONING_CHOICES.map((choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </option>
+                ))}
               </select>
             </label>
             {provider !== "anthropic" && (

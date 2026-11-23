@@ -235,6 +235,7 @@ Transfers between different storage providers (e.g. SFTP -> S3, S3 -> Local, Loc
    - **Moving a tab between windows:** the renderer sends the tab (secrets stripped, `sanitizeTabForSession`) plus the running session ids of its panes (`lib/liveSessions.ts`) with `windowMoveTab`. The source pane leaves the sessions running (`markDetached`); `WindowManager.reserve` keeps them from being ended if the old window closes. The target pane calls `terminalAttach`, which in one step makes that window the owner and returns the recent output kept per session in `ScrollbackBuffer` (replayed into the new xterm), so no output is lost or shown twice.
 4. **Renderer Usage**:
    - Access via `window.multissh.myAction(...)`.
+   - A channel that is desktop only must not be offered in the web app: hide the control, or draw it inside [`DesktopOnly`](src/renderer/src/components/ui/DesktopOnly.tsx), and let the function that calls it ask `desktopOnlyHere()`. `tests/renderer/desktopOnlyCallSites.test.ts` fails for a call it finds undecided.
 
 ---
 

@@ -381,7 +381,7 @@ describe("AuditLogView overhaul", () => {
     anchors: { checked: 2, held: 2, coveredSeq: 2, lastAt: Date.now() },
   };
 
-  it("formats CSV and Markdown compliance reports, filters by actor/tool/host/status, shows SIEM badge, and verifies chain", async () => {
+  it("formats CSV and Markdown compliance reports, filters by actor/tool/host/status, names no place the log is sent to, and verifies chain", async () => {
     const csv = formatAuditCsv(entries);
     expect(csv).toContain("seq,timestamp,kind,actor,target,what,outcome");
     expect(csv).toContain('"systemctl reload ""nginx"""');
@@ -428,9 +428,10 @@ describe("AuditLogView overhaul", () => {
         "Chain verified · 2 entries",
       ),
     );
-    expect(screen.getByTestId("siem-sink-badge")).toHaveTextContent(
-      "SIEM sink: Splunk SIEM",
-    );
+    // The hub in this test has a webhook channel named "Splunk SIEM". Notification channels are never sent
+    // audit entries, so the view must not name one as a place the log goes to.
+    expect(screen.queryByTestId("siem-sink-badge")).toBeNull();
+    expect(screen.getByTestId("audit-log")).not.toHaveTextContent(/SIEM|sink|Splunk/i);
 
     // Filter by actor
     fireEvent.change(screen.getByLabelText("Filter by actor"), {

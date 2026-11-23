@@ -1,4 +1,4 @@
-import { DesktopOnly } from '../ui/DesktopOnly';
+import { DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
@@ -119,6 +119,9 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
     containerPort?: number;
   } | null>(null);
   const [portForwardModalOpen, setPortForwardModalOpen] = useState(false);
+  // A port forward listens on the computer the app runs on. In the browser that is the server, so no
+  // pod or container offers one there. The button that lists them is drawn disabled, with the reason.
+  const portForwardHere = !desktopOnlyHere();
   const [debugTarget, setDebugTarget] = useState<{
     contextName: string;
     namespace: string;
@@ -749,25 +752,27 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
                                           <Info className="h-3 w-3" />
                                           <span className="hidden sm:inline">Metrics</span>
                                         </button>
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            const firstPort = pod.containers.find((c) => c.ports && c.ports.length > 0)?.ports?.[0];
-                                            setPortForwardTarget({
-                                              contextName: ctx.contextName,
-                                              namespace: ns.name,
-                                              podName: pod.name,
-                                              containerPort: firstPort?.containerPort,
-                                            });
-                                            setPortForwardModalOpen(true);
-                                          }}
-                                          title="Port Forward into pod"
-                                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-txt-muted hover:bg-app-surface hover:text-txt-primary border border-transparent hover:border-border-subtle transition-colors"
-                                        >
-                                          <ArrowUpRight className="h-3 w-3" />
-                                          <span className="hidden sm:inline">Forward</span>
-                                        </button>
+                                        {portForwardHere && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              const firstPort = pod.containers.find((c) => c.ports && c.ports.length > 0)?.ports?.[0];
+                                              setPortForwardTarget({
+                                                contextName: ctx.contextName,
+                                                namespace: ns.name,
+                                                podName: pod.name,
+                                                containerPort: firstPort?.containerPort,
+                                              });
+                                              setPortForwardModalOpen(true);
+                                            }}
+                                            title="Port Forward into pod"
+                                            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-txt-muted hover:bg-app-surface hover:text-txt-primary border border-transparent hover:border-border-subtle transition-colors"
+                                          >
+                                            <ArrowUpRight className="h-3 w-3" />
+                                            <span className="hidden sm:inline">Forward</span>
+                                          </button>
+                                        )}
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -831,24 +836,26 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
                                               </div>
                                             </div>
                                             <div className="flex shrink-0 items-center gap-1.5">
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  const port = container.ports?.[0];
-                                                  setPortForwardTarget({
-                                                    contextName: ctx.contextName,
-                                                    namespace: ns.name,
-                                                    podName: pod.name,
-                                                    containerPort: port?.containerPort,
-                                                  });
-                                                  setPortForwardModalOpen(true);
-                                                }}
-                                                title="Port Forward to this container"
-                                                className="flex items-center gap-1 rounded-lg border border-border-subtle px-2 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors"
-                                              >
-                                                <ArrowUpRight className="h-3 w-3" />
-                                                Forward
-                                              </button>
+                                              {portForwardHere && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    const port = container.ports?.[0];
+                                                    setPortForwardTarget({
+                                                      contextName: ctx.contextName,
+                                                      namespace: ns.name,
+                                                      podName: pod.name,
+                                                      containerPort: port?.containerPort,
+                                                    });
+                                                    setPortForwardModalOpen(true);
+                                                  }}
+                                                  title="Port Forward to this container"
+                                                  className="flex items-center gap-1 rounded-lg border border-border-subtle px-2 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors"
+                                                >
+                                                  <ArrowUpRight className="h-3 w-3" />
+                                                  Forward
+                                                </button>
+                                              )}
                                               {onBrowseFiles && (
                                                 <button
                                                   type="button"
@@ -933,7 +940,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
           onExec={onExec}
           onViewLogs={onViewLogs}
           onBrowseFiles={onBrowseFiles}
-          onPortForward={(cName, nName, pName, cPort) => {
+          onPortForward={portForwardHere ? (cName, nName, pName, cPort) => {
             setPortForwardTarget({
               contextName: cName,
               namespace: nName,
@@ -941,7 +948,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
               containerPort: cPort,
             });
             setPortForwardModalOpen(true);
-          }}
+          } : undefined}
           onDebug={(cName, nName, pName, containers) => {
             setDebugTarget({
               contextName: cName,

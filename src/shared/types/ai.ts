@@ -63,8 +63,9 @@ export interface AiConfig {
   /** Max output tokens per model turn. Default: 8192. */
   maxOutputTokens?: number;
   /**
-   * Not used: a run has no limit on how many times it goes round. Kept so that settings saved
-   * before the limit was taken away still load, and so that a window that still sends it is not refused.
+   * Not used, not shown and not stored: a run has no limit on how many times it goes round. The name
+   * is kept so that settings saved before the limit was taken away still load, and so that a window
+   * that still sends it is not refused. The store drops it at the next save (AiConfigStore.applyUpdate).
    */
   maxToolTurns?: number;
   /** Reasoning effort for reasoning-capable models. Default: 'medium'. */

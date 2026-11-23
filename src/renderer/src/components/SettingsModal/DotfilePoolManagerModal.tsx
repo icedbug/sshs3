@@ -23,6 +23,7 @@ import { createRendererLogger } from '../../lib/log';
 import { isFeatureBlocked, usePolicy } from '../../lib/usePolicy';
 import { formatDateTime } from '../../lib/dateFormat';
 import { FeatureBlockedNotice } from './Managed';
+import { DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 const log = createRendererLogger('DotfilePoolManagerModal');
 
 interface DotfilePoolManagerModalProps {
@@ -73,7 +74,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
 
   const handleGitImport = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!gitImportUrl.trim()) return;
+    if (!gitImportUrl.trim() || desktopOnlyHere()) return;
     setGitImporting(true);
     setGitImportError(null);
     try {
@@ -128,9 +129,14 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
   const dirty = draft ? savedSnapshot === null || poolSnapshot(draft) !== savedSnapshot : false;
   const activeFiles = draft ? draft.files.filter((f) => !f.deletedAt) : [];
 
+  // Picking files, reading them again and opening the folder all work on the disk of the computer the
+  // app runs on. In the browser that is the server, so none of it is offered there. A file gets into a
+  // pool there from the file manager.
+  const onThisComputer = !desktopOnlyHere();
+
   const checkSources = async (files: DotfilePoolFile[]) => {
     const withSource = files.filter((f) => f.sourcePath && !f.deletedAt);
-    if (withSource.length === 0) {
+    if (withSource.length === 0 || desktopOnlyHere()) {
       setStatuses({});
       return;
     }
@@ -236,7 +242,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
   };
 
   const handleAddFiles = async () => {
-    if (!draft) return;
+    if (!draft || desktopOnlyHere()) return;
     try {
       const imported = await window.multissh.dotfilePoolSelectFiles();
       addImported(imported ?? [], imported?.length ?? 0);
@@ -248,7 +254,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
   const handleDropFiles = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingOver(false);
-    if (!draft) return;
+    if (!draft || desktopOnlyHere()) return;
     const paths = Array.from(e.dataTransfer.files)
       .map((file) => window.multissh.getPathForFile?.(file) ?? '')
       .filter(Boolean);
@@ -263,7 +269,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
 
   const handleRefreshFile = async (fileId: string) => {
     const file = draft?.files.find((f) => f.id === fileId);
-    if (!file?.sourcePath) return;
+    if (!file?.sourcePath || desktopOnlyHere()) return;
     const [src] = await window.multissh.dotfilePoolReadSources([file.sourcePath]);
     if (!src) {
       setStatuses((prev) => ({ ...prev, [fileId]: 'missing' }));
@@ -276,7 +282,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
   const changedFileIds = Object.keys(statuses).filter((id) => statuses[id] === 'changed');
 
   const handleOpenMasterFolder = async () => {
-    if (!draft) return;
+    if (!draft || desktopOnlyHere()) return;
     try {
       await window.multissh.dotfilePoolOpenFolder(draft.id);
     } catch (err) {
@@ -346,7 +352,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
 
         <div className="flex flex-1 min-h-0">
           <aside className="w-56 shrink-0 border-r border-divider bg-app-surface p-2.5 flex flex-col gap-1 overflow-y-auto">
-            <div className="grid grid-cols-2 gap-1 mb-1.5">
+            <div className={`grid ${onThisComputer ? 'grid-cols-2' : 'grid-cols-1'} gap-1 mb-1.5`}>
               <button
                 type="button"
                 onClick={startNewPool}
@@ -355,21 +361,23 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
                 <Plus className="h-3.5 w-3.5" />
                 New
               </button>
-              <button
-                type="button"
-                disabled={gitImportBlocked}
-                aria-describedby={gitImportBlocked ? 'dotfile-git-import-blocked' : undefined}
-                onClick={() => {
-                  setGitImportError(null);
-                  setGitImportOpen(true);
-                }}
-                className="flex items-center justify-center gap-1 disabled:opacity-50 rounded-lg border border-border-subtle bg-app-surface-subtle px-2 py-1.5 text-xs font-medium text-sky-400 hover:bg-app-surface-hover transition-colors"
-              >
-                <GitBranch className="h-3.5 w-3.5" />
-                From Git
-              </button>
+              {onThisComputer && (
+                <button
+                  type="button"
+                  disabled={gitImportBlocked}
+                  aria-describedby={gitImportBlocked ? 'dotfile-git-import-blocked' : undefined}
+                  onClick={() => {
+                    setGitImportError(null);
+                    setGitImportOpen(true);
+                  }}
+                  className="flex items-center justify-center gap-1 disabled:opacity-50 rounded-lg border border-border-subtle bg-app-surface-subtle px-2 py-1.5 text-xs font-medium text-sky-400 hover:bg-app-surface-hover transition-colors"
+                >
+                  <GitBranch className="h-3.5 w-3.5" />
+                  From Git
+                </button>
+              )}
             </div>
-            <FeatureBlockedNotice blocked={gitImportBlocked} id="dotfile-git-import-blocked" />
+            {onThisComputer && <FeatureBlockedNotice blocked={gitImportBlocked} id="dotfile-git-import-blocked" />}
             {loading ? (
               <div className="flex items-center justify-center py-4 text-txt-muted">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -426,15 +434,17 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
                       />
                     </label>
 
-                    <button
-                      type="button"
-                      onClick={() => void handleOpenMasterFolder()}
-                      className="flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
-                      title="Open the folder with saved master files in the system file explorer"
-                    >
-                      <FolderOpen className="h-3.5 w-3.5 text-sky-400" />
-                      Open Master Directory
-                    </button>
+                    {onThisComputer && (
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenMasterFolder()}
+                        className="flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+                        title="Open the folder with saved master files in the system file explorer"
+                      >
+                        <FolderOpen className="h-3.5 w-3.5 text-sky-400" />
+                        Open Master Directory
+                      </button>
+                    )}
                   </div>
 
                   {draft.masterDirectory && (
@@ -461,14 +471,16 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
                             Refresh all ({changedFileIds.length})
                           </Button>
                         )}
-                        <Button
-                          variant="primary"
-                          onClick={() => void handleAddFiles()}
-                          title="Choose the files to add. Each file is added explicitly."
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Add Files...
-                        </Button>
+                        <DesktopOnly inline>
+                          <Button
+                            variant="primary"
+                            onClick={() => void handleAddFiles()}
+                            title="Choose the files to add. Each file is added explicitly."
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            Add Files...
+                          </Button>
+                        </DesktopOnly>
                       </div>
                     </div>
 
@@ -479,7 +491,18 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
                       </div>
                     )}
 
-                    {activeFiles.length === 0 ? (
+                    {activeFiles.length === 0 && !onThisComputer ? (
+                      <div
+                        data-testid="dotfile-pool-empty-web"
+                        className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-border-subtle p-8 text-center"
+                      >
+                        <FileCode className="h-8 w-8 text-sky-400/60 mb-2" />
+                        <p className="text-xs font-medium text-txt-primary">This pool has no files yet</p>
+                        <p className="text-xs text-txt-muted mt-1">
+                          In the file manager, right-click a file and choose Add to Dotfiles Pool.
+                        </p>
+                      </div>
+                    ) : activeFiles.length === 0 ? (
                       <div
                         onClick={() => void handleAddFiles()}
                         className="cursor-pointer flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-border-subtle p-8 text-center hover:border-sky-500/40 hover:bg-app-surface/50 transition-colors"

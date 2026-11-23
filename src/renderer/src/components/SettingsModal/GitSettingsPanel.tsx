@@ -21,6 +21,7 @@ import type { GitSigningConfig } from '@shared/types/git';
 import { classNames, describeIpcError } from '../../lib/format';
 import { isFeatureBlocked, usePolicy } from '../../lib/usePolicy';
 import { FeatureBlockedNotice } from './Managed';
+import { desktopOnlyHere } from '../ui/DesktopOnly';
 
 const SOURCE_LABEL: Record<string, string> = {
   file: 'File',
@@ -75,6 +76,9 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
   const [fetchedKeys, setFetchedKeys] = useState<LocalPublicKey[]>([]);
 
   const loadSigningConfig = useCallback(async (): Promise<GitSigningConfig | null> => {
+    // The git settings in question are those of the user the app runs as. In the browser that is the
+    // server's, and the panel is drawn disabled: nothing is asked.
+    if (desktopOnlyHere()) return null;
     setLoadingSigning(true);
     try {
       const cfg = await window.multissh.gitGetSigningConfig();

@@ -1,4 +1,4 @@
-import { DesktopOnly } from '../ui/DesktopOnly';
+import { DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   Boxes,
@@ -869,7 +869,8 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                   </button>
                 </div>
               ))}
-              {visibleTeamVaultTabs.filter((v) => !v.unlocked).length > 1 && (
+              {/* A saved identity is a card or a key file on the computer the app runs on. */}
+              {!desktopOnlyHere() && visibleTeamVaultTabs.filter((v) => !v.unlocked).length > 1 && (
                 <button
                   type="button"
                   onClick={() => void handleUnlockAllTeams()}

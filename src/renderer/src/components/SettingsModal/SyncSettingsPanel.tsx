@@ -36,6 +36,7 @@ import { formatSyncError } from '../../lib/syncErrors';
 import { formatDateTime as formatDateTimeCanonical } from '../../lib/dateFormat';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { createRendererLogger } from '../../lib/log';
+import { DESKTOP_ONLY_NOTE, desktopOnlyHere } from '../ui/DesktopOnly';
 const log = createRendererLogger('SyncSettingsPanel');
 
 function formatRelative(iso?: string): string {
@@ -89,6 +90,9 @@ export const SyncSettingsPanel: React.FC = () => {
   const [isLinkingDialog, setIsLinkingDialog] = useState(false);
   const [detectedLibs, setDetectedLibs] = useState<DetectedSmartcardLib[]>([]);
   const [selectedLibPath, setSelectedLibPath] = useState('');
+  // A card is read on the computer the app runs on. In the browser that is the server, so sync is
+  // unlocked with the master password there and nothing about a card is offered.
+  const cardHere = !desktopOnlyHere();
 
   // Which PKCS#11 module to link is the user's call when several are installed (e.g. OpenSC and
   // Yubico's libykcs11) — the first detected one is not necessarily the card they actually use.
@@ -503,15 +507,17 @@ export const SyncSettingsPanel: React.FC = () => {
                 <KeyRound className="h-3.5 w-3.5 text-sky-400" />
                 <span>Smartcard / Hardware token</span>
               </div>
-              <p className="text-2xs text-txt-muted">
-                {status.smartcardLinked
+              <p className="text-2xs text-txt-muted" data-testid="sync-smartcard-note">
+                {!cardHere
+                  ? DESKTOP_ONLY_NOTE
+                  : status.smartcardLinked
                   ? `Linked to smartcard (${status.smartcardLibPath ? status.smartcardLibPath.split(/[\\/]/).pop() : 'PKCS#11'}). You can unlock sync with your card PIN.`
                   : status.smartcardAvailable
                     ? 'Card reader detected. Link your smartcard to unlock sync without typing master passwords.'
                     : 'No smartcard PKCS#11 module detected.'}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            {cardHere && <div className="flex items-center gap-2">
               {!status.smartcardLinked && detectedLibs.length > 1 && (
                 <select
                   value={selectedLibPath}
@@ -550,7 +556,7 @@ export const SyncSettingsPanel: React.FC = () => {
                   {linkingSmartcard ? 'Linking...' : 'Link card'}
                 </button>
               ) : null}
-            </div>
+            </div>}
           </div>
 
           {status.topologyUnlocked && status.credentialsUnlocked && (
@@ -672,7 +678,7 @@ export const SyncSettingsPanel: React.FC = () => {
                 >
                   {status.hasLocalSalts ? 'Unlock sync' : 'Set up master passwords'}
                 </button>
-                {(status.smartcardAvailable || status.smartcardLinked) && (
+                {cardHere && (status.smartcardAvailable || status.smartcardLinked) && (
                   <button
                     type="button"
                     onClick={handleSmartcardUnlock}
@@ -888,9 +894,9 @@ export const SyncSettingsPanel: React.FC = () => {
         submitLabel={isLinkingDialog ? 'Link smartcard' : status?.hasLocalSalts ? 'Unlock' : 'Activate sync'}
         submitting={enabling || linkingSmartcard}
         error={enableError}
-        canLinkSmartcard={!isLinkingDialog && Boolean(status?.smartcardAvailable && !status?.smartcardLinked)}
+        canLinkSmartcard={cardHere && !isLinkingDialog && Boolean(status?.smartcardAvailable && !status?.smartcardLinked)}
         onUnlockWithSmartcard={
-          !isLinkingDialog && (status?.smartcardAvailable || status?.smartcardLinked)
+          cardHere && !isLinkingDialog && (status?.smartcardAvailable || status?.smartcardLinked)
             ? handleSmartcardUnlock
             : undefined
         }

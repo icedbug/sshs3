@@ -148,7 +148,12 @@ explicitly enabled presentation on top of the same terminal authority.
     no room in the window (at four characters per token; an acting run's tool
     list and instructions are about 72,000 characters, so a window under
     about 20,000 tokens holds none), and after the third handover in a row
-    that came after a single round of tool calls.
+    that came after a single round of tool calls. The AI settings therefore
+    offer no window under 32,768 tokens (`src/shared/contextWindow.ts`): 16k
+    was taken out. A smaller value saved earlier stays in the list as itself,
+    with a line that says agents need more
+    (`tests/main/contextWindowChoices.test.ts` runs an agent in the smallest
+    choice, `tests/renderer/contextWindowChoices.test.tsx` holds the list).
   - *A message sent while the agent works* (`steer`) is given to the model
     before its next turn. One that comes in while the last turn is being
     written is answered before the run ends: the run takes one more turn. A
@@ -2954,8 +2959,14 @@ because there is no server to run one on.
   environment only (`childEnv`: the path, home folder, user, language,
   terminal, temporary folder, the proxy settings and their certificates, and
   on Windows what a program needs to start) and the variables its runner
-  lists under `env` (set with `save_runner`; a save from the form in the app
-  keeps them). The SSH agent and sshs3's own variables are never passed. On a shared server a runner is a
+  lists under `env`: names only, never values. They are set in the runner's
+  form ("Environment variables to pass") or with `save_runner`. The form
+  refuses what the hub would drop (`parseRunnerEnvNames` in
+  `components/AiHub/runnerEnv.ts`, held to the hub's `runnerEnvNames` by
+  `tests/renderer/runnerEnvNames.test.ts`), and always sends the list, so
+  emptying the field takes the names away. An agent that reads its API key
+  from the environment gets it only when the runner names it.
+  The SSH agent and sshs3's own variables are never passed. On a shared server a runner is a
   program on the server's host: only an administrator saves one, checked
   again at every start. On Windows a `.cmd` runner (npx) runs through cmd.exe
   with every word quoted for it; anything else is started directly. **Test**
@@ -3085,7 +3096,14 @@ The chat panel keeps its shared state in `usePanelState`. The terminal hook rece
     model is chosen for the chat and the agents, the Model fields show and
     save that saved model (`savedConfigForm`, `profile-save`), because that is
     what runs use; a kind of work without a saved model is labelled by what
-    it really uses (`roleDefaultLabel`). The settings are not one `<form>`:
+    it really uses (`roleDefaultLabel`). The editor of a saved model has its
+    own reasoning effort, with the choices of the main form. A saved model
+    can also have a data rule of its own; the card "What leaves this
+    machine" shows the rule runs use with it (`dataRuleRunsUse`, the same
+    combination as `AiConfigStore.getConfig`: the settings' rule wins unless
+    it is "any service", and two different strict rules are refused), and
+    says so when that is not the rule in the field
+    (`tests/renderer/savedModelEffortAndRule.test.tsx`). The settings are not one `<form>`:
     Enter in a text field of the main form saves it, the profile editor is
     its own form, and each card answers its own Enter. Closing the settings
     with edits in them asks first (`closeSettings` in `usePanelState`).
@@ -3121,7 +3139,13 @@ The chat panel keeps its shared state in `usePanelState`. The terminal hook rece
   drawn disabled with the line "Only in the desktop app."
   (`components/ui/DesktopOnly.tsx`). They are the ones whose IPC channels the
   server refuses (`DESKTOP_ONLY_CHANNELS` in `src/main/web/webIpcChannels.ts`).
-  Test: `tests/renderer/desktopOnlyOnWeb.test.tsx`.
+  Tests: `tests/renderer/desktopOnlyOnWeb.test.tsx` and
+  `tests/renderer/desktopOnlyLeftovers.test.tsx` draw the controls both ways.
+  `tests/renderer/desktopOnlyCallSites.test.ts` finds every call in the
+  renderer to such a channel and fails for one that neither asks
+  `desktopOnlyHere()` in the function that makes it, nor is written inside
+  `<DesktopOnly>`, nor is in the test's list with a reason. It cannot tell
+  whether a control is hidden: that is what the two render tests are for.
 - What a request answers beside the snapshot (`reply`: a new key, an invite
   code) goes to the caller only: `lib/aiHub.ts` does not keep it in the
   state the views read (`tests/renderer/hubReplyNotKept.test.tsx`).

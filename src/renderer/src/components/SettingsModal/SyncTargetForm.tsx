@@ -14,6 +14,7 @@ import type { SSHAuthType, SSHConnectionConfig, DetectedSmartcardLib } from '@sh
 import type { SFTPConfig, S3Config, S3AuthMode, S3SsoConfig } from '@shared/types/storage';
 import type { AwsSsoAccount, AwsSsoAccountRole } from '@shared/types/aws';
 import { describeIpcError } from '../../lib/format';
+import { DESKTOP_ONLY_NOTE, DesktopOnly, desktopOnlyHere } from '../ui/DesktopOnly';
 
 export interface SyncTargetDraft {
   type: 'sftp' | 's3';
@@ -742,11 +743,13 @@ export const SyncTargetForm: React.FC<SyncTargetFormProps> = ({ draft, onChange,
               <KeyRound className="h-3.5 w-3.5" />
               Static Credentials
             </button>
+            {/* The sign-in opens a browser on the computer the app runs on. A target that already uses it stays shown. */}
             <button
               type="button"
-              disabled={disabled}
+              disabled={disabled || (desktopOnlyHere() && draft.authMode !== 'sso')}
+              title={desktopOnlyHere() ? `AWS SSO sign-in. ${DESKTOP_ONLY_NOTE}` : undefined}
               onClick={() => set('authMode', 'sso')}
-              className={`flex items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+              className={`flex items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
                 draft.authMode === 'sso'
                   ? 'border-sky-500 bg-sky-500/15 text-sky-300'
                   : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover'
@@ -756,6 +759,11 @@ export const SyncTargetForm: React.FC<SyncTargetFormProps> = ({ draft, onChange,
               AWS SSO (Identity Center)
             </button>
           </div>
+          {desktopOnlyHere() && (
+            <p className="text-[11px] text-txt-muted" data-testid="desktop-only-note">
+              AWS SSO: {DESKTOP_ONLY_NOTE}
+            </p>
+          )}
 
           {draft.authMode !== 'sso' ? (
             <div className="space-y-2.5">
@@ -831,15 +839,17 @@ export const SyncTargetForm: React.FC<SyncTargetFormProps> = ({ draft, onChange,
                 </Field>
               </div>
 
-              <button
-                type="button"
-                disabled={!draft.sso?.startUrl?.trim() || ssoLoggingIn || disabled}
-                onClick={() => void handleAwsSsoLogin()}
-                className="flex items-center justify-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 text-xs text-txt-primary hover:bg-app-surface-hover disabled:opacity-40 transition-colors"
-              >
-                {ssoLoggingIn && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                {ssoLoggingIn ? 'Signing in…' : ssoAccessToken ? 'Sign in again' : 'Sign in with AWS SSO'}
-              </button>
+              <DesktopOnly inline>
+                <button
+                  type="button"
+                  disabled={!draft.sso?.startUrl?.trim() || ssoLoggingIn || disabled}
+                  onClick={() => void handleAwsSsoLogin()}
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 text-xs text-txt-primary hover:bg-app-surface-hover disabled:opacity-40 transition-colors"
+                >
+                  {ssoLoggingIn && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {ssoLoggingIn ? 'Signing in…' : ssoAccessToken ? 'Sign in again' : 'Sign in with AWS SSO'}
+                </button>
+              </DesktopOnly>
 
               {ssoError && (
                 <p role="alert" className="rounded-lg border border-red-800/60 bg-red-950/40 px-2.5 py-1.5 text-xs text-red-300">
