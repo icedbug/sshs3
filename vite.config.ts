@@ -134,7 +134,9 @@ export default defineConfig({
     ...(windowsCI ? { testTimeout: 20_000 } : {}),
     globals: true,
     environment: 'node',
-    passWithNoTests: true,
+    // A home folder per test file: no test reads or writes the real one (see the file).
+    setupFiles: ['tests/setup/isolateHome.ts'],
+    globalSetup: ['tests/setup/homeRoot.ts'],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx,cjs}'],
