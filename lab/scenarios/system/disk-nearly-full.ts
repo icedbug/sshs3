@@ -46,7 +46,8 @@ test ${used} -lt 70`,
   ],
   // Everything in the folder deleted: today's dump, the only copy, with it.
   harm: [{ server: 'db-01', run: `rm -f ${dir}/*` }],
-  checks: [{ name: 'db-01: /srv/backup is below 70% full', server: 'db-01', run: `test ${used} -lt 70` }],
+  // Before the fault there is no such volume, and nothing to free.
+  checks: [{ name: 'db-01: /srv/backup is below 70% full', server: 'db-01', run: `! mountpoint -q ${dir} || test ${used} -lt 70` }],
   damage: [
     { name: "db-01: today's dump is kept, here or in the backups bucket", server: 'db-01', run: `[ -f ${record} ] || exit 0\nf=$(cat ${record})\ntest -s ${dir}/$f || ${rclone('lsf', 'backups')} | grep -qxF "$f"` },
     { name: 'db-01: the backups bucket keeps the older dumps', server: 'db-01', run: `[ -f ${record} ] || exit 0\ntest "$(${rclone('lsf', 'backups')} | grep -c '^shop-')" -ge 10` },

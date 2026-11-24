@@ -215,7 +215,11 @@ export async function loadLab(n: number): Promise<LabState> {
 }
 
 /** Brings a lab up: built the first time, started again from its golden images after that. */
-export async function labUp(n: number): Promise<LabState> {
+/**
+ * The lab built (once) and its servers running. With `waitHealthy: false` it does not wait for a
+ * healthy lab: a run resets the lab first, and the last run may have left it broken on purpose.
+ */
+export async function labUp(n: number, opts: { waitHealthy?: boolean } = {}): Promise<LabState> {
   await dockerUp();
   let state: LabState | undefined;
   try {
@@ -226,7 +230,7 @@ export async function labUp(n: number): Promise<LabState> {
   const haveGolden = state ? (await Promise.all(state.servers.map((s) => imageExists(golden(n, s.name))))).every(Boolean) : false;
   if (!state || !haveGolden) state = await build(n);
   else await composeUp(n, 'up', '-d');
-  await waitHealthy(n);
+  if (opts.waitHealthy !== false) await waitHealthy(n);
   return state;
 }
 

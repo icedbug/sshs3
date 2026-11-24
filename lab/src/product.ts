@@ -270,10 +270,12 @@ export async function startProduct(opts: { dataDir: string; port: number; env?: 
   const port = opts.port || (await freePort());
   const baseUrl = `http://127.0.0.1:${port}`;
   let log = '';
+  // The web server talks only to the lab: never through the environment's proxy to the internet.
+  const { NODE_USE_ENV_PROXY: _ignored, ...ownEnv } = process.env;
   const child = spawn(process.execPath, [SERVER], {
     cwd: REPO,
     env: {
-      ...process.env,
+      ...ownEnv,
       SSHS3_DATA_DIR: opts.dataDir,
       SSHS3_WEB_PORT: String(port),
       SSHS3_WEB_HOST: '127.0.0.1',
