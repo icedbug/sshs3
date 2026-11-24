@@ -35,7 +35,8 @@ async function validate(): Promise<void> {
   const known = [...SCENARIOS, ...CANDIDATES];
   for (const id of ids ?? []) if (!known.some((s) => s.id === id)) throw new Error(`No task is named "${id}".`);
   const chosen = ids ? known.filter((s) => ids.includes(s.id)) : SCENARIOS;
-  await labUp(n);
+  // Each validation resets the lab first: a lab left broken (by a run, or by hand) is no obstacle.
+  await labUp(n, { waitHealthy: false });
   let bad = 0;
   for (const s of chosen)
     for (let i = 1; i <= times; i++) {

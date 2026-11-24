@@ -11,6 +11,10 @@ if ! command -v dockerd >/dev/null 2>&1 || ! docker compose version >/dev/null 2
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io docker-compose-v2 >/dev/null
 fi
 
+# Every lab server runs systemd, and each systemd takes inotify instances. With the kernel's default
+# of 128 per user a fourth lab's servers fail to start (systemd exits 255): the limits are raised.
+sysctl -qw fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=1048576 || true
+
 # A dockerd that is still starting, or still stopping its containers after it was told to end: wait for
 # it to finish one way or the other. A second one started meanwhile refuses to run.
 for _ in $(seq 60); do

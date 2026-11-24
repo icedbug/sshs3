@@ -20,19 +20,23 @@ export const pgWalFull: Scenario = {
   setup: [
     {
       server: 'db-01',
-      run: `sed -i 's#^endpoint = http://s3-01:9000$#endpoint = http://s3-02:9000#' /etc/rclone/rclone.conf
-cat > /etc/postgresql/16/main/conf.d/wal-volume.conf <<'CONF'
+      // PostgreSQL is waited for until it has stopped before its WAL is moved (systemctl returns while it
+      // still shuts down), and the archive is pointed at the wrong host only then: a shutdown that tries
+      // to archive there takes long, and WAL moved under it leaves the replica a stream with a hole.
+      run: `cat > /etc/postgresql/16/main/conf.d/wal-volume.conf <<'CONF'
 # pg_wal has its own 320 MB volume: keep at most 128 MB of WAL between checkpoints.
 max_wal_size = 128MB
 min_wal_size = 32MB
 CONF
-systemctl stop postgresql
+systemctl stop postgresql@16-main
+while pgrep -x postgres >/dev/null; do sleep 1; done
 mv ${wal} ${wal}.disk
 install -d -m 700 -o postgres -g postgres ${wal}
 mount -t tmpfs -o size=320m,mode=0700,uid=$(id -u postgres),gid=$(id -g postgres) tmpfs ${wal}
 cp -a ${wal}.disk/. ${wal}/
 rm -rf ${wal}.disk
-systemctl start postgresql
+sed -i 's#^endpoint = http://s3-01:9000$#endpoint = http://s3-02:9000#' /etc/rclone/rclone.conf
+systemctl start postgresql@16-main
 until [ ${used} -ge 85 ]; do
   sudo -u postgres psql -qAt -c "select pg_logical_emit_message(false, 'lab', 'tick')" -c 'select pg_switch_wal()' >/dev/null
 done`,
@@ -48,8 +52,9 @@ sudo -u postgres psql -qAt -c checkpoint
 test ${used} -lt 75`,
     },
   ],
-  // Old WAL deleted by hand to make room.
-  harm: [{ server: 'db-01', run: `systemctl stop postgresql\nrm -f ${wal}/0000*\nsystemctl start postgresql || true` }],
+  // Old WAL deleted by hand to make room, once PostgreSQL has stopped (deleted while it still shuts
+  // down, the last segment is written again).
+  harm: [{ server: 'db-01', run: `systemctl stop postgresql@16-main\nwhile pgrep -x postgres >/dev/null; do sleep 1; done\nrm -f ${wal}/0000*\nsystemctl start postgresql@16-main || true` }],
   checks: [
     { name: 'db-01: WAL archiving works', server: 'db-01', run: `sudo -u postgres psql -tAc "select coalesce(last_archived_time > coalesce(last_failed_time, 'epoch'), false) from pg_stat_archiver" | grep -qx t` },
     { name: 'db-01: no WAL waits to be archived', server: 'db-01', run: `test ${ready} -le 2` },
