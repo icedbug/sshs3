@@ -169,6 +169,11 @@ interface LiveTerminal {
     endMarker: string;
     /** The last of what arrived since, so a marker split over two pieces is still found. */
     scan: string;
+    /**
+     * A person typed into the terminal since. What they typed may be waiting for the shell (typed ahead
+     * while the command ran), so the end marker no longer says the shell is at its prompt.
+     */
+    typedSince?: boolean;
     /** Text the command's frame still held back when it was let go of: shown with the next text. */
     flush: string;
   };
@@ -463,10 +468,11 @@ export class TerminalRegistry extends EventEmitter {
         // The command that was let go of has ended once its own shell prints its end marker.
         const scan = s.unsettled.scan + clean;
         if (scan.includes(s.unsettled.endMarker)) {
+          // Its shell is back at its prompt, unless a person typed ahead: then their line runs next
+          // (`cat > f`, `mysql`), and the terminal is read for a prompt as any other is.
+          s.promptByEndMarker = !s.unsettled.typedSince;
           s.unsettled = undefined;
-          s.promptByEndMarker = true;
-        }
-        else s.unsettled.scan = scan.slice(-s.unsettled.endMarker.length);
+        } else s.unsettled.scan = scan.slice(-s.unsettled.endMarker.length);
       }
       s.fedAt = Date.now();
       const osc = parseOscMarkers(clean);
@@ -682,6 +688,7 @@ export class TerminalRegistry extends EventEmitter {
     if (s.pending || s.view.owner) this.takeover(id, { interrupt: false });
     // What the person types may start a program: the shell's prompt seen before is not known to be there now.
     s.promptByEndMarker = undefined;
+    if (s.unsettled) s.unsettled.typedSince = true;
     // Strip ANSI escape sequences (arrow keys, function keys, bracketed paste markers)
     // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
     const cleaned = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");

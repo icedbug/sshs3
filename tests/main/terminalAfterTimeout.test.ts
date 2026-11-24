@@ -116,6 +116,21 @@ describe("after a command ran out of time", () => {
     await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
   });
 
+  it("does not take the end marker for a prompt when a person typed ahead while the command ran", async () => {
+    // The person typed `cat > notes` while the long job ran. The shell runs it as soon as the job is over,
+    // so after the end marker it is `cat` that reads the terminal, not the shell.
+    const { terminals, written, hang, endOfHung } = fake();
+    const generation = await claimed(terminals);
+    hang("Unpacking nginx (1.24.0-2) ...\r\n");
+    await terminals.execute("t1", generation, "task-1", "sudo apt-get -y upgrade", 60).catch(() => undefined);
+    terminals.observeHumanInput("t1", "cat > notes\r");
+    terminals.feed("t1", `Setting up nginx ...\r\n${endOfHung(0)}ops@web-01:~$ cat > notes\r\n`);
+    const before = written.length;
+    // Nothing reads as a prompt, so nothing is typed: the terminal is not taken to be at its shell.
+    await expect(terminals.ensureReady("t1")).rejects.toThrow(/not at a shell prompt/);
+    expect(written).toHaveLength(before);
+  });
+
   it("is opened again by the shell's own prompt marker, where the shell sends one", async () => {
     // A person pressed Ctrl-C: the shell drops the rest of the line, so no end marker comes. A shell
     // with prompt markers (OSC 133) says by itself that its prompt is back.
