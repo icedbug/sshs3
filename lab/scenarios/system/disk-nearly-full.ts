@@ -29,7 +29,7 @@ for i in $(seq 40 -3 13); do
   f=${dir}/shop-$(date -d "-$i day" +%F).sql.gz
   ${dump('"$f"')}
   touch -d "-$i day" "$f"
-  rclone --config /etc/rclone/rclone.conf copyto "$f" "s3:backups/$(basename "$f")"
+  rclone --config /etc/rclone/rclone.conf --retries 10 --retries-sleep 3s copyto "$f" "s3:backups/$(basename "$f")"
 done
 f=shop-$(date +%F).sql.gz
 ${dump(`${dir}/$f`)}

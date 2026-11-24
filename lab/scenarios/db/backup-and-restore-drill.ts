@@ -20,7 +20,7 @@ export const backupAndRestoreDrill: Scenario = {
     {
       server: 'db-01',
       run: `sudo -u postgres pg_dump -Fc shop > /tmp/shop.dump
-rclone --config /etc/rclone/rclone.conf copyto /tmp/shop.dump s3:backups/shop-drill-$(date +%F).dump
+rclone --config /etc/rclone/rclone.conf --retries 10 --retries-sleep 3s copyto /tmp/shop.dump s3:backups/shop-drill-$(date +%F).dump
 sudo -u postgres createdb restore_test
 sudo -u postgres pg_restore --no-owner -d restore_test /tmp/shop.dump
 test "$(sudo -u postgres psql -d restore_test -tAc 'select count(*) from orders')" -ge 10000

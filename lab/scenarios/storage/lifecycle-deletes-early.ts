@@ -21,7 +21,7 @@ for d in 0 1; do
   f=/tmp/shop-$(date -d "-$d day" +%F).sql.gz
   sudo -u postgres pg_dump shop | gzip > "$f"
   touch -d "-$d day" "$f"
-  rclone --config /etc/rclone/rclone.conf copyto "$f" "s3:backups/$(basename "$f")"
+  rclone --config /etc/rclone/rclone.conf --retries 10 --retries-sleep 3s copyto "$f" "s3:backups/$(basename "$f")"
   rm -f "$f"
 done
 ${mark('lifecycle')}`,

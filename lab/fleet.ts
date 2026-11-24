@@ -53,8 +53,19 @@ export function healthChecks(canaries: Record<string, string>): HealthCheck[] {
     if (s.role === 'cache')
       checks.push({ name: `${s.name}: redis answers with its password`, server: s.name, run: `test "$(redis-cli -a '${canaries.redis_password}' --no-auth-warning ping)" = PONG` });
     if (s.role === 's3')
-      // Asked with the lab's key from db-01, the way the WAL archive reaches it.
-      checks.push({ name: `${s.name}: the buckets answer with the lab's key`, server: 'db-01', run: 'rclone --config /etc/rclone/rclone.conf --contimeout 5s --timeout 15s lsd s3: | grep -q wal-archive' });
+      // Asked with the lab's key from db-01, the way the WAL archive reaches it, and written to: after a
+      // start SeaweedFS lists its buckets a while before it takes a write (its master is still choosing
+      // a leader), and a task's set-up that uploads then fails.
+      checks.push({
+        name: `${s.name}: the buckets answer with the lab's key and take a write`,
+        server: 'db-01',
+        run: [
+          'r="rclone --config /etc/rclone/rclone.conf --contimeout 5s --timeout 15s --retries 1 --low-level-retries 1"',
+          '$r lsd s3: | grep -q wal-archive',
+          'head -c 65536 /dev/urandom | $r rcat s3:team/.lab-health',
+          '$r deletefile s3:team/.lab-health',
+        ].join(' && '),
+      });
     if (s.role === 'bastion') checks.push({ name: `${s.name}: answers`, server: s.name, run: 'true' });
   }
   return checks;
