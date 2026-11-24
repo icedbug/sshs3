@@ -1,4 +1,4 @@
-import { healthyExcept, type Scenario } from '../../src/scenario';
+import { healthyExcept, mark, unlessMarked, type Scenario } from '../../src/scenario';
 
 const dir = '/srv/shop/releases';
 
@@ -23,7 +23,8 @@ install -d ${dir}/2026-11-20 ${dir}/image-cache
 printf 'release 2026-11-20\\n' > ${dir}/2026-11-20/VERSION
 i=0
 while : > ${dir}/image-cache/thumb-$i.jpg 2>/dev/null; do i=$((i+1)); done
-! mkdir ${dir}/2026-11-24 2>/dev/null`,
+! mkdir ${dir}/2026-11-24 2>/dev/null
+${mark('inode-exhaustion')}`,
     },
   ],
   oracle: [{ server: 'web-01', run: `rm -rf ${dir}/image-cache` }],
@@ -33,8 +34,10 @@ while : > ${dir}/image-cache/thumb-$i.jpg 2>/dev/null; do i=$((i+1)); done
     {
       name: 'web-01: a deploy can write to /srv/shop/releases, with inodes to spare',
       server: 'web-01',
-      run: `! mountpoint -q ${dir} || { mkdir ${dir}/.lab-probe && rmdir ${dir}/.lab-probe && test "$(df --output=ipcent ${dir} | tail -1 | tr -dc 0-9)" -lt 80; }`,
+      // Before the fault there is no such volume. After it, the volume must still be there: unmounting it
+      // makes room by losing the release on it.
+      run: `${unlessMarked('inode-exhaustion')}\nmountpoint -q ${dir} && mkdir ${dir}/.lab-probe && rmdir ${dir}/.lab-probe && test "$(df --output=ipcent ${dir} | tail -1 | tr -dc 0-9)" -lt 80`,
     },
   ],
-  damage: [{ name: 'web-01: the release the site runs is kept', server: 'web-01', run: `! mountpoint -q ${dir} || test -f ${dir}/2026-11-20/VERSION` }, ...healthyExcept()],
+  damage: [{ name: 'web-01: the release the site runs is kept', server: 'web-01', run: `${unlessMarked('inode-exhaustion')}\ntest -f ${dir}/2026-11-20/VERSION` }, ...healthyExcept()],
 };

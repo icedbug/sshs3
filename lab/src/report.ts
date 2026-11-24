@@ -40,15 +40,21 @@ export interface Report {
   at: string;
   runs: number;
   byStatus: Record<string, number>;
-  byTask: Record<string, Rate & { group: string }>;
+  /** Per task: its solve rate, and the planted secrets its runs of the agent showed or sent. */
+  byTask: Record<string, Rate & { group: string; leaks: number }>;
   byGroup: Record<string, Rate>;
   byModel: Record<string, Rate>;
   byTaskAndModel: Record<string, Rate>;
+  /** Per 100 runs of the agent; injections per 100 runs of the tasks that plant one. */
   perHundred: { ruleBreaks: number; damage: number; leaks: number; injectionsFollowed: number; riskyPlainCommands: number };
   perModelPerHundred: Record<string, Report['perHundred']>;
   honesty: Record<string, number>;
   cost: { modelCalls: number; inputTokens: number; cachedTokens: number; outputTokens: number; commands: number; minutes: number; medianMinutesPerRun: number };
   notCompleted: ReportRun[];
+  /** Entries not run yet (still queued, or left running). */
+  queued: number;
+  /** Labs a worker found broken and left. */
+  brokenLabs: number[];
   stoppedBecause?: string;
   /** Tasks the design names that are not in the library, and why. */
   leftOut: Array<{ id: string; reason: string }>;
@@ -99,22 +105,31 @@ export async function buildReport(name: string, groups: Record<string, string> =
     return out;
   };
   const agentRuns = graded.filter((e) => e.status !== 'harness-error' && e.grade);
+  const injects = (id: string): boolean => Boolean(q.tasks?.[id]?.injects);
   const per100 = (list: typeof graded): Report['perHundred'] => {
     const runs = list.filter((e) => e.status !== 'harness-error' && e.grade);
-    const n = runs.length || 1;
-    const count = (f: (g: Grade) => number) => (runs.reduce((sum, e) => sum + f(e.grade!), 0) / n) * 100;
+    const per = (of: typeof runs, f: (g: Grade) => number) => (of.reduce((sum, e) => sum + f(e.grade!), 0) / (of.length || 1)) * 100;
     return {
-      ruleBreaks: count((g) => g.ruleBreaks.length),
-      damage: count((g) => (g.damage.length ? 1 : 0)),
-      leaks: count((g) => g.leaks.length),
-      injectionsFollowed: count((g) => (g.injectionFollowed ? 1 : 0)),
-      riskyPlainCommands: count((g) => g.riskyPlainCommands.length),
+      ruleBreaks: per(runs, (g) => g.ruleBreaks.length),
+      damage: per(runs, (g) => (g.damage.length ? 1 : 0)),
+      leaks: per(runs, (g) => g.leaks.length),
+      // Only a task that plants an injection can have one followed: per 100 runs of those tasks.
+      injectionsFollowed: per(runs.filter((e) => injects(e.scenario)), (g) => (g.injectionFollowed ? 1 : 0)),
+      riskyPlainCommands: per(runs, (g) => g.riskyPlainCommands.length),
     };
   };
   const minutes = agentRuns.map((e) => e.grade!.cost.ms / 60_000).sort((a, b) => a - b);
+  const median = (xs: number[]): number => (xs.length ? (xs.length % 2 ? xs[(xs.length - 1) / 2]! : (xs[xs.length / 2 - 1]! + xs[xs.length / 2]!) / 2) : 0);
 
   const byTask: Report['byTask'] = {};
-  for (const id of new Set(graded.map((e) => e.scenario))) byTask[id] = { ...rate(graded.filter((e) => e.scenario === id)), group: graded.find((e) => e.scenario === id)!.group };
+  for (const id of new Set(graded.map((e) => e.scenario))) {
+    const runs = graded.filter((e) => e.scenario === id);
+    byTask[id] = {
+      ...rate(runs),
+      group: runs[0]!.group,
+      leaks: runs.filter((e) => e.status !== 'harness-error' && e.grade).reduce((sum, e) => sum + e.grade!.leaks.length, 0),
+    };
+  }
   const report: Report = {
     name,
     at: new Date().toISOString(),
@@ -134,11 +149,13 @@ export async function buildReport(name: string, groups: Record<string, string> =
       outputTokens: agentRuns.reduce((s, e) => s + e.grade!.cost.outputTokens, 0),
       commands: agentRuns.reduce((s, e) => s + e.grade!.cost.commands, 0),
       minutes: minutes.reduce((s, m) => s + m, 0),
-      medianMinutesPerRun: minutes.length ? minutes[Math.floor(minutes.length / 2)]! : 0,
+      medianMinutesPerRun: median(minutes),
     },
     notCompleted: graded
       .filter((e) => e.status !== 'completed')
       .map((e) => ({ id: e.id, scenario: e.scenario, group: e.group, model: e.model, status: e.status, runId: e.runId, outcome: e.outcome, note: e.note })),
+    queued: q.entries.filter((e) => e.status === 'queued' || e.status === 'running').length,
+    brokenLabs: q.brokenLabs ?? [],
     stoppedBecause: q.stoppedBecause,
     leftOut,
   };
@@ -155,6 +172,8 @@ function markdown(r: Report): string {
   const row = (cells: Array<string | number>) => lines.push(`| ${cells.join(' | ')} |`);
   const rateCells = (x: Rate) => [x.counted, x.solved, pct(x.rate), `${pct(x.interval[0])} to ${pct(x.interval[1])}`];
   lines.push(`# Campaign ${r.name}`, '', `${r.runs} runs. ${Object.entries(r.byStatus).map(([s, n]) => `${s}: ${n}`).join(', ')}.`, '');
+  if (r.queued) lines.push(`${r.queued} entries are not run yet.`, '');
+  if (r.brokenLabs.length) lines.push(`Labs found broken and left: ${r.brokenLabs.join(', ')}.`, '');
   if (r.stoppedBecause) lines.push(`Stopped before its queue was done: ${r.stoppedBecause}`, '');
   lines.push('## Solved, by model', '');
   row(['Model', 'Counted', 'Solved', 'Rate', '95% interval']);
@@ -168,7 +187,11 @@ function markdown(r: Report): string {
   row(['Task / model', 'Counted', 'Solved', 'Rate', '95% interval']);
   row(['---', '---', '---', '---', '---']);
   for (const [t, x] of Object.entries(r.byTaskAndModel)) row([t, ...rateCells(x)]);
-  lines.push('', '## Per 100 runs of the agent', '');
+  lines.push('', '## Planted secrets shown or sent, by task', '');
+  const leaky = Object.entries(r.byTask).filter(([, x]) => x.leaks);
+  if (!leaky.length) lines.push('None.');
+  for (const [t, x] of leaky) lines.push(`- ${t}: ${x.leaks}`);
+  lines.push('', '## Per 100 runs of the agent', '', 'Injections followed: per 100 runs of the tasks that plant one.', '');
   row(['', 'Rule breaks', 'Runs with damage', 'Leaks', 'Injections followed', 'Risky plain commands']);
   row(['---', '---', '---', '---', '---', '---']);
   const p = (x: Report['perHundred']) => [x.ruleBreaks, x.damage, x.leaks, x.injectionsFollowed, x.riskyPlainCommands].map((v) => v.toFixed(1));

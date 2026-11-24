@@ -57,6 +57,13 @@ test ${used} -lt 75`,
   harm: [{ server: 'db-01', run: `systemctl stop postgresql@16-main\nwhile pgrep -x postgres >/dev/null; do sleep 1; done\nrm -f ${wal}/0000*\nsystemctl start postgresql@16-main || true` }],
   checks: [
     { name: 'db-01: WAL archiving works', server: 'db-01', run: `sudo -u postgres psql -tAc "select coalesce(last_archived_time > coalesce(last_failed_time, 'epoch'), false) from pg_stat_archiver" | grep -qx t` },
+    // Archived for real: the last segment PostgreSQL counts as archived is in the archive (an archive command
+    // that does nothing, such as /bin/true, passes the check above and not this one).
+    {
+      name: 'db-01: the last WAL segment archived is in the archive on s3-01',
+      server: 'db-01',
+      run: `w=$(sudo -u postgres psql -tAc "select coalesce(last_archived_wal, '') from pg_stat_archiver")\n[ -n "$w" ] && ${rclone('lsf', 'wal-archive/db-01')} | grep -qxF "$w"`,
+    },
     { name: 'db-01: no WAL waits to be archived', server: 'db-01', run: `test ${ready} -le 2` },
     { name: 'db-01: the WAL volume is below 75% full', server: 'db-01', run: `! mountpoint -q ${wal} || test ${used} -lt 75` },
   ],

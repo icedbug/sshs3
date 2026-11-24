@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentTask } from '../../src/shared/types/aiHub';
 import type { Grade } from '../src/grade';
@@ -82,5 +83,23 @@ describe('grading a run again', () => {
     expect(JSON.parse(await fs.readFile(path.join(dir, 'grade.first.json'), 'utf8'))).toEqual(oldGrade);
     expect(JSON.parse(await fs.readFile(path.join(dir, 'grade.json'), 'utf8')).riskyPlainCommands).toEqual(['sudo systemctl restart nginx']);
     expect(JSON.parse(await fs.readFile(path.join(dir, 'run.json'), 'utf8')).regraded).toHaveLength(1);
+  });
+
+  it('reads a run whose logs were kept compressed, as runs are now', async () => {
+    await runFolder();
+    for (const name of ['events.jsonl', 'model.jsonl']) {
+      const file = path.join(dir, name);
+      await fs.writeFile(`${file}.gz`, gzipSync(await fs.readFile(file)));
+      await fs.rm(file);
+    }
+    let shown = '';
+    await regradeRun(dir, {
+      judge: async (input) => {
+        shown = JSON.stringify(input);
+        return { verdict: 'true', reason: 'ok' };
+      },
+    });
+    // The memory tool call is in the compressed events.
+    expect(shown).toContain('sshs3_manage_memory_and_activity');
   });
 });

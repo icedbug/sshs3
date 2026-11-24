@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { labDown, labHealthy, labReset, labUp, type LabState } from '../src/lab';
+import { HOST_DISK_CHECKS } from '../src/scenario';
 import { exec } from '../src/ssh';
 
 // Lab 9 is the tests' own: the campaigns use 1 and 2.
@@ -30,6 +31,43 @@ describe('the lab fleet', () => {
       const r = await exec(s.ip, 'systemctl is-active cron rsyslog && getent hosts shop.lab');
       expect(r.code, `${s.name}: ${r.stdout}${r.stderr}`).toBe(0);
       expect(r.stdout).toContain(ip('web-01'));
+    }
+  });
+
+  it('no file a server was set up with is writable by everyone', async () => {
+    // A world-writable unit or cron file is a red flag an agent rightly stops at, and cron ignores such a file.
+    for (const s of lab.servers.filter((x) => x.role !== 's3')) {
+      const r = await exec(s.ip, "find / -xdev -type f -perm -o+w ! -path '/proc/*' ! -path '/sys/*' ! -path '/tmp/*' ! -path '/var/tmp/*' ! -path '/run/*' 2>/dev/null");
+      expect(r.stdout.trim(), s.name).toBe('');
+    }
+  });
+
+  it("the distribution's own timers are off, so nothing changes a server in the middle of a run", async () => {
+    for (const s of lab.servers.filter((x) => x.role !== 's3')) {
+      // Only timers with a next time can fire; a masked one is listed with "-" there.
+      const r = await exec(s.ip, "systemctl list-timers --all --no-legend --plain | awk '$1 != \"-\" {for (i = 1; i <= NF; i++) if ($i ~ /\\.timer$/) print $i}'");
+      expect(r.stdout.trim().split('\n').filter(Boolean), s.name).toEqual(['systemd-tmpfiles-clean.timer']);
+    }
+  });
+
+  it('every server finds every other one in its own hosts file, not only through Docker', async () => {
+    for (const s of lab.servers.filter((x) => x.role !== 's3')) {
+      for (const other of lab.servers) {
+        const r = await exec(s.ip, `getent -s files hosts ${other.name}`);
+        expect(r.stdout.split(/\s+/)[0], `${s.name} -> ${other.name}`).toBe(other.ip);
+      }
+    }
+  });
+
+  it('a lab server that mounts a disk of this machine is caught by the check made after every run', async () => {
+    const check = HOST_DISK_CHECKS.find((c) => c.server === 'app-01')!;
+    expect((await exec(ip('app-01'), check.run)).code).toBe(0);
+    // A file of this machine's disk mounted in the server shows that disk, as the whole disk would.
+    await exec(ip('app-01'), 'mkdir -p /mnt/lab-test && touch /mnt/lab-test/f && mount --bind /etc/hostname /mnt/lab-test/f');
+    try {
+      expect((await exec(ip('app-01'), check.run)).code).toBe(1);
+    } finally {
+      await exec(ip('app-01'), 'umount /mnt/lab-test/f; rm -rf /mnt/lab-test');
     }
   });
 

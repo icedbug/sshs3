@@ -33,23 +33,29 @@ export async function runChecks(lab: LabState, values: Record<string, string>, c
 }
 
 /**
- * The checks, read again until they show what is wanted or the time is up: a service takes a moment
- * to come up after a fix, and a fault a moment to show. Returns the last reading.
+ * Readings, taken again until they show what is wanted or the time is up: a service takes a moment to
+ * come up after a fix, and a fault a moment to show. Returns the last reading.
  */
-export async function waitForChecks(
-  lab: LabState,
-  values: Record<string, string>,
-  checks: Check[],
+export async function waitUntil(
+  read: () => Promise<CheckResult[]>,
   want: 'all-true' | 'some-false',
-  timeoutMs = 90_000,
+  timeoutMs: number,
+  opts: { intervalMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<CheckResult[]> {
-  const until = Date.now() + timeoutMs;
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const until = now() + timeoutMs;
   for (;;) {
-    const results = await runChecks(lab, values, checks);
+    const results = await read();
     const done = want === 'all-true' ? results.every((r) => r.ok) : results.some((r) => !r.ok);
-    if (done || Date.now() >= until) return results;
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (done || now() >= until) return results;
+    await sleep(opts.intervalMs ?? 2000);
   }
+}
+
+/** The checks, read again until they show what is wanted or the time is up (see waitUntil). */
+export function waitForChecks(lab: LabState, values: Record<string, string>, checks: Check[], want: 'all-true' | 'some-false', timeoutMs = 90_000): Promise<CheckResult[]> {
+  return waitUntil(() => runChecks(lab, values, checks), want, timeoutMs);
 }
 
 const failing = (results: CheckResult[]): string => results.filter((r) => !r.ok).map((r) => r.name).join('; ');
@@ -61,6 +67,11 @@ export interface Validation {
   skipped?: string;
 }
 
+/** How long after the fault validation waits to see that it does not mend itself: as long as a run's checks may wait. */
+const FAULT_HOLDS_MS = 90_000;
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function validateScenario(s: Scenario, n: number): Promise<Validation> {
   const problems: string[] = [];
   let lab = await loadLab(n);
@@ -71,7 +82,8 @@ export async function validateScenario(s: Scenario, n: number): Promise<Validati
   const toFix = s.expect === 'fix';
 
   // 1 to 3: a fresh lab, the fault, and the known solution.
-  await labReset(n);
+  const unhealthy = await labReset(n);
+  if (unhealthy.length) return { ok: false, problems: [`The lab is not healthy after a reset: ${unhealthy.join('; ')}.`] };
   lab = await loadLab(n);
   let r = await waitForChecks(lab, values, s.forward ? s.damage : [...s.checks, ...s.damage], 'all-true');
   if (!r.every((x) => x.ok)) problems.push(`Before setup these are not true: ${failing(r)}.`);
@@ -80,6 +92,12 @@ export async function validateScenario(s: Scenario, n: number): Promise<Validati
     if (toFix) {
       r = await waitForChecks(lab, values, s.checks, 'some-false');
       if (r.every((x) => x.ok)) problems.push('After setup every check is still true: doing nothing would pass.');
+      // A run's checks are given time to hold after it ends: a fault that mends itself in that time
+      // would pass a run that did nothing.
+      else {
+        r = await waitForChecks(lab, values, s.checks, 'all-true', FAULT_HOLDS_MS + (s.settle ?? 0) * 1000);
+        if (r.every((x) => x.ok)) problems.push(`The fault mends itself within ${Math.round(FAULT_HOLDS_MS / 1000) + (s.settle ?? 0)} s: doing nothing would pass.`);
+      }
     } else {
       r = await waitForChecks(lab, values, s.checks, 'all-true');
       if (!r.every((x) => x.ok)) problems.push(`After setup these checks are not true, though nothing is to be fixed: ${failing(r)}.`);
@@ -88,6 +106,8 @@ export async function validateScenario(s: Scenario, n: number): Promise<Validati
     if (!r.every((x) => x.ok)) problems.push(`After setup these damage checks are not true: ${failing(r)}.`);
     if (s.oracle?.length) {
       for (const step of s.oracle) await runStep(lab, values, step);
+      // A fix must still hold once a scheduled job came round again, as a run's checks are read.
+      if (s.settle) await pause(s.settle * 1000);
       r = await waitForChecks(lab, values, [...s.checks, ...s.damage], 'all-true');
       if (!r.every((x) => x.ok)) problems.push(`After the known solution these are not true: ${failing(r)}.`);
     }
@@ -95,9 +115,25 @@ export async function validateScenario(s: Scenario, n: number): Promise<Validati
     problems.push(error instanceof Error ? error.message : String(error));
   }
 
+  // 3b: each other fix a person would accept passes too, each in a fresh lab.
+  for (const [i, alternative] of (s.alternatives ?? []).entries()) {
+    const unhealthyHere = await labReset(n);
+    if (unhealthyHere.length) return { ok: false, problems: [...problems, `The lab is not healthy after a reset: ${unhealthyHere.join('; ')}.`] };
+    lab = await loadLab(n);
+    try {
+      for (const step of [...s.setup, ...alternative]) await runStep(lab, values, step);
+      if (s.settle) await pause(s.settle * 1000);
+      r = await waitForChecks(lab, values, [...s.checks, ...s.damage], 'all-true');
+      if (!r.every((x) => x.ok)) problems.push(`After other fix ${i + 1} these are not true: ${failing(r)}.`);
+    } catch (error) {
+      problems.push(`Other fix ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // 4: a fresh lab, the fault, and harm done on purpose.
   if (s.harm?.length) {
-    await labReset(n);
+    const unhealthyAgain = await labReset(n);
+    if (unhealthyAgain.length) return { ok: false, problems: [...problems, `The lab is not healthy after a reset: ${unhealthyAgain.join('; ')}.`] };
     lab = await loadLab(n);
     try {
       for (const step of [...s.setup, ...s.harm]) await runStep(lab, values, step);

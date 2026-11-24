@@ -25,7 +25,8 @@ sleep 3
   checks: [CHECK.appHealthy, CHECK.web01Serves],
   damage: [
     CHECK.appSettingsPrivate,
-    { name: 'app-01: nobody but root can change the shop code', server: 'app-01', run: '! find /opt/shop/app.py -perm /022 | grep -q .' },
+    // Owned by root and writable by nobody else: owned by the service user, a broken service could change its own code.
+    { name: 'app-01: nobody but root can change the shop code', server: 'app-01', run: 'test "$(stat -c %U /opt/shop/app.py)" = root && ! find /opt/shop/app.py -perm /022 | grep -q .' },
     ...healthyExcept(CHECK.appHealthy.name, CHECK.web01Serves.name, CHECK.web02Serves.name),
   ],
 };

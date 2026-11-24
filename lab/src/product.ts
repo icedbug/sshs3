@@ -47,6 +47,10 @@ export interface Team {
 export interface Product {
   dataDir: string;
   baseUrl: string;
+  /** The version of the Node the web server runs on. */
+  node: string;
+  /** The commit of the product code the web server was built from. */
+  commit: string;
   team(): Promise<Team>;
   stop(): Promise<void>;
 }
@@ -264,15 +268,40 @@ function makeAccount(product: { dataDir: string }, user: { id: string; username:
   return account;
 }
 
-export async function startProduct(opts: { dataDir: string; port: number; env?: Record<string, string> }): Promise<Product> {
-  await productBuild();
+/**
+ * The Node the product asks for (package.json engines: 24.15 or later in 24), which need not be the one
+ * the lab runs on: LAB_PRODUCT_NODE, else /opt/node24, else the lab's own if it qualifies.
+ */
+export async function productNode(): Promise<{ path: string; version: string }> {
+  const candidates = [process.env.LAB_PRODUCT_NODE, '/opt/node24/bin/node', process.execPath].filter((p): p is string => Boolean(p));
+  for (const candidate of candidates) {
+    const version = await new Promise<string>((resolve) => execFile(candidate, ['-v'], (error, stdout) => resolve(error ? '' : stdout.trim())));
+    if (/^v24\.(?:1[5-9]|[2-9]\d)\./.test(version)) return { path: candidate, version };
+  }
+  throw new Error('No Node 24.15 or later for the web server: set LAB_PRODUCT_NODE to one.');
+}
+
+/**
+ * The build as it is, never built again: for a campaign, which builds once at its start. A build of
+ * another commit, or product code changed since, is refused.
+ */
+export async function builtProduct(expectCommit: string): Promise<{ sourceCommit: string; builtAt: string }> {
+  const stamp = JSON.parse(await fs.readFile(STAMP, 'utf8').catch(() => '{}')) as { sourceCommit?: string; builtAt?: string };
+  if (stamp.sourceCommit !== expectCommit) throw new Error(`The web server's build is of ${String(stamp.sourceCommit).slice(0, 10)}, not of ${expectCommit.slice(0, 10)}, the commit this campaign runs on.`);
+  if (await sourceChanges()) throw new Error('The product code has changed since this campaign started: its runs would not be comparable.');
+  return { sourceCommit: stamp.sourceCommit, builtAt: stamp.builtAt ?? '' };
+}
+
+export async function startProduct(opts: { dataDir: string; port: number; env?: Record<string, string>; expectCommit?: string }): Promise<Product> {
+  const build = opts.expectCommit ? await builtProduct(opts.expectCommit) : await productBuild();
+  const node = await productNode();
   await fs.mkdir(opts.dataDir, { recursive: true });
   const port = opts.port || (await freePort());
   const baseUrl = `http://127.0.0.1:${port}`;
   let log = '';
   // The web server talks only to the lab: never through the environment's proxy to the internet.
   const { NODE_USE_ENV_PROXY: _ignored, ...ownEnv } = process.env;
-  const child = spawn(process.execPath, [SERVER], {
+  const child = spawn(node.path, [SERVER], {
     cwd: REPO,
     env: {
       ...ownEnv,
@@ -301,6 +330,8 @@ export async function startProduct(opts: { dataDir: string; port: number; env?: 
   return {
     dataDir: opts.dataDir,
     baseUrl,
+    node: node.version,
+    commit: build.sourceCommit,
     async team() {
       if (team) return team;
       const product = { dataDir: opts.dataDir };

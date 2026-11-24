@@ -36,7 +36,14 @@ export interface ModelCall {
   request: string;
   /** What came back (cut at 2 MB). */
   response: string;
+  /** Why no whole answer came: the provider could not be reached (status 0), or its stream broke. */
+  error?: string;
+  /** The answer's stream broke in the middle (the provider's, or a cut the lab made). */
+  broken?: boolean;
 }
+
+/** A call the provider failed: no answer (status 0), a rate limit, a server error, or a broken stream. */
+export const providerFailed = (c: Pick<ModelCall, 'status' | 'broken'>): boolean => c.status === 0 || c.status === 429 || c.status >= 500 || c.broken === true;
 
 export interface ModelProxy {
   /** The address on this machine's loopback. The shared web server reaches it at a private address of this machine instead. */
@@ -45,6 +52,8 @@ export interface ModelProxy {
   stop(): Promise<void>;
   setFaults(runId: string, rules: FaultRule[]): void;
   calls(runId: string): Promise<ModelCall[]>;
+  /** The file a run's calls are written to. */
+  logFile(runId: string): string;
 }
 
 const RESPONSE_KEPT = 2 * 1024 * 1024;
@@ -76,6 +85,12 @@ export function usageOf(text: string): { inputTokens: number; cachedTokens: numb
     outputTokens: num(u.output_tokens ?? u.completion_tokens),
   };
 }
+
+const errorText = (error: unknown): string => {
+  const e = error as { message?: unknown; cause?: { message?: unknown; code?: unknown } };
+  const cause = e?.cause ? ` (${String(e.cause.code ?? e.cause.message ?? '')})` : '';
+  return `${String(e?.message ?? error)}${cause}`;
+};
 
 /** Whether a connection comes from this machine itself: from one of its own addresses. */
 function fromThisMachine(socket: { remoteAddress?: string; localAddress?: string }): boolean {
@@ -152,7 +167,14 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
     for (const [k, v] of Object.entries(req.headers))
       if (typeof v === 'string' && !['host', 'authorization', 'content-length', 'connection', 'accept-encoding'].includes(k.toLowerCase())) headers[k] = v;
     headers.authorization = 'Bearer proxy-injected';
-    const upstream = await fetch(new URL(req.url ?? '/', opts.upstream), { method: req.method, headers, body: req.method === 'GET' || req.method === 'HEAD' ? undefined : new Uint8Array(body) });
+    let upstream: Response;
+    try {
+      upstream = await fetch(new URL(req.url ?? '/', opts.upstream), { method: req.method, headers, body: req.method === 'GET' || req.method === 'HEAD' ? undefined : new Uint8Array(body) });
+    } catch (error) {
+      // The provider could not be reached: written down like any call, then answered 502 below.
+      await log({ ...base, status: 0, ms: Date.now() - started, inputTokens: 0, cachedTokens: 0, outputTokens: 0, response: '', error: errorText(error) });
+      throw error;
+    }
     const passOn: Record<string, string> = {};
     upstream.headers.forEach((v, k) => {
       if (!['content-length', 'content-encoding', 'transfer-encoding', 'connection'].includes(k)) passOn[k] = v;
@@ -164,7 +186,17 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
     if (upstream.body) {
       const reader = upstream.body.getReader();
       for (;;) {
-        const { value, done } = await reader.read();
+        let piece: ReadableStreamReadResult<Uint8Array>;
+        try {
+          piece = await reader.read();
+        } catch (error) {
+          // The provider broke its stream: the caller's breaks too, as it would with no lab in between,
+          // instead of ending cleanly with an error added after it.
+          res.socket?.destroy();
+          await log({ ...base, status: upstream.status, ms: Date.now() - started, ...usageOf(kept), response: kept.slice(0, RESPONSE_KEPT), broken: true, error: errorText(error) });
+          return;
+        }
+        const { value, done } = piece;
         if (done) break;
         if (kept.length < RESPONSE_KEPT) kept += decoder.decode(value, { stream: true });
         if (rule?.kind === 'cut') {
@@ -173,7 +205,7 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
           await new Promise<void>((resolve) => res.write(value, () => resolve()));
           await reader.cancel().catch(() => {});
           res.socket?.destroy();
-          await log({ ...base, status: upstream.status, ms: Date.now() - started, ...usageOf(kept), response: `${kept}\n[cut by the lab]` });
+          await log({ ...base, status: upstream.status, ms: Date.now() - started, ...usageOf(kept), response: `${kept}\n[cut by the lab]`, broken: true, error: 'cut by the lab' });
           return;
         }
         res.write(value);
@@ -197,6 +229,7 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
         server.close(() => resolve());
       }),
     setFaults: (runId, rules) => faults.set(runId, rules.map((r) => ({ ...r, used: 0 }))),
+    logFile: logPath,
     calls: async (runId) => {
       await writes.get(runId);
       try {

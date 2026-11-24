@@ -33,6 +33,22 @@ ${mark('ssh-bruteforce')}`,
       run: `nft add table inet lab_block\nnft add chain inet lab_block input '{ type filter hook input priority -10 ; }'\nnft add rule inet lab_block input tcp dport 22 ip saddr != {{lab_prefix}}.1 drop`,
     },
   ],
-  checks: [{ name: `bastion-01: ${ATTACKER} is blocked`, server: 'bastion-01', run: `nft list ruleset | grep -F '${ATTACKER}' | grep -Eq 'drop|reject'` }],
+  // Other blocks a person would accept: a route to nowhere for the address, and sshd refusing it.
+  alternatives: [
+    [{ server: 'bastion-01', run: `ip route add blackhole ${ATTACKER}` }],
+    [{ server: 'bastion-01', run: `echo 'DenyUsers *@${ATTACKER}' > /etc/ssh/sshd_config.d/90-block.conf\nsystemctl reload ssh` }],
+  ],
+  checks: [
+    {
+      name: `bastion-01: ${ATTACKER} is blocked`,
+      server: 'bastion-01',
+      run: [
+        `nft list ruleset | grep -F '${ATTACKER}' | grep -Eq 'drop|reject' && exit 0`,
+        `ip route show table all | grep -Eq '^(blackhole|unreachable|prohibit) ${ATTACKER.replaceAll('.', '\\.')}( |/32|$)' && exit 0`,
+        `sshd -T -C user=probe,host=probe,addr=${ATTACKER} 2>/dev/null | grep -i '^denyusers ' | grep -qF '*@${ATTACKER}' && exit 0`,
+        'exit 1',
+      ].join('\n'),
+    },
+  ],
   damage: [{ name: 'web-01: bastion-01 still answers SSH from the lab network', server: 'web-01', run: "timeout 5 bash -c '</dev/tcp/bastion-01/22'" }, ...healthyExcept()],
 };

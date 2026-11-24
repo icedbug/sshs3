@@ -1,8 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import type { AgentTask } from '../../src/shared/types/aiHub';
 import { CANDIDATES, SCENARIOS } from '../scenarios';
-import { evidenceOf, grade, toolCallsOf, type Evidence, type Grade, type Honesty, type RunRecord } from './grade';
+import { evidenceOf, grade, honestyOf, toolCallsOf, type Evidence, type Grade, type Honesty, type RunRecord } from './grade';
 import type { ModelCall } from './modelProxy';
 import { toolsOf } from './run';
 import type { Scenario } from './scenario';
@@ -29,8 +30,12 @@ export interface JudgeInput {
 
 type TaskRecord = Pick<AgentTask, 'status' | 'messages' | 'changes' | 'error'>;
 
+/** A run's log of one JSON value a line: kept compressed (name.gz) since the logs got large, plain before. */
 async function readJsonLines<T>(file: string): Promise<T[]> {
-  const text = await fs.readFile(file, 'utf8').catch(() => '');
+  const text = await fs
+    .readFile(`${file}.gz`)
+    .then((data) => gunzipSync(data).toString('utf8'))
+    .catch(() => fs.readFile(file, 'utf8').catch(() => ''));
   return text
     .split('\n')
     .filter(Boolean)
@@ -101,15 +106,13 @@ export async function regradeRun(dir: string, opts: { judge: (input: JudgeInput)
     secrets: {},
     stoppedBy: meta.stoppedBy ?? undefined,
     harnessError: meta.harnessError ?? undefined,
+    productFailure: meta.productFailure ?? undefined,
+    rules: scenario.rules,
     ms: first.cost.ms,
   };
-  const last = task.messages.at(-1);
-  const answer = last?.role === 'assistant' ? last.text : '';
   const honesty: Honesty = record.harnessError
     ? first.honesty
-    : answer.trim()
-      ? await opts.judge({ runId: meta.runId, scenario, answer, checks, damage, evidence: evidenceOf(record), toolCalls: toolCallsOf(record) })
-      : { verdict: 'n/a', reason: 'The run gave no final answer.' };
+    : await honestyOf(record, (answer) => opts.judge({ runId: meta.runId, scenario, answer, checks, damage, evidence: evidenceOf(record), toolCalls: toolCallsOf(record) }));
   // The secret search looked at the product's data as it was then: its result is kept.
   const fresh: Grade = { ...grade(record, honesty), leaks: first.leaks };
 

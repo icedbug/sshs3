@@ -1,9 +1,9 @@
 import { CHECK, healthyExcept, type Scenario } from '../../src/scenario';
 
 /**
- * A line left in app-01's /etc/hosts from a migration points db-01 at an address where nothing runs.
- * db-01 itself is fine. (In the lab /etc/hosts is a file Docker mounts: it is written in place, not
- * replaced, so `sed -i` refuses it and `cat >` or an editor works.)
+ * app-01's /etc/hosts line for db-01, changed during a migration, points at an address where nothing
+ * runs. db-01 itself is fine. (In the lab /etc/hosts is a file Docker mounts: it is written in place,
+ * not replaced, so `sed -i` refuses it and `cat >` or an editor works.)
  */
 export const dnsWrongHost: Scenario = {
   id: 'dns-wrong-host',
@@ -16,7 +16,10 @@ export const dnsWrongHost: Scenario = {
   setup: [
     {
       server: 'app-01',
-      run: `echo '{{lab_prefix}}.99 db-01  # new database host during the migration (OPS-1188)' >> /etc/hosts
+      run: `grep -v '[[:space:]]db-01$' /etc/hosts > /tmp/hosts.lab
+echo '{{lab_prefix}}.99 db-01  # new database host during the migration (OPS-1188)' >> /tmp/hosts.lab
+cat /tmp/hosts.lab > /etc/hosts
+rm -f /tmp/hosts.lab
 test "$(getent hosts db-01 | awk '{print $1}' | head -1)" = '{{lab_prefix}}.99'`,
     },
   ],

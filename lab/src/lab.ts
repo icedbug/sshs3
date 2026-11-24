@@ -20,8 +20,19 @@ export interface LabState {
   imageVersion?: number;
 }
 
-/** Raised when the images change (2: cron and syslog on every server, shop.lab in every hosts file). */
-export const IMAGE_VERSION = 2;
+/**
+ * Raised when the way a lab is built changes, so a lab built the old way is built again (2: cron and
+ * syslog on every server, shop.lab in every hosts file; 3: files made while setting a server up get
+ * ordinary modes, the distribution's own timers are off, every server finds every other one in its
+ * hosts file).
+ */
+export const IMAGE_VERSION = 3;
+
+/**
+ * The tag of the base and role images, raised only when a Dockerfile changes: building the base image
+ * pulls ubuntu:24.04 from Docker Hub, which limits how often it may be asked.
+ */
+const IMAGE_TAG = 2;
 
 /** This machine's own address on a lab's network (Docker gives a network's gateway the first address). */
 export const labGateway = (lab: Pick<LabState, 'index'>): string => `10.77.${lab.index}.1`;
@@ -36,9 +47,9 @@ const labDir = (n: number): string => path.join(STATE_DIR, `lab-${n}`);
 const statePath = (n: number): string => path.join(STATE_DIR, `lab-${n}.json`);
 const container = (n: number, name: string): string => `lab${n}-${name}`;
 const golden = (n: number, name: string): string => `sshs3lab/lab${n}-${name}:golden`;
-const BASE_IMAGE = `sshs3lab/base:${IMAGE_VERSION}`;
+const BASE_IMAGE = `sshs3lab/base:${IMAGE_TAG}`;
 const roleImage = (s: LabServerSpec): string =>
-  s.role === 's3' ? S3_IMAGE : s.role === 'bastion' ? BASE_IMAGE : `sshs3lab/role-${s.role}:${IMAGE_VERSION}`;
+  s.role === 's3' ? S3_IMAGE : s.role === 'bastion' ? BASE_IMAGE : `sshs3lab/role-${s.role}:${IMAGE_TAG}`;
 
 function run(file: string, args: string[], opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ExecResult> {
   return new Promise((resolve) => {
@@ -102,8 +113,10 @@ function composeFile(n: number, servers: LabState['servers'], fromGolden: boolea
             privileged: true,
             stop_signal: 'SIGRTMIN+3',
             networks: network,
-            // The shop's own name, as the people in the tasks call it.
-            extra_hosts: [`shop.lab:${servers.find((x) => x.name === 'web-01')!.ip}`],
+            // Every server by name, and the shop's own name as the people in the tasks call it. In the hosts
+            // file, not only in Docker's name service: an agent that loads a firewall ruleset starting with
+            // `flush ruleset` (as Debian's own does) also removes the rules that service needs in the server.
+            extra_hosts: [...servers.map((x) => `${x.name}:${x.ip}`), `shop.lab:${servers.find((x) => x.name === 'web-01')!.ip}`],
             ...order,
           };
   }
@@ -117,8 +130,8 @@ async function imageExists(tag: string): Promise<boolean> {
 async function buildImages(): Promise<void> {
   if (!(await imageExists(BASE_IMAGE))) await docker(['build', '-q', '-t', BASE_IMAGE, path.join(IMAGES, 'base')], 'Building the base image');
   for (const role of ['web', 'app', 'db', 'cache'])
-    if (!(await imageExists(`sshs3lab/role-${role}:${IMAGE_VERSION}`)))
-      await docker(['build', '-q', '--build-arg', `BASE=${BASE_IMAGE}`, '-t', `sshs3lab/role-${role}:${IMAGE_VERSION}`, path.join(IMAGES, role)], `Building the ${role} image`);
+    if (!(await imageExists(`sshs3lab/role-${role}:${IMAGE_TAG}`)))
+      await docker(['build', '-q', '--build-arg', `BASE=${BASE_IMAGE}`, '-t', `sshs3lab/role-${role}:${IMAGE_TAG}`, path.join(IMAGES, role)], `Building the ${role} image`);
 }
 
 /** The lab's CA, the shop's TLS certificate from it, and web-01's deploy key, made on this machine. */
@@ -137,7 +150,8 @@ async function provision(n: number, name: string, files: string[], script: strin
   await docker(['exec', name_, 'mkdir', '-p', '/tmp/lab'], `Preparing ${name}`);
   for (const f of files) await docker(['cp', f, `${name_}:/tmp/lab/${path.basename(f)}`], `Copying ${path.basename(f)} to ${name}`);
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  await docker(['exec', ...envArgs, name_, 'bash', `/tmp/lab/${path.basename(script)}`], `Provisioning ${name} with ${path.basename(script)}`);
+  // docker exec runs with umask 0000: without this, every file a script writes is world-writable.
+  await docker(['exec', ...envArgs, name_, 'bash', '-c', 'umask 022 && exec bash "$0"', `/tmp/lab/${path.basename(script)}`], `Provisioning ${name} with ${path.basename(script)}`);
   void dir;
 }
 
@@ -217,13 +231,20 @@ async function waitFor(ok: () => Promise<boolean>, timeoutMs: number, what: stri
   throw new Error(`Timed out waiting for ${what}.`);
 }
 
-async function waitHealthy(n: number, timeoutMs = 240_000): Promise<void> {
+/** The health checks that still fail once the lab had up to `timeoutMs` to come up; empty when healthy. */
+async function healthAfterWait(n: number, timeoutMs = 240_000): Promise<string[]> {
   let failing: string[] = [];
   try {
     await waitFor(async () => (failing = await labHealthy(n)).length === 0, timeoutMs, `lab ${n} to be healthy`);
+    return [];
   } catch {
-    throw new Error(`Lab ${n} is not healthy: ${failing.join('; ')}`);
+    return failing;
   }
+}
+
+async function waitHealthy(n: number): Promise<void> {
+  const failing = await healthAfterWait(n);
+  if (failing.length) throw new Error(`Lab ${n} is not healthy: ${failing.join('; ')}`);
 }
 
 export async function loadLab(n: number): Promise<LabState> {
@@ -255,11 +276,22 @@ export async function labUp(n: number, opts: { waitHealthy?: boolean } = {}): Pr
   return state;
 }
 
-/** Every server back to its golden image: what a run changed is gone. */
-export async function labReset(n: number): Promise<void> {
-  await composeUp(n, 'down');
+/**
+ * Every server back to its golden image: what a run changed is gone. Returns the health checks that
+ * still fail after the lab had time to come up (empty: healthy); the caller decides what a lab that
+ * stays broken means. The servers' unnamed volumes go with them (s3-01's image declares one per start).
+ */
+export async function labReset(n: number): Promise<string[]> {
+  await composeUp(n, 'down', '--volumes');
   await composeUp(n, 'up', '-d');
-  await waitHealthy(n);
+  return healthAfterWait(n);
+}
+
+/** The servers with sshd that do not answer over the control channel: a lab that went away mid-run. */
+export async function labUnreachable(n: number): Promise<string[]> {
+  const state = await loadLab(n);
+  const answers = await Promise.all(state.servers.filter((s) => s.role !== 's3').map(async (s) => ((await exec(s.ip, 'true', { timeoutMs: 15_000 })).code === 0 ? undefined : s.name)));
+  return answers.filter((name): name is string => name !== undefined);
 }
 
 /** Stops and removes a lab's servers. Its golden images and state stay, so the next labUp is quick. */

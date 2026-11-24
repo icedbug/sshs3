@@ -49,6 +49,32 @@ function post(url: string, body: string, headers: Record<string, string>, ca: st
   });
 }
 
+/** The judge could not be asked: no connection (status 0), a rate limit or a server error. Asked again. */
+export class JudgeUnavailable extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Asks again after each delay while the judge is unavailable; any other failure is final. */
+export async function withRetries<T>(attempt: () => Promise<T>, delaysMs: number[] = [5_000, 20_000, 60_000]): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof JudgeUnavailable) || i >= delaysMs.length) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delaysMs[i]));
+    }
+  }
+}
+
+/**
+ * The judge's verdict on a final answer. Throws when the judge cannot give one (after asking again
+ * while it was unavailable): that is a failed judgement, not a run without an answer.
+ */
 export async function judgeHonesty(opts: {
   proxyUrl: string;
   runId: string;
@@ -70,8 +96,8 @@ export async function judgeHonesty(opts: {
     whatRan: opts.evidence,
     otherToolCalls: opts.toolCalls,
   };
-  try {
-    const ca = await fs.readFile((await labTls()).caPath, 'utf8');
+  const ca = await fs.readFile((await labTls()).caPath, 'utf8');
+  return withRetries(async () => {
     const answer = await post(
       `${opts.proxyUrl}/v1/responses`,
       JSON.stringify({
@@ -85,14 +111,15 @@ export async function judgeHonesty(opts: {
       }),
       { Authorization: `Bearer lab-judge-${opts.runId}` },
       ca,
-    );
-    if (answer.status !== 200) return { verdict: 'n/a', reason: `The judge could not answer (${answer.status}): ${answer.text.slice(0, 300)}` };
+    ).catch((error: unknown) => {
+      throw new JudgeUnavailable(0, `The judge could not be reached: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (answer.status === 429 || answer.status >= 500) throw new JudgeUnavailable(answer.status, `The judge could not answer (${answer.status}): ${answer.text.slice(0, 300)}`);
+    if (answer.status !== 200) throw new Error(`The judge could not answer (${answer.status}): ${answer.text.slice(0, 300)}`);
     const parsed = JSON.parse(answer.text) as { output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }> };
     const text = (parsed.output ?? []).flatMap((o) => (o.type === 'message' ? (o.content ?? []) : [])).find((c) => c.type === 'output_text')?.text;
     const verdict = JSON.parse(text ?? '{}') as Partial<Honesty>;
-    if (!verdict.verdict || !['true', 'overclaims', 'underclaims', 'wrong', 'n/a'].includes(verdict.verdict)) return { verdict: 'n/a', reason: `The judge answered no verdict: ${String(text).slice(0, 300)}` };
+    if (!verdict.verdict || !['true', 'overclaims', 'underclaims', 'wrong', 'n/a'].includes(verdict.verdict)) throw new Error(`The judge answered no verdict: ${String(text).slice(0, 300)}`);
     return { verdict: verdict.verdict, reason: String(verdict.reason ?? '') };
-  } catch (error) {
-    return { verdict: 'n/a', reason: `The judge could not answer: ${error instanceof Error ? error.message : String(error)}` };
-  }
+  });
 }

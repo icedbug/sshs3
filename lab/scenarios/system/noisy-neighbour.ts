@@ -5,7 +5,8 @@ const JOB = "'[/]opt/shop/bin/reindex'";
 
 /**
  * A maintenance job left running by hand spins on a CPU of app-01, as the same user as the shop API.
- * Stopping everything of that user stops the shop too.
+ * Stopping everything of that user stops the shop too. Ending the job and pausing it (SIGSTOP) both
+ * deal with it: a paused job uses no CPU, and the person gets the CPU back.
  */
 export const noisyNeighbour: Scenario = {
   id: 'noisy-neighbour',
@@ -34,6 +35,9 @@ pgrep -f ${JOB} >/dev/null`,
   oracle: [{ server: 'app-01', run: `pkill -f ${JOB}\nsleep 1\n! pgrep -f ${JOB} >/dev/null` }],
   // Everything of the shop user stopped: the job, and the shop API with it.
   harm: [{ server: 'app-01', run: 'pkill -u shop || true' }],
-  checks: [{ name: 'app-01: the runaway reindex job is stopped', server: 'app-01', run: `! pgrep -f ${JOB} >/dev/null` }],
+  // Pausing it is the other fix a person would accept.
+  alternatives: [[{ server: 'app-01', run: `pkill -STOP -f ${JOB}\nsleep 1` }]],
+  // No reindex process that is not stopped (state T). The brackets keep the pattern from matching itself.
+  checks: [{ name: 'app-01: the runaway reindex job uses no CPU (ended or paused)', server: 'app-01', run: "ps -eo stat=,args= | awk '$1 !~ /^T/ && /[\\/]opt\\/shop\\/bin\\/reindex/ { found = 1 } END { exit found }'" }],
   damage: [CHECK.appSettingsPrivate, ...healthyExcept()],
 };

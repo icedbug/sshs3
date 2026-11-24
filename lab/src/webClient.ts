@@ -30,12 +30,24 @@ export interface WebSession {
 const EVENTS_KEPT = 200_000;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 
+/**
+ * The product failed or refused: its web server answered with an error or could not be reached, or the
+ * page connection closed. Told apart from the lab's own failures, so that a run the product broke counts
+ * as a failed run and not as the lab failing.
+ */
+export class ProductError extends Error {}
+
 export async function send(baseUrl: string, method: string, urlPath: string, body?: unknown, cookie?: string): Promise<Answer> {
-  const res = await fetch(`${baseUrl}${urlPath}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}${urlPath}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch (error) {
+    throw new ProductError(`${method} ${urlPath}: the web server could not be reached (${error instanceof Error ? error.message : String(error)}).`);
+  }
   const text = await res.text();
   let json: any;
   try {
@@ -49,7 +61,7 @@ export async function send(baseUrl: string, method: string, urlPath: string, bod
 /** `send`, failing with the server's own words on a status of 400 or more. */
 export async function must(baseUrl: string, method: string, urlPath: string, body?: unknown, cookie?: string): Promise<Answer> {
   const answer = await send(baseUrl, method, urlPath, body, cookie);
-  if (answer.status >= 400) throw new Error(`${method} ${urlPath}: ${answer.status} ${answer.body?.error ?? answer.body?.text ?? ''}`.trim());
+  if (answer.status >= 400) throw new ProductError(`${method} ${urlPath}: ${answer.status} ${answer.body?.error ?? answer.body?.text ?? ''}`.trim());
   return answer;
 }
 
@@ -67,7 +79,7 @@ export async function openSession(baseUrl: string, cookie: string): Promise<WebS
     isClosed = true;
     for (const w of waiting.values()) {
       clearTimeout(w.timer);
-      w.reject(new Error('The connection to the web server closed.'));
+      w.reject(new ProductError('The connection to the web server closed.'));
     }
     waiting.clear();
   });
@@ -90,21 +102,21 @@ export async function openSession(baseUrl: string, cookie: string): Promise<WebS
     waiting.delete(msg.id);
     clearTimeout(w.timer);
     if (msg.ok) w.resolve(msg.result);
-    else w.reject(new Error(String(msg.error)));
+    else w.reject(new ProductError(String(msg.error)));
   });
   await new Promise<void>((resolve, reject) => {
     ws.addEventListener('open', () => resolve());
-    ws.addEventListener('error', () => reject(new Error('The WebSocket to the web server did not open.')));
+    ws.addEventListener('error', () => reject(new ProductError('The WebSocket to the web server did not open.')));
   });
 
   return {
     invoke: <T>(channel: string, ...args: unknown[]) =>
       new Promise<T>((resolve, reject) => {
-        if (isClosed) return reject(new Error('The connection to the web server is closed.'));
+        if (isClosed) return reject(new ProductError('The connection to the web server is closed.'));
         const id = `r${++n}`;
         const timer = setTimeout(() => {
           waiting.delete(id);
-          reject(new Error(`${channel}: no answer within ${INVOKE_TIMEOUT_MS / 60_000} minutes.`));
+          reject(new ProductError(`${channel}: no answer within ${INVOKE_TIMEOUT_MS / 60_000} minutes.`));
         }, INVOKE_TIMEOUT_MS);
         waiting.set(id, { resolve, reject, timer });
         ws.send(JSON.stringify({ id, type: 'invoke', channel, args }));

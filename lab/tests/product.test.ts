@@ -52,6 +52,8 @@ describe('the product driver', () => {
     // The shipped web server, built from the product code as it is committed now.
     const build = await productBuild();
     expect(build.sourceCommit).toBe(await lastSourceCommit());
+    // On the Node the product asks for (package.json: 24.15 or later in 24), not the lab's own.
+    expect(product.node).toMatch(/^v24\.(1[5-9]|[2-9]\d)\./);
 
     const { maria } = await product.team();
     await maria.useModel('fake-1', 'product-test', `https://${labGateway(lab)}:${proxy.port}`);

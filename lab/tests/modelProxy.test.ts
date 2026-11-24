@@ -9,7 +9,7 @@ import { startModelProxy, type ModelProxy } from '../src/modelProxy';
 import { labTls } from '../src/tls';
 
 /** A stand-in for OpenAI: a streamed Responses answer in three events, the last with its usage. */
-async function fakeUpstream(opts: { holdLast?: () => Promise<void> } = {}) {
+async function fakeUpstream(opts: { holdLast?: () => Promise<void>; breakAfterFirst?: boolean } = {}) {
   const seen: Array<{ auth: string | undefined; body: string }> = [];
   let lastSentAt = 0;
   const server = http.createServer((req, res) => {
@@ -19,6 +19,12 @@ async function fakeUpstream(opts: { holdLast?: () => Promise<void> } = {}) {
       seen.push({ auth: req.headers.authorization, body });
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.write('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n');
+      if (opts.breakAfterFirst) {
+        // The provider's side of the connection drops in the middle of the answer.
+        await new Promise((r) => setTimeout(r, 50));
+        res.socket?.destroy();
+        return;
+      }
       await opts.holdLast?.();
       res.write('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":" there"}\n\n');
       lastSentAt = Date.now();
@@ -105,6 +111,32 @@ describe('the model proxy', () => {
     const cert = new X509Certificate(tls.cert);
     for (const ip of ['127.0.0.1', '10.77.1.1', '10.77.2.1', '10.77.9.1']) expect(cert.checkIP(ip)).toBe(ip);
     expect(cert.verify(new X509Certificate(ca).publicKey)).toBe(true);
+  });
+
+  it('an upstream it cannot reach: the caller gets 502 and the call is logged as a failure of the provider', async () => {
+    const logDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lab-proxy-'));
+    // Port 1 on this machine: nothing listens there, so the connection is refused.
+    const proxy = await startModelProxy({ port: 0, upstream: 'http://127.0.0.1:1', logDir });
+    closers.push(() => proxy.stop(), () => fs.rm(logDir, { recursive: true, force: true }));
+    const res = await ask(proxy, 'run-down');
+    expect(res.status).toBe(502);
+    await res.text();
+    const calls = await proxy.calls('run-down');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ runId: 'run-down', status: 0, model: 'gpt-6.2-sol' });
+    expect(calls[0]!.error).toBeTruthy();
+  });
+
+  it('a stream the provider breaks: the caller sees its stream break too, and the call is logged as broken', async () => {
+    const { proxy } = await setup({ breakAfterFirst: true });
+    const res = await ask(proxy, 'run-broken');
+    expect(res.status).toBe(200);
+    // Not a clean end with something added after it: the stream breaks, as it broke upstream.
+    await expect(res.text()).rejects.toThrow();
+    const calls = await proxy.calls('run-broken');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ status: 200, broken: true });
+    expect(calls[0]!.response).toContain('Hello');
   });
 
   it('answers 429 or 500, or cuts the stream, as a fault rule says, then passes calls on again', async () => {

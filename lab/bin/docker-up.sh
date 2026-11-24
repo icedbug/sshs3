@@ -23,6 +23,13 @@ for _ in $(seq 60); do
   sleep 1
 done
 
+# dockerd's log grows for as long as it runs: past 50 MB only its last 5 MB are kept, written in place, so
+# a dockerd still writing to it goes on writing to the same file.
+LOG="$STATE/dockerd.log"
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 52428800 ]; then
+  tail -c 5242880 "$LOG" >"$LOG.tail" && cat "$LOG.tail" >"$LOG" && rm -f "$LOG.tail"
+fi
+
 if ! docker info >/dev/null 2>&1; then
   rm -f /var/run/docker.pid
   nohup dockerd >>"$STATE/dockerd.log" 2>&1 &

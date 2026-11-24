@@ -2,7 +2,7 @@
  * The lab from the command line: `npm run lab:up -- <n>`, `lab:reset`, `lab:down`, `lab:status`, and
  * `npm run lab -- validate [--scenario <id>[,<id>]] [--times 3] [--lab <n>]` and
  * `npm run lab -- run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]`,
- * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2]` and
+ * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2] [--new]` and
  * `npm run lab -- report --name <n>` and `npm run lab -- regrade --name <n>`.
  * Lab n has the subnet 10.77.<n>.0/24; the campaigns use 1 and 2, the lab's own tests 9.
  */
@@ -13,6 +13,7 @@ import { CANDIDATES, SCENARIOS } from './scenarios';
 import { loadQueue, runCampaign } from './src/campaign';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { judgeHonesty } from './src/judge';
+import { takeLock } from './src/lock';
 import { startModelProxy } from './src/modelProxy';
 import { startProduct } from './src/product';
 import { regradeRun } from './src/regrade';
@@ -30,6 +31,16 @@ const flag = (name: string): string | undefined => {
 };
 const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade'].includes(command ?? '') ? undefined : rest[0];
 const n = Number(arg ?? 1);
+
+/** The lab for this command only: refused while a campaign or another command uses it. */
+async function withLab<T>(what: string, fn: () => Promise<T>): Promise<T> {
+  const unlock = await takeLock(path.join(STATE_DIR, `lab-${n}.lock`), `Lab ${n} (${what})`);
+  try {
+    return await fn();
+  } finally {
+    await unlock();
+  }
+}
 
 async function validate(): Promise<void> {
   const ids = flag('scenario')?.split(',');
@@ -93,9 +104,10 @@ async function campaign(): Promise<void> {
   if (!Number.isInteger(times) || times < 1) throw new Error(`--times is a whole number of at least 1, not "${flag('times')}".`);
   for (const lab of labs) if (!Number.isInteger(lab) || lab < 1 || lab > 250) throw new Error(`A lab number is 1 to 250, not "${lab}".`);
   console.log(`${new Date().toISOString()} campaign ${name}: ${models.join(', ')}, ${times} time(s), labs ${labs.join(', ')}.`);
-  await runCampaign({ name, models, times, labs, onProgress: (line) => console.log(line) });
+  await runCampaign({ name, models, times, labs, create: rest.includes('--new'), onProgress: (line) => console.log(line) });
   const report = await buildReport(name);
   console.log(`${new Date().toISOString()} campaign ${name} ${report.stoppedBecause ? `stopped: ${report.stoppedBecause}` : 'done'}. ${report.runs} runs. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
+  if (report.stoppedBecause) process.exitCode = 1;
 }
 
 /** A campaign's finished runs graded again with the grading as it is now, and its report made again. */
@@ -136,9 +148,9 @@ async function main(): Promise<void> {
   if (!Number.isInteger(n) || n < 1 || n > 250) throw new Error(`A lab number is 1 to 250, not "${arg}".`);
   switch (command) {
     case 'validate':
-      return validate();
+      return withLab('validate', validate);
     case 'run':
-      return run();
+      return withLab('run', run);
     case 'campaign':
       return campaign();
     case 'report':
@@ -151,12 +163,16 @@ async function main(): Promise<void> {
       console.log(`Lab ${n} is up and healthy.`);
       return;
     }
-    case 'reset':
-      await labReset(n);
-      console.log(`Lab ${n} is back to its golden images and healthy.`);
+    case 'reset': {
+      const failing = await withLab('reset', () => labReset(n));
+      if (failing.length) {
+        console.log(`Lab ${n} is back to its golden images, but not healthy: ${failing.join('; ')}`);
+        process.exitCode = 1;
+      } else console.log(`Lab ${n} is back to its golden images and healthy.`);
       return;
+    }
     case 'down':
-      await labDown(n);
+      await withLab('down', () => labDown(n));
       console.log(`Lab ${n} is down. Its golden images are kept.`);
       return;
     case 'status': {
@@ -167,7 +183,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2]; report --name <n>.',
+        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--new]; report --name <n>; regrade --name <n>.',
       );
   }
 }

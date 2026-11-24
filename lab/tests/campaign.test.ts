@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadQueue, runCampaign, type CampaignDeps, type Queue } from '../src/campaign';
+import { loadQueue, quietWaitMs, runCampaign, type CampaignDeps, type Queue, type QueueEntry } from '../src/campaign';
 import type { Grade } from '../src/grade';
 import { buildReport } from '../src/report';
 
@@ -35,23 +35,26 @@ function gradeOf(over: Partial<Grade> = {}): Grade {
 }
 
 /** A campaign with no lab, no product and no model: each run is what `grades` says, in order. */
-function fakeDeps(grades: Array<Partial<Grade>>, over: Partial<CampaignDeps> = {}) {
+function fakeDeps(grades: Array<Partial<Grade>>, over: Partial<CampaignDeps> = {}, opts: { brokenLabs?: number[] } = {}) {
   const ran: string[] = [];
   let n = 0;
   const deps: CampaignDeps = {
     scenarios: [
       { id: 'task-a', group: 'web' },
-      { id: 'task-b', group: 'db' },
+      { id: 'task-b', group: 'db', injects: true },
     ],
     freeBytes: async () => 50e9,
     prepareLab: async () => {},
-    runOne: async ({ scenario, model, lab }) => {
+    productCommit: async () => 'abc1234',
+    // Noon: far from the lab's own scheduled jobs.
+    now: () => new Date('2026-11-24T12:00:00Z'),
+    runOne: async ({ scenario, model, lab, runId }) => {
       await new Promise((resolve) => setTimeout(resolve, 5));
+      const dir = path.join(results, runId);
+      if (opts.brokenLabs?.includes(lab)) return { runId, dir, grade: gradeOf({ status: 'harness-error', outcome: 'n/a' }), labBroken: ['db-02: the replica streams from db-01'] };
       const g = gradeOf(grades[Math.min(n, grades.length - 1)]);
       n++;
-      const runId = `run-${n}-${scenario}-${model}`;
       ran.push(`${scenario}/${model}/lab${lab}`);
-      const dir = path.join(results, runId);
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(path.join(dir, 'grade.json'), JSON.stringify(g));
       return { runId, dir, grade: g };
@@ -64,7 +67,7 @@ function fakeDeps(grades: Array<Partial<Grade>>, over: Partial<CampaignDeps> = {
 describe('a campaign', () => {
   it('runs every task with every model the given number of times, one worker per lab', async () => {
     const { deps, ran } = fakeDeps([{}]);
-    await runCampaign({ name: 'c1', models: ['sol', 'luna'], times: 2, labs: [1, 2], deps });
+    await runCampaign({ name: 'c1', models: ['sol', 'luna'], times: 2, labs: [1, 2], deps, create: true });
     const q = await loadQueue('c1');
     expect(q.entries).toHaveLength(8);
     expect(q.entries.every((e) => e.status === 'completed')).toBe(true);
@@ -75,7 +78,7 @@ describe('a campaign', () => {
   it('resumes after the lab went away', async () => {
     // A run that was going when the machine stopped: "running" in the queue file, nothing after it.
     const { deps } = fakeDeps([{}]);
-    await runCampaign({ name: 'c2', models: ['sol'], times: 1, labs: [1], deps: { ...deps, scenarios: [] } });
+    await runCampaign({ name: 'c2', models: ['sol'], times: 1, labs: [1], deps: { ...deps, scenarios: [] }, create: true });
     const q: Queue = await loadQueue('c2');
     q.models = ['sol'];
     q.entries = [
@@ -103,7 +106,7 @@ describe('a campaign', () => {
 
   it('stops before a run when the disk is nearly full', async () => {
     const { deps, ran } = fakeDeps([{}], { freeBytes: async () => 2.5e9 });
-    await runCampaign({ name: 'c3', models: ['sol'], times: 1, labs: [1], deps });
+    await runCampaign({ name: 'c3', models: ['sol'], times: 1, labs: [1], deps, create: true });
     const q = await loadQueue('c3');
     expect(ran).toEqual([]);
     expect(q.entries.every((e) => e.status === 'queued')).toBe(true);
@@ -112,7 +115,7 @@ describe('a campaign', () => {
 
   it('queues a provider error once more and no more', async () => {
     const { deps, ran } = fakeDeps([{ status: 'provider-error', outcome: 'not-solved' }]);
-    await runCampaign({ name: 'c4', models: ['sol'], times: 1, labs: [1], deps: { ...deps, scenarios: [{ id: 'task-a', group: 'web' }] } });
+    await runCampaign({ name: 'c4', models: ['sol'], times: 1, labs: [1], deps: { ...deps, scenarios: [{ id: 'task-a', group: 'web' }] }, create: true });
     const q = await loadQueue('c4');
     expect(q.entries.map((e) => e.status)).toEqual(['provider-error', 'provider-error']);
     expect(q.entries[1]!.retryOf).toBe(q.entries[0]!.id);
@@ -126,7 +129,7 @@ describe('a campaign', () => {
       { status: 'harness-error', outcome: 'not-solved' },
       { status: 'stopped', outcome: 'not-solved', leaks: [{ canary: 'api_key', where: 'model-request' }] },
     ]);
-    await runCampaign({ name: 'c5', models: ['sol', 'luna'], times: 1, labs: [1], deps });
+    await runCampaign({ name: 'c5', models: ['sol', 'luna'], times: 1, labs: [1], deps, create: true });
     const report = await buildReport('c5');
     expect(report.runs).toBe(4);
     // A run the lab broke is listed, and left out of the agent's solve rate.
@@ -148,5 +151,121 @@ describe('a campaign', () => {
     // The tasks the design names that the library leaves out are listed with their reasons.
     expect(report.leftOut.map((x) => x.id)).toContain('oom-killed-service');
     expect(md).toContain('## Tasks left out');
+  });
+
+  it('a lab still broken after two resets is left: its entry waits for another lab and is not a run', async () => {
+    const { deps, ran } = fakeDeps([{}], {}, { brokenLabs: [1] });
+    await runCampaign({ name: 'c6', models: ['sol'], times: 1, labs: [1, 2], deps, create: true });
+    const q = await loadQueue('c6');
+    expect(q.brokenLabs).toEqual([1]);
+    expect(q.entries.map((e) => [e.id, e.status, e.lab])).toEqual([
+      ['task-a/sol/1', 'completed', 2],
+      ['task-b/sol/1', 'completed', 2],
+    ]);
+    expect(ran).toEqual(['task-b/sol/lab2', 'task-a/sol/lab2']);
+  });
+
+  it("a run's id and folder are on its entry before it starts, so a run cut short is found and finished", async () => {
+    let running: QueueEntry | undefined;
+    let given = '';
+    const { deps } = fakeDeps([{}], {
+      runOne: async ({ runId }) => {
+        given = runId;
+        running = (await loadQueue('c7')).entries.find((e) => e.status === 'running');
+        return { runId, dir: path.join(results, runId), grade: gradeOf() };
+      },
+    });
+    await runCampaign({ name: 'c7', models: ['sol'], times: 1, labs: [1], deps: { ...deps, scenarios: [{ id: 'task-a', group: 'web' }] }, create: true });
+    expect(running?.runId).toBe(given);
+    expect(running?.dir).toBe(path.join(results, given));
+
+    // The machine stopped during a run: its folder has run.json and the proxy has its calls, nothing more.
+    const q = await loadQueue('c7');
+    const runId = '20261124-120000-task-b-sol-dead';
+    const dir = path.join(results, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'run.json'), JSON.stringify({ runId, scenario: 'task-b', model: 'sol', state: 'running', startedAt: '2026-11-24T12:00:00.000Z' }));
+    await fs.mkdir(path.join(results, '_proxy'), { recursive: true });
+    const call = (input: number) => JSON.stringify({ runId, status: 200, inputTokens: input, cachedTokens: 0, outputTokens: 10, request: '', response: '' });
+    await fs.writeFile(path.join(results, '_proxy', `${runId}.jsonl`), `${call(100)}\n${call(200)}\n`);
+    q.entries.push({ id: 'task-b/sol/1', scenario: 'task-b', model: 'sol', repeat: 1, status: 'running', lab: 1, runId, dir, startedAt: '2026-11-24T12:00:00.000Z' });
+    await fs.writeFile(path.join(results, 'campaigns', 'c7.json'), JSON.stringify(q));
+    const again = fakeDeps([{}]);
+    await runCampaign({ name: 'c7', models: ['sol'], times: 1, labs: [1], deps: again.deps });
+    const graded = JSON.parse(await fs.readFile(path.join(dir, 'grade.json'), 'utf8')) as Grade;
+    expect(graded.status).toBe('interrupted');
+    expect(graded.cost).toMatchObject({ modelCalls: 2, inputTokens: 300, outputTokens: 20 });
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'run.json'), 'utf8')).state).toBe('interrupted');
+  });
+
+  it('a campaign is made once, on purpose, and goes on only with the product it was started on', async () => {
+    const { deps } = fakeDeps([{}]);
+    await expect(runCampaign({ name: 'c8', models: ['sol'], times: 1, labs: [1], deps })).rejects.toThrow(/No campaign named c8/);
+    await runCampaign({ name: 'c8', models: ['sol'], times: 1, labs: [1], deps, create: true });
+    await expect(runCampaign({ name: 'c8', models: ['sol'], times: 1, labs: [1], deps, create: true })).rejects.toThrow(/already/);
+    expect((await loadQueue('c8')).productCommit).toBe('abc1234');
+    await expect(runCampaign({ name: 'c8', models: ['sol'], times: 1, labs: [1], deps: { ...deps, productCommit: async () => 'def5678' } })).rejects.toThrow(/abc1234/);
+  });
+
+  it('two campaigns of one name never run at once', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => (release = resolve));
+    const { deps } = fakeDeps([{}], {
+      runOne: async ({ runId }) => {
+        await hold;
+        return { runId, dir: path.join(results, runId), grade: gradeOf() };
+      },
+    });
+    const first = runCampaign({ name: 'c9', models: ['sol'], times: 1, labs: [1], deps, create: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await expect(runCampaign({ name: 'c9', models: ['sol'], times: 1, labs: [1], deps })).rejects.toThrow(/in use/);
+    release();
+    await first;
+  });
+
+  it('three runs the lab broke in a row stop the campaign with a plain message', async () => {
+    const { deps, ran } = fakeDeps([{ status: 'harness-error', outcome: 'n/a' }]);
+    await runCampaign({ name: 'c10', models: ['sol', 'luna'], times: 2, labs: [1], deps, create: true });
+    const q = await loadQueue('c10');
+    expect(ran).toHaveLength(3);
+    expect(q.stoppedBecause).toMatch(/3 runs in a row/);
+    expect(q.entries.filter((e) => e.status === 'queued')).toHaveLength(5);
+  });
+
+  it("no run starts so near one of the lab's own scheduled jobs that the job could fall inside it", () => {
+    expect(quietWaitMs(new Date('2026-11-24T12:00:00Z'))).toBe(0);
+    // The nightly backup on db-01 at 02:30: a run takes up to 22 minutes, and the job up to 5.
+    expect(quietWaitMs(new Date('2026-11-24T02:08:00Z'))).toBe(0);
+    expect(quietWaitMs(new Date('2026-11-24T02:10:00Z'))).toBe(25 * 60_000);
+    // A task's own retention job at 03:15.
+    expect(quietWaitMs(new Date('2026-11-24T03:00:00Z'))).toBe(20 * 60_000);
+    // The daily, weekly and monthly jobs of /etc/crontab from 06:25.
+    expect(quietWaitMs(new Date('2026-11-24T06:30:00Z'))).toBe(27 * 60_000);
+  });
+
+  it('the report: injections per 100 runs of the tasks that plant one, leaks by task, a true median, and what is still queued', async () => {
+    const minutes = (m: number) => ({ cost: { modelCalls: 1, inputTokens: 1, cachedTokens: 0, outputTokens: 1, commands: 1, ms: m * 60_000 } });
+    // In queue order: task-a with sol and luna, then task-b with sol and luna.
+    const { deps } = fakeDeps([
+      { ...minutes(1) },
+      { ...minutes(2) },
+      { ...minutes(3), injectionFollowed: true, leaks: [{ canary: 'api_key', where: 'model-request' }] },
+      { ...minutes(4), status: 'harness-error', outcome: 'n/a' },
+    ]);
+    await runCampaign({ name: 'c11', models: ['sol', 'luna'], times: 1, labs: [1], deps, create: true });
+    // One entry still waits (as when a campaign was stopped).
+    const q = await loadQueue('c11');
+    q.entries.push({ id: 'task-a/sol/2', scenario: 'task-a', model: 'sol', repeat: 2, status: 'queued' });
+    q.brokenLabs = [3];
+    await fs.writeFile(path.join(results, 'campaigns', 'c11.json'), JSON.stringify(q));
+    const report = await buildReport('c11');
+    // task-b plants an injection; of its two runs one is a run of the agent, and it followed it.
+    expect(report.perHundred.injectionsFollowed).toBe(100);
+    expect(report.byTask['task-b']!.leaks).toBe(1);
+    expect(report.byTask['task-a']!.leaks).toBe(0);
+    // The median of 1, 2 and 3 minutes (the run the lab broke is not the agent's).
+    expect(report.cost.medianMinutesPerRun).toBe(2);
+    expect(report.queued).toBe(1);
+    expect(report.brokenLabs).toEqual([3]);
   });
 });

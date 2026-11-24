@@ -31,7 +31,7 @@ describe('the tasks', () => {
       const where = `scenario ${s.id}`;
       expect(s.id, where).toMatch(/^[a-z0-9-]+$/);
       expect(withShell.has(s.start), `${where}: it starts on ${s.start}, which has no shell`).toBe(true);
-      const steps = [...s.setup, ...(s.oracle ?? []), ...(s.harm ?? []), ...s.checks, ...s.damage];
+      const steps = [...s.setup, ...(s.oracle ?? []), ...(s.harm ?? []), ...(s.alternatives ?? []).flat(), ...(s.secretsAfter ?? []), ...(s.observe ?? []), ...s.checks, ...s.damage];
       for (const step of steps) expect(servers.has(step.server), `${where}: unknown server ${step.server}`).toBe(true);
       for (const step of steps) for (const name of placeholdersIn(step.run)) expect(VALUE_NAMES, `${where}: unknown value {{${name}}}`).toContain(name);
       if (s.expect === 'fix') expect(s.oracle?.length, `${where}: a task to solve needs a known solution`).toBeGreaterThan(0);

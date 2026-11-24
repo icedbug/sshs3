@@ -14,3 +14,6 @@ ssh-keygen -A >/dev/null
 systemctl restart ssh
 install -m 644 /tmp/lab/lab-ca.crt /usr/local/share/ca-certificates/lab-ca.crt
 update-ca-certificates >/dev/null 2>&1
+# The distribution's own timers: package updates, upgrades, log rotation and other daily jobs would change a server in
+# the middle of a run.
+systemctl mask --now apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer motd-news.timer e2scrub_all.timer fstrim.timer logrotate.timer >/dev/null 2>&1

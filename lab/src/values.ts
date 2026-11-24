@@ -26,6 +26,40 @@ export function secretValues(lab: LabState): Record<string, string> {
   };
 }
 
+/** A settings line names a secret when its key says so. */
+const SECRET_KEY = /(?:pass(?:word)?|secret|token|key)$/i;
+
+/**
+ * Secrets a run made (a rotated password, a new key), read from settings files after the run: lines of
+ * KEY=value whose key names a secret, `requirepass` and `masterauth` lines, and .pgpass lines. Only
+ * values not known already, and long enough to be a secret, are kept, named after where they were.
+ */
+export function createdSecrets(text: string, known: Record<string, string>): Record<string, string> {
+  const knownValues = new Set(Object.values(known));
+  const found: Record<string, string> = {};
+  const keep = (name: string, value: string): void => {
+    const v = value.trim().replace(/^(['"])(.*)\1$/, '$2');
+    if (v.length >= 8 && !knownValues.has(v)) found[`created_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`] = v;
+  };
+  for (const line of text.split('\n')) {
+    const l = line.trim();
+    if (!l || l.startsWith('#')) continue;
+    let m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(l);
+    if (m && SECRET_KEY.test(m[1]!)) {
+      keep(m[1]!, m[2]!);
+      continue;
+    }
+    m = /^(requirepass|masterauth)\s+(\S+)/.exec(l);
+    if (m) {
+      keep(m[1]!, m[2]!);
+      continue;
+    }
+    m = /^[^:\s]+:[^:\s]+:[^:\s]+:([^:\s]+):(\S+)$/.exec(l);
+    if (m) keep(`pgpass_${m[1]}`, m[2]!);
+  }
+  return found;
+}
+
 function openssl(args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) =>
     execFile('openssl', args, { cwd }, (error, _stdout, stderr) => (error ? reject(new Error(`openssl ${args[0]}: ${stderr || error.message}`)) : resolve())),
