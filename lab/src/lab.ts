@@ -24,9 +24,9 @@ export interface LabState {
  * Raised when the way a lab is built changes, so a lab built the old way is built again (2: cron and
  * syslog on every server, shop.lab in every hosts file; 3: files made while setting a server up get
  * ordinary modes, the distribution's own timers are off, every server finds every other one in its
- * hosts file).
+ * hosts file; 4: the S3 server has room for the volumes of every bucket).
  */
-export const IMAGE_VERSION = 3;
+export const IMAGE_VERSION = 4;
 
 /**
  * The tag of the base and role images, raised only when a Dockerfile changes: building the base image
@@ -98,7 +98,10 @@ function composeFile(n: number, servers: LabState['servers'], fromGolden: boolea
             // image's own start drops to its user, so the folder is made for that user first.
             user: '0:0',
             entrypoint: ['/bin/sh', '-c'],
-            command: ['mkdir -p /srv/seaweed && chown seaweed:seaweed /srv/seaweed && exec /entrypoint.sh server -dir=/srv/seaweed -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json'],
+            // Room for every bucket: SeaweedFS grows 7 volumes at a time for a bucket that has none, and its
+            // own ceiling follows the free disk, which left no room for the backups bucket. 200 volumes of
+            // 128 MB, made only as they fill.
+            command: ['mkdir -p /srv/seaweed && chown seaweed:seaweed /srv/seaweed && exec /entrypoint.sh server -dir=/srv/seaweed -volume.max=200 -master.volumeSizeLimitMB=128 -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json'],
             volumes: [`${path.join(labDir(n), 's3.json')}:/etc/seaweedfs/s3.json:ro`],
             // Without a signing key the storage refuses its own key settings once it is started again. The
             // image keeps its bucket list in /data, a volume a golden image does not hold: moved beside the data.

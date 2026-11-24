@@ -59,6 +59,13 @@ describe('the lab fleet', () => {
     }
   });
 
+  it('S3 has room for every bucket to grow its volumes', async () => {
+    // SeaweedFS grows 7 volumes at a time for a bucket that has none, and its default ceiling follows the
+    // machine's free disk: with three buckets in use there was no room left for the backups bucket.
+    const status = (await (await fetch(`http://${ip('s3-01')}:9333/dir/status`)).json()) as { Topology: { Free: number } };
+    expect(status.Topology.Free).toBeGreaterThanOrEqual(21);
+  });
+
   it('a lab server that mounts a disk of this machine is caught by the check made after every run', async () => {
     const check = HOST_DISK_CHECKS.find((c) => c.server === 'app-01')!;
     expect((await exec(ip('app-01'), check.run)).code).toBe(0);
