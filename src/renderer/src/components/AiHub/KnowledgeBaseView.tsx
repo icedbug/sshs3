@@ -166,6 +166,8 @@ export const STARTER_RUNBOOK_TEMPLATES: Omit<RunbookTemplate, "id" | "createdAt"
 const emptyDoc: DocDraft = { title: "", collection: "", cluster: "", tags: "", content: "" };
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_FILES_AT_ONCE = 300;
+/** A mark sshs3 writes in place of a secret it hid (`privacy.ts`): the mark is not the value. */
+const HIDDEN_MARK = /\[(?:private key |email |ip |phone |host )?redacted\]/i;
 
 const SOURCES: Record<string, string> = {
   folder: "from a folder",
@@ -375,7 +377,7 @@ export function RunbookExecutor({
         </div>
       </div>
 
-      {runbook.steps.some((step) => /\[(?:private key )?redacted\]/i.test(`${step.command ?? ""} ${step.prompt ?? ""}`)) && (
+      {runbook.steps.some((step) => HIDDEN_MARK.test(`${step.command ?? ""} ${step.prompt ?? ""}`)) && (
         <p className="ai-hint" role="note" data-testid={`runbook-hidden-${runbook.id}`}>
           A password, key or token in this runbook was hidden when it was saved. A step that shows [redacted] does not run as written: the agent refuses it, and in the terminal it would type the word [redacted].
         </p>
@@ -500,7 +502,9 @@ export function RunbookExecutor({
                     type="button"
                     className="ai-btn-accent"
                     data-testid={`runbook-step-terminal-${step.id}`}
-                    disabled={missingRequired || !onRunStepInTerminal}
+                    // A step that holds the mark of a hidden value would type the mark, not the value.
+                    disabled={missingRequired || !onRunStepInTerminal || HIDDEN_MARK.test(resolvedCmd)}
+                    title={HIDDEN_MARK.test(resolvedCmd) ? "This step holds a value that was hidden when it was saved. Run it yourself with the real value." : undefined}
                     onClick={async () => {
                       if (onRunStepInTerminal && await onRunStepInTerminal(resolvedCmd, step, runbook) !== false) markStep(step.id, "active");
                     }}

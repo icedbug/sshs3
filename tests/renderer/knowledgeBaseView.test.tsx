@@ -304,4 +304,20 @@ describe("a runbook stored with a value hidden", () => {
     rerender(<RunbookExecutor runbook={{ id: "rb2", name: "Clean", inputs: [], steps: [step("a", "redis-cli -a {{password}} ping")] }} act={vi.fn()} />);
     expect(screen.queryByTestId("runbook-hidden-rb2")).not.toBeInTheDocument();
   });
+
+  it("does not type a hidden step into the terminal: its button is off, the others work", () => {
+    const step = (id: string, command: string) => ({ id, kind: "command" as const, title: id, command });
+    const run = vi.fn(async () => true);
+    render(
+      <RunbookExecutor
+        runbook={{ id: "rb3", name: "Reset cache auth", inputs: [], steps: [step("a", "redis-cli ping"), step("b", "htpasswd -b /etc/nginx/.htpasswd admin [redacted]")] }}
+        act={vi.fn()}
+        onRunStepInTerminal={run}
+      />,
+    );
+    expect(screen.getByTestId("runbook-step-terminal-a")).toBeEnabled();
+    expect(screen.getByTestId("runbook-step-terminal-b")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("runbook-step-terminal-b"));
+    expect(run).not.toHaveBeenCalled();
+  });
 });

@@ -6,7 +6,7 @@ import type { AgentChange, AgentTask } from "../../../shared/types/aiHub";
 import type { TerminalRegistry } from "./TerminalRegistry";
 type ManagedTerminal = NonNullable<ReturnType<TerminalRegistry["get"]>>;
 import { createTwoFilesPatch } from "diff";
-import { clip, containsSecrets, safeError } from "./privacy";
+import { clip, containsSecrets, maskMarkIn, maskedValueRefusal, safeError } from "./privacy";
 import type { ToolRequest } from "./ToolBroker";
 
 /** The longest file a model is shown whole, and so may rewrite whole: what fits in what a runtime passes on. */
@@ -323,6 +323,9 @@ export class FileTools {
       throw new Error(
         "This file contains redacted secrets. Edit it in the terminal without asking the model to reproduce secrets.",
       );
+    // The agent only sees secrets masked: content it writes from what it saw holds sshs3's mark, not the value.
+    const mark = maskMarkIn(proposedContent);
+    if (mark) throw new Error(maskedValueRefusal("new content", mark));
     // What is approved is what is written: new content that would be shown masked is refused like an old one.
     if (containsSecrets(proposedContent))
       throw new Error(

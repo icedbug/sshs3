@@ -259,6 +259,24 @@ describe("FileTools: a file is refused for its secrets, not for a byte-order mar
     }
   });
 
+  it("refuses new content that holds sshs3's own mark of a hidden value", async () => {
+    // The agent saw a password as [redacted] and wrote it back: the file would get the word, not the password.
+    const files = new Map<string, string>([["/srv/d.conf", "port=1\n"]]);
+    const { ft, task, dispose } = await setupFiles(files);
+    try {
+      for (const newText of ["password=[redacted]", "admin_email=[EMAIL REDACTED]"]) {
+        await expect(
+          ft.invoke(task, { action: "file-patch", path: "/srv/d.conf", expectedHash: sha256(files.get("/srv/d.conf")!), edits: [{ oldText: "port=1", newText }] }, async (c) => {
+            c.status = "approved";
+          }),
+        ).rejects.toThrow(/sshs3 wrote that in place of a password/);
+      }
+      expect(files.get("/srv/d.conf")).toBe("port=1\n");
+    } finally {
+      dispose();
+    }
+  });
+
   it("still refuses a file that holds a secret", async () => {
     const files = new Map<string, string>([["/srv/c.env", "DB_PASSWORD=hunter2secret\nport=1\n"]]);
     const { ft, task, dispose } = await setupFiles(files);
