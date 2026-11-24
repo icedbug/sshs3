@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -309,5 +310,23 @@ describe("showing and checking the log without reading all of it each time", () 
     expect(reads).toBe(4);
     files.delete("audit/client-1/anchors/n000000000002.json");
     expect(await log.verify()).toMatchObject({ ok: false, problem: { text: expect.stringContaining("does not follow anchor 1") } });
+  });
+});
+
+describe("an edit in place of the same length, with the time it was written set back", () => {
+  // `touch -d @seconds.nanoseconds` puts the time back to the nanosecond, as the review did.
+  it.skipIf(process.platform === "win32")("is seen by the next check, without a restart and without a full walk", async () => {
+    const log = await makeLog();
+    for (const c of ["ls /srv", "df -h", "uptime"]) await log.append(command(c));
+    expect(await log.verify()).toMatchObject({ ok: true });
+    const before = await fs.stat(log.file, { bigint: true });
+    const text = await fs.readFile(log.file, "utf8");
+    // Same file, same length, and its time written put back as it was.
+    await fs.writeFile(log.file, text.replace('"what":"df -h"', '"what":"rm -r"'));
+    const at = `@${before.mtimeNs / 1_000_000_000n}.${String(before.mtimeNs % 1_000_000_000n).padStart(9, "0")}`;
+    expect(spawnSync("touch", ["-m", "-d", at, log.file]).status).toBe(0);
+    const after = await fs.stat(log.file, { bigint: true });
+    expect([after.ino, after.size, after.mtimeNs]).toEqual([before.ino, before.size, before.mtimeNs]);
+    expect(await log.verify()).toMatchObject({ ok: false });
   });
 });

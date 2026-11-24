@@ -18,7 +18,7 @@ import {
   type Osc133Phase,
   type ShellAdapterCapabilities,
 } from "./shellAdapters";
-import { boundedContext } from "./privacy";
+import { boundedContext, maskMarkIn, maskedValueRefusal } from "./privacy";
 
 export interface ReconnectGraceMetadata {
   reconnecting: boolean;
@@ -145,6 +145,18 @@ interface LiveTerminal {
   /** Latest OSC 133 shell integration prompt state. */
   oscPromptActive?: boolean;
   /**
+   * The last bracketed paste switch the terminal showed: "on" (ESC[?2004h) while a line editor such as
+   * bash's readline reads a line, "off" (ESC[?2004l) once it has taken one. `pasteScan` is the last few
+   * characters, so that a switch cut in two is still read.
+   */
+  paste?: "on" | "off";
+  pasteScan?: string;
+  /**
+   * The shell was reading with bracketed paste on when it was last connected to (`arm`): its commands
+   * are pasted, and after each command the switch is waited for before the next is pasted.
+   */
+  pastes?: boolean;
+  /**
    * The end marker of a command that was let go of arrived: its shell is back at its own prompt, whatever
    * that prompt looks like. Forgotten as soon as a person types into the terminal.
    */
@@ -174,7 +186,10 @@ interface LiveTerminal {
      * while the command ran), so the end marker no longer says the shell is at its prompt.
      */
     typedSince?: boolean;
-    /** Text the command's frame still held back when it was let go of: shown with the next text. */
+    /**
+     * What the command's frame still held back when it was let go of: only ever the start of what may be
+     * a marker, never text a person reads. It goes on with the next text, which completes it.
+     */
     flush: string;
   };
   pending?: {
@@ -188,7 +203,30 @@ interface LiveTerminal {
     /** Runs while the frame has ended and text the terminal delivers late is waited for. */
     lateTimer?: NodeJS.Timeout;
     lateSince?: number;
+    /** Whether anything of the command was written to the terminal yet. */
+    typed: boolean;
+    /** Set while the command waits for the line editor to switch bracketed paste on: writes it. */
+    start?: () => void;
+    startTimer?: NodeJS.Timeout;
   };
+}
+
+/** How long a command waits for the shell's line editor to switch bracketed paste on again after the last command. */
+const PASTE_WAIT_MS = 2000;
+
+/**
+ * What is written to a POSIX shell for a command: its envelope as typed, or, while the line editor has
+ * bracketed paste on, each typed line as one bracketed paste with the Enter after it. A line editor
+ * takes a paste as text: a person's key bindings (vi mode with "jj", a macro, `stty kill @`) cannot
+ * turn the command's letters into editing commands that recall and run another line.
+ */
+function asTyped(envelope: string, paste: boolean): string {
+  if (!paste) return envelope;
+  return envelope
+    .split("\r")
+    .filter((line) => line.length > 0)
+    .map((line) => `\x1b[200~${line}\x1b[201~\r`)
+    .join("");
 }
 
 /** How long a terminal that delivers text late is given after the last text, and at most, before a command's frame is closed. */
@@ -422,9 +460,22 @@ export class TerminalRegistry extends EventEmitter {
    * moment — which is what a recording of an agent's run is made from.
    */
   feed(id: string, data: string): string {
+    const s = this.sessions.get(id);
+    if (s) {
+      const look = (s.pasteScan ?? "") + data;
+      const on = look.lastIndexOf("\x1b[?2004h");
+      const off = look.lastIndexOf("\x1b[?2004l");
+      if (on > off) s.paste = "on";
+      else if (off > on) s.paste = "off";
+      // Shorter than a switch: one found in it was read already.
+      s.pasteScan = look.slice(-7);
+    }
     const shown = this.feedInner(id, data);
     const owner = this.sessions.get(id)?.view.owner;
     if (shown && owner && this.listenerCount("output")) this.emit("output", id, shown, owner);
+    // A command that waited for the line editor: it reads a line now.
+    const start = s?.pending?.start;
+    if (start && s.paste === "on") queueMicrotask(start);
     return shown;
   }
 
@@ -432,7 +483,7 @@ export class TerminalRegistry extends EventEmitter {
     const s = this.sessions.get(id);
     if (!s) return data;
     if (!s.pending && s.unsettled?.flush) {
-      // The end of what a command showed before it was let go of was still held back: it is shown now.
+      // The start of a marker the frame held back when it was let go of: completed by what comes now.
       data = s.unsettled.flush + data;
       s.unsettled.flush = "";
     }
@@ -827,6 +878,9 @@ export class TerminalRegistry extends EventEmitter {
     // ensureReady and armAtPrompt once the last line reads as a prompt. Nothing is checked here.
     s.view.shell = shell;
     s.view.state = "ready";
+    // A shell whose line editor reads with bracketed paste on at its prompt (bash's readline) gets its
+    // commands pasted; one that never switches it on (dash, sh) gets them typed.
+    s.pastes = s.paste === "on";
     await this.execute(
       id,
       s.view.generation,
@@ -884,6 +938,9 @@ export class TerminalRegistry extends EventEmitter {
       throw new Error("Terminal is not ready for this command");
     if (!handshake && s.view.owner !== owner)
       throw new Error("Terminal ownership was revoked");
+    // The last guard for every caller: a mark sshs3 wrote in place of a secret is not the secret.
+    const mark = handshake ? undefined : maskMarkIn(command);
+    if (mark) throw new Error(maskedValueRefusal("command", mark));
     // Something half-typed at the prompt would run together with the command: never write over it.
     if (!handshake && s.inputBuffer.trim())
       throw new Error("Something is typed at the prompt of this terminal. Clear it, or take control, before the agent runs anything there.");
@@ -897,6 +954,9 @@ export class TerminalRegistry extends EventEmitter {
     if (!handshake) this.emit("executing", id, command, owner);
     s.view.state = "busy";
     s.promptByEndMarker = undefined;
+    // The line break a shell prints after a handshake is dropped only before anything else is typed:
+    // after a command was let go of, the next text is the person's to see as it comes.
+    s.trimPostHandshakeNewline = false;
     // A pseudo console that passes markers ahead of text: only for a shell whose output is plain text
     // (PowerShell's comes in frames of its own), and not for a stream that is no pseudo console.
     const late =
@@ -918,15 +978,31 @@ export class TerminalRegistry extends EventEmitter {
         resolve,
         reject,
         timer: setTimeout(() => this.ranOutOfTime(id, s, timeout), timeout),
+        typed: false,
       };
-      try {
-        s.write(envelope);
-      } catch (error) {
-        this.invalidate(
-          id,
-          error instanceof Error ? error.message : "Terminal write failed",
-        );
-      }
+      const pending = s.pending;
+      const posix = s.view.shell === "bash" || s.view.shell === "zsh" || s.view.shell === "sh" || s.view.shell === "dash";
+      const write = (): void => {
+        if (s.pending !== pending || pending.typed) return;
+        clearTimeout(pending.startTimer);
+        pending.start = undefined;
+        pending.typed = true;
+        try {
+          s.write(asTyped(envelope, posix && s.pastes === true && s.paste === "on"));
+        } catch (error) {
+          this.invalidate(
+            id,
+            error instanceof Error ? error.message : "Terminal write failed",
+          );
+        }
+      };
+      // Right after a command, the line editor has not switched bracketed paste on again yet: what is
+      // written before it reads is taken by the terminal as typed. It is waited for, for a while; a shell
+      // that does not switch it on in that time is typed into as before.
+      if (posix && s.pastes === true && s.paste !== "on") {
+        pending.start = write;
+        pending.startTimer = setTimeout(write, Math.min(PASTE_WAIT_MS, timeout / 2));
+      } else write();
     });
     this.emit("changed");
     return promise;
@@ -949,7 +1025,7 @@ export class TerminalRegistry extends EventEmitter {
       this.invalidate(id, `no shell answered within ${seconds} seconds`);
       return;
     }
-    const last = lastVisibleLine(pending.frames.shownSoFar() + pending.frames.heldBack()).slice(-200);
+    const last = lastVisibleLine(pending.frames.shownSoFar()).slice(-200);
     this.invalidate(
       id,
       `The command did not finish within ${seconds} seconds. It was left running in this terminal: sshs3 does not stop a command by itself. Nothing more is typed there until it has ended. It was not run again. Use another terminal, or ask the person to look at this one.${last ? ` It last showed: ${last}` : ""}`,
@@ -994,16 +1070,19 @@ export class TerminalRegistry extends EventEmitter {
     if (s.pending) {
       clearTimeout(s.pending.timer);
       clearTimeout(s.pending.lateTimer);
-      if (!s.pending.handshake && !disconnected) {
+      clearTimeout(s.pending.startTimer);
+      // A command that was still waiting to be written never ran: there is no end marker to wait for.
+      if (!s.pending.handshake && !disconnected && s.pending.typed) {
         // The command's end marker never came. What the terminal showed last is kept (a question for
         // a password is known by it), and only that marker arriving later opens the terminal again.
         const flush = s.pending.frames.heldBack();
-        const last = (s.pending.frames.shownSoFar() + flush).slice(-240);
+        const last = s.pending.frames.shownSoFar().slice(-240);
         if (last) s.tail = last;
         s.unsettled = { since: Date.now(), endMarker: endMarkerOf(s.pending.nonce), scan: "", flush };
         s.oscPromptActive = undefined;
       }
-      s.pending.reject(new Error(reason));
+      // A command that waited for the line editor (bracketed paste) was not written: that is said.
+      s.pending.reject(new Error(s.pending.typed || s.pending.handshake ? reason : `${reason} Nothing of the command had been typed yet.`));
       s.pending = undefined;
     }
     if (disconnected) {

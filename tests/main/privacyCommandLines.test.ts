@@ -54,6 +54,32 @@ describe("passwords on ordinary command lines", () => {
     [`curl -u admin:${PW} https://api.example.com/x`, "curl -u admin:[redacted] https://api.example.com/x"],
     [`mysql --password=${PW} -e 'select 1'`, "mysql --password=[redacted] -e 'select 1'"],
     [`PGPASSWORD=${PW} psql -c 'select 1'`, "PGPASSWORD=[redacted] psql -c 'select 1'"],
+    // Found in clear by a review: programs the list covers or claims, and common ones.
+    [`redis-cli -h cache AUTH ${PW}`, "redis-cli -h cache AUTH [redacted]"],
+    [`redis-cli -h cache auth default ${PW}`, "redis-cli -h cache auth default [redacted]"],
+    [`redis-cli CONFIG SET requirepass ${PW}`, "redis-cli CONFIG SET requirepass [redacted]"],
+    [`openssl pkcs12 -in a.p12 -password pass:${PW} -nodes`, "openssl pkcs12 -in a.p12 -password pass:[redacted] -nodes"],
+    [`mysql -e "ALTER USER 'app'@'%' IDENTIFIED BY '${PW}'"`, `mysql -e "ALTER USER 'app'@'%' IDENTIFIED BY '[redacted]'"`],
+    [`mysql -e "CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password BY '${PW}'"`, `mysql -e "CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password BY '[redacted]'"`],
+    [`mysql -e "SET PASSWORD FOR 'app'@'%' = '${PW}'"`, `mysql -e "SET PASSWORD FOR 'app'@'%' = '[redacted]'"`],
+    [`psql -c "ALTER ROLE app WITH PASSWORD '${PW}'"`, `psql -c "ALTER ROLE app WITH PASSWORD '[redacted]'"`],
+    [`psql -c "ALTER USER app ENCRYPTED PASSWORD '${PW}'"`, `psql -c "ALTER USER app ENCRYPTED PASSWORD '[redacted]'"`],
+    [`keytool -list -keystore k.jks -storepass ${PW}`, "keytool -list -keystore k.jks -storepass [redacted]"],
+    [`keytool -genkey -keystore k.jks -keypass ${PW} -storepass Other${PW}`, "keytool -genkey -keystore k.jks -keypass [redacted] -storepass [redacted]"],
+    [`vault login ${PW}`, "vault login [redacted]"],
+    [`etcdctl --user root:${PW} get /x`, "etcdctl --user root:[redacted] get /x"],
+    [`influx -username admin -password ${PW} -execute 'show databases'`, "influx -username admin -password [redacted] -execute 'show databases'"],
+    [`cqlsh -u cassandra -p ${PW} db`, "cqlsh -u cassandra -p [redacted] db"],
+    [`useradd -m -p ${PW} deploy`, "useradd -m -p [redacted] deploy"],
+    [`usermod -p ${PW} deploy`, "usermod -p [redacted] deploy"],
+    [`snmpwalk -v3 -u ops -a SHA -A ${PW} -x AES -X Other${PW} host`, "snmpwalk -v3 -u ops -a SHA -A [redacted] -x AES -X [redacted] host"],
+    [`xfreerdp /u:ops /p:${PW} /v:host`, "xfreerdp /u:ops /p:[redacted] /v:host"],
+    [`export DBPASS=${PW}`, "export DBPASS=[redacted]"],
+    [`export GITLAB_TOKEN=${PW} APP_SECRET=${PW} STRIPE_KEY=${PW}`, "export GITLAB_TOKEN=[redacted] APP_SECRET=[redacted] STRIPE_KEY=[redacted]"],
+    [`java -jar jenkins-cli.jar -s https://ci.example.com -auth admin:${PW} list-jobs`, "java -jar jenkins-cli.jar -s https://ci.example.com -auth admin:[redacted] list-jobs"],
+    [`rabbitmqadmin -u admin -p ${PW} list queues`, "rabbitmqadmin -u admin -p [redacted] list queues"],
+    [`consul members -token ${PW}`, "consul members -token [redacted]"],
+    [`consul members -token=${PW}`, "consul members -token=[redacted]"],
   ])("%s", (command, shown) => {
     expect(maskContext(command)).toBe(shown);
     expect(forApproval(command, 16_000, "command")).toEqual({ text: shown, hidden: true });
@@ -81,6 +107,16 @@ describe("passwords on ordinary command lines", () => {
       "kubectl get secret db -o name",
       "git log --oneline | head -5",
       "sudo -S true < /dev/null",
+      "redis-cli --no-auth-warning -h cache ping",
+      "redis-cli CONFIG GET requirepass",
+      "keytool -list -keystore k.jks -storepass:env KS_PW",
+      "vault login -method=userpass username=ops",
+      "snmpwalk -v3 -u ops -a SHA -x AES -l authPriv host",
+      "export SSH_KEY=~/.ssh/id_ed25519 GPG_KEY=/etc/keys/a.asc",
+      "CACHE_BYPASS=1 SKIP_TOKEN=true make test",
+      "java -jar jenkins-cli.jar -auth @/var/lib/ci/token list-jobs",
+      "psql -c \"ALTER ROLE app PASSWORD NULL\"",
+      "useradd -m deploy",
     ])
       expect(maskContext(command)).toBe(command);
   });
@@ -93,8 +129,28 @@ describe("passwords on ordinary command lines", () => {
       "printf 'deploy:%s\\n' \"$PW\" | chpasswd",
       "redis-cli -a ${REDIS_PW} ping",
       "zip -P `cat pw` out.zip file",
+      // The generic rules too: a variable after a password flag, in curl's -u, after mysql's -p, after password=.
+      "mysql --password=$DB_PW -e 'select 1'",
+      "wget --http-password \"$PW\" https://files.example.com/x",
+      "curl -u admin:$API_PW https://api.example.com/x",
+      "mysql -uroot -p$DB_PW -e 'select 1'",
+      "export DB_PASSWORD=$VAULT_PW",
+      // A placeholder of a runbook or a template: its value is put in when it runs.
+      "htpasswd -b /etc/nginx/.htpasswd admin {{password}}",
+      "redis-cli CONFIG SET requirepass {{password}} && redis-cli -a {{password}} ping",
+      "echo 'app:{{password}}' | chpasswd",
+      "sshpass -p '{{pw}}' ssh root@db-01 uptime",
+      "smbclient //srv/share -U admin%{{pw}}",
+      "mysql -uroot -p{{pw}} --password={{pw}} -e 'select 1'",
+      "curl -u admin:{{pw}} https://api.example.com/x",
+      "password: {{ .Values.db.password }}",
+      "the password is {{password}}",
+      'echo "app:$APP_PW" | chpasswd',
     ])
       expect(maskContext(command)).toBe(command);
+    expect(maskContext("echo 'app:$APP_PW' | chpasswd")).toBe("echo 'app:[redacted]' | chpasswd");
+    // A closing backtick of code in prose is not part of the password.
+    expect(maskContext("Run `rabbitmqctl change_password app S3cretPw9` on mq-01.")).toBe("Run `rabbitmqctl change_password app [redacted]` on mq-01.");
     // In single quotes it is the literal text, so it is a password.
     expect(maskContext("sshpass -p '$ecretPw9' ssh root@db-01 uptime")).toBe("sshpass -p [redacted] ssh root@db-01 uptime");
   });

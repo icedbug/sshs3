@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HubRequest, HubSnapshot, KbDocument, KbPage } from "../../src/shared/types/aiHub";
-import { KnowledgeBaseView } from "../../src/renderer/src/components/AiHub/KnowledgeBaseView";
+import { KnowledgeBaseView, RunbookExecutor } from "../../src/renderer/src/components/AiHub/KnowledgeBaseView";
 
 afterEach(cleanup);
 
@@ -286,5 +286,22 @@ describe("the pages agents read", () => {
     fireEvent.click(screen.getByRole("button", { name: "Write a source note" }));
     expect(screen.getByRole("tab", { name: "Sources · 0" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("kb-form")).toBeVisible();
+  });
+});
+
+describe("a runbook stored with a value hidden", () => {
+  it("says on the runbook that its hidden steps do not run as written, and says nothing on one without", () => {
+    const step = (id: string, command: string) => ({ id, kind: "command" as const, title: id, command });
+    const { rerender } = render(
+      <RunbookExecutor
+        runbook={{ id: "rb1", name: "Reset cache auth", inputs: [], steps: [step("a", "redis-cli ping"), step("b", "htpasswd -b /etc/nginx/.htpasswd admin [redacted]")] }}
+        act={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("runbook-hidden-rb1")).toHaveTextContent(
+      "A password, key or token in this runbook was hidden when it was saved. A step that shows [redacted] does not run as written",
+    );
+    rerender(<RunbookExecutor runbook={{ id: "rb2", name: "Clean", inputs: [], steps: [step("a", "redis-cli -a {{password}} ping")] }} act={vi.fn()} />);
+    expect(screen.queryByTestId("runbook-hidden-rb2")).not.toBeInTheDocument();
   });
 });

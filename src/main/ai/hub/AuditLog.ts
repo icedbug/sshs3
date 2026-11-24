@@ -289,8 +289,13 @@ export class AuditLog {
   /** Where the walk of the chain stands. Undefined until the file was read, and after a write that failed. */
   private state?: ChainState;
   private readonly table = new SeqTable();
-  /** The file as it was when the walk last reached its end, or when this log last wrote to it. */
-  private seen?: { ino: number; size: number; mtimeMs: number };
+  /**
+   * The file as it was when the walk last reached its end, or when this log last wrote to it. Its change
+   * time (`ctimeMs`) too: the time a file was written can be set back (`touch -d`), the time its inode
+   * last changed cannot, by any user (on Linux and macOS), so an edit of the same length in place is
+   * seen by it.
+   */
+  private seen?: { ino: number; size: number; mtimeMs: number; ctimeMs: number };
   /** What followed the last line break when the file was last read: a line that was cut off, or nothing. */
   private rest: Buffer = Buffer.alloc(0);
   /** Whether the end of the file was looked at and mended since it was last read: only then is it written to. */
@@ -377,11 +382,11 @@ export class AuditLog {
 
   /**
    * Brings the walk to the end of the file and returns what follows its last line break. While the
-   * file is exactly as this log left it (same file, size and time), nothing is read: every entry
+   * file is exactly as this log left it (same file, size, time written and time changed), nothing is read: every entry
    * this log wrote was taken into the walk as it was written. Anything else walks it from the start.
    */
   private async catchUp(full: boolean): Promise<Buffer> {
-    let stat: { ino: number; size: number; mtimeMs: number };
+    let stat: { ino: number; size: number; mtimeMs: number; ctimeMs: number };
     try {
       stat = await fs.stat(this.file);
     } catch (error) {
@@ -393,7 +398,12 @@ export class AuditLog {
       this.state = undefined;
       throw new AuditUnreadable(`The audit log could not be read (${(error as Error).message}).`, { cause: error });
     }
-    const untouched = this.seen !== undefined && this.seen.ino === stat.ino && this.seen.size === stat.size && this.seen.mtimeMs === stat.mtimeMs;
+    const untouched =
+      this.seen !== undefined &&
+      this.seen.ino === stat.ino &&
+      this.seen.size === stat.size &&
+      this.seen.mtimeMs === stat.mtimeMs &&
+      this.seen.ctimeMs === stat.ctimeMs;
     if (!full && this.state && untouched) return this.rest;
     const state = this.reset();
     try {
@@ -402,7 +412,7 @@ export class AuditLog {
       this.state = undefined;
       throw new AuditUnreadable(`The audit log could not be read (${(error as Error).message}).`, { cause: error });
     }
-    this.seen = { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+    this.seen = { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
     // A line that was cut off has to be dealt with before anything is written after it.
     if (this.rest.length) this.loaded = false;
     return this.rest;

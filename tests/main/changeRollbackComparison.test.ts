@@ -1,13 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
-import { COMPARISON_TEXT, ToolBroker, comparedWithBaseline, stableObservation, stableObservationHash } from "../../src/main/ai/hub/ToolBroker";
+import {
+  COMPARISON_TEXT,
+  ToolBroker,
+  changingLines,
+  comparedWithBaseline,
+  stableObservation,
+  stableObservationHash,
+  steadyObservation,
+  steadyObservationHash,
+} from "../../src/main/ai/hub/ToolBroker";
 import { observationHash } from "../../src/main/ai/hub/privacy";
 import type { AgentTask } from "../../src/shared/types/aiHub";
 
 /**
  * A rollback counted as "not as before" whenever the check's output held a time, a process id or a
- * counter: it had to be the same output byte for byte. Now it is compared three ways, and the result
- * says which one held.
+ * counter: it had to be the same output byte for byte. Then every time, date, process id and counter
+ * was left out, and a certificate's end date, a service's IP or a memory limit that was not back read
+ * as "restored". Now the check is looked at twice before the change, and only what differed between
+ * those two looks is left out (and times said relative to now, which are never a setting).
  */
 
 const disposals: Array<() => unknown> = [];
@@ -62,13 +73,48 @@ describe("whether a look after a rollback reads as the look before the change", 
   const passes = (look: { exitCode: number; output: string }) => look.exitCode === 0 && look.output.includes("active (running)");
   const before = { exitCode: 0, output: status("active (running)", "10:00:00", "3s", 1234) };
 
-  it("says which comparison held: the same output, the same without what is volatile, or the card's own expected text", () => {
-    expect(comparedWithBaseline({ id: "c", now: { ...before }, baseline: before, before: true, passes })).toBe("exact");
-    const restarted = { exitCode: 0, output: status("active (running)", "10:07:41", "2s", 4321) };
-    expect(comparedWithBaseline({ id: "c", now: restarted, baseline: before, before: true, passes })).toBe("stable");
+  it("says which comparison held: the same output, the same without what changed by itself, or the card's own expected text", () => {
+    // Two looks before the change, a second apart: the clock line and the CPU counter moved.
+    const look = (clock: string, cpu: string, ago: string) => ({ exitCode: 0, output: `now ${clock}\n${status("active (running)", "10:00:00", ago, 1234).replace("CPU: 45ms", `CPU: ${cpu}`)}` });
+    const first = look("10:00:01", "45ms", "3s");
+    const changing = changingLines(first.output, look("10:00:02", "46ms", "4s").output);
+    expect(changing).toEqual([0, 8]);
+    expect(comparedWithBaseline({ id: "c", now: { ...first }, baseline: first, changing, before: true, passes })).toBe("exact");
+    expect(comparedWithBaseline({ id: "c", now: look("10:09:55", "61ms", "10min"), baseline: first, changing, before: true, passes })).toBe("stable");
+    // Restarted: another process id and another start time, on lines that read the same in both looks.
+    // That is not the same output; the card's expected text still says it works.
+    const restarted = { exitCode: 0, output: `now 10:07:41\n${status("active (running)", "10:07:41", "2s", 4321)}` };
+    expect(comparedWithBaseline({ id: "c", now: restarted, baseline: first, changing, before: true, passes })).toBe("expected");
     // A different shape of output that still shows what the card expects.
     const other = { exitCode: 0, output: "nginx is active (running), 4 workers" };
-    expect(comparedWithBaseline({ id: "c", now: other, baseline: before, before: true, passes })).toBe("expected");
+    expect(comparedWithBaseline({ id: "c", now: other, baseline: first, changing, before: true, passes })).toBe("expected");
+  });
+
+  it("does not leave out a date, an address or a number that read the same in both looks: it may be a setting", () => {
+    const pairs: Array<[string, string, string]> = [
+      ["a certificate's end date", "notAfter=Mar  1 12:00:00 2027 GMT", "notAfter=Nov 30 12:00:00 2026 GMT"],
+      ["a service's IP", "Name: web\nIP: 10.96.0.10\nPort: http 80/TCP", "Name: web\nIP: 10.96.0.99\nPort: http 80/TCP"],
+      ["a release pinned by its date", "release: app-2026-11-01", "release: app-2026-11-20"],
+      ["a time of day in a schedule", "backup runs at 02:30:00 daily", "backup runs at 14:30:00 daily"],
+      ["a ten-digit number", "quota_bytes 1700000000", "quota_bytes 1900000000"],
+      ["systemd's Memory line, which holds the limit", "Memory: 12.1M (max: 512.0M)", "Memory: 12.1M (max: 2.0G)"],
+      ["a process id option", "pidfile=/run/a.pid pid 1234", "pidfile=/run/a.pid pid 4321"],
+    ];
+    const never = () => false;
+    for (const [what, was, now] of pairs) {
+      const changing = changingLines(was, was);
+      expect(changing, what).toEqual([]);
+      expect(comparedWithBaseline({ id: "c", now: { exitCode: 0, output: now }, baseline: { exitCode: 0, output: was }, changing, before: false, passes: never }), what).toBeUndefined();
+      const kept = steadyObservationHash("c", { exitCode: 0, output: was }, changing!);
+      expect(comparedWithBaseline({ id: "c", now: { exitCode: 0, output: now }, stableHash: kept, before: false, passes: never }), what).toBeUndefined();
+      // Looked at once only, the old way of leaving every such part out matches: that is "unproven", never "stable".
+      expect(comparedWithBaseline({ id: "c", now: { exitCode: 0, output: now }, baseline: { exitCode: 0, output: was }, before: false, passes: never, unproven: true }), what).toBe("unproven");
+      expect(comparedWithBaseline({ id: "c", now: { exitCode: 0, output: now }, baseline: { exitCode: 0, output: was }, before: false, passes: never }), what).toBeUndefined();
+    }
+    // Times said relative to now are never a setting: they are left out on every line.
+    expect(steadyObservation("Active: active (running) since Mon; 3min ago\n 10:00 up 3 days, load average: 0.00", [])).toBe(
+      steadyObservation("Active: active (running) since Mon; 2h 5min ago\n 10:00 up 4 days, load average: 0.31", []),
+    );
   });
 
   it("does not take two failed checks for the same state: a check that failed before and fails again proves nothing by itself", () => {
@@ -81,10 +127,17 @@ describe("whether a look after a rollback reads as the look before the change", 
   });
 
   it("compares the same way from the hashes kept with a change, for a rollback made later", () => {
-    const kept = { exactHash: observationHash("c", before), stableHash: stableObservationHash("c", before) };
-    const restarted = { exitCode: 0, output: status("active (running)", "11:30:00", "1s", 555) };
+    const counters = (cpu: string) => ({ exitCode: 0, output: status("active (running)", "10:00:00", "3s", 1234).replace("CPU: 45ms", `CPU: ${cpu}`) });
+    const changing = changingLines(counters("45ms").output, counters("47ms").output)!;
+    const kept = { exactHash: observationHash("c", before), stableHash: steadyObservationHash("c", before, changing) };
+    expect(kept.stableHash).toMatch(/^lines:7:[0-9a-f]{64}$/);
     expect(comparedWithBaseline({ id: "c", now: { ...before }, ...kept, before: true, passes })).toBe("exact");
-    expect(comparedWithBaseline({ id: "c", now: restarted, ...kept, before: true, passes })).toBe("stable");
+    expect(comparedWithBaseline({ id: "c", now: counters("90ms"), ...kept, before: true, passes })).toBe("stable");
+    // A hash kept from one look (or by an earlier version) shows a match without the volatile parts as unproven at most.
+    const restarted = { exitCode: 0, output: status("active (running)", "11:30:00", "1s", 555) };
+    const oneLook = { exactHash: kept.exactHash, stableHash: stableObservationHash("c", before) };
+    expect(comparedWithBaseline({ id: "c", now: restarted, ...oneLook, before: false, passes, unproven: true })).toBe("unproven");
+    expect(comparedWithBaseline({ id: "c", now: restarted, ...oneLook, before: false, passes })).toBeUndefined();
     // A change kept by an older version has only the exact hash: the card's expected text still decides.
     expect(comparedWithBaseline({ id: "c", now: restarted, exactHash: kept.exactHash, before: true, passes })).toBe("expected");
     expect(comparedWithBaseline({ id: "c", now: { exitCode: 3, output: "inactive" }, exactHash: kept.exactHash, before: false, passes })).toBeUndefined();
@@ -134,23 +187,60 @@ describe("a change that is taken back, with a check whose output holds a time an
     rollback: "cp nginx.bak /etc/nginx/nginx.conf && systemctl restart nginx",
   };
 
-  it("counts as taken back when the service runs again under another process id, at another time, and says how that was seen", async () => {
+  it("looks at the check twice before the change, and leaves out only what changed between those looks", async () => {
     const { broker, t, capability, answer } = await setup();
-    answer(status("active (running)", "10:00:00", "3 days", 1234)); // before the change
+    const withCpu = (cpu: string, ago: string) => status("active (running)", "10:00:00", ago, 1234).replace("CPU: 45ms", `CPU: ${cpu}`);
+    answer(withCpu("45ms", "3 days")); // before the change
+    answer(withCpu("46ms", "3 days")); // and again right away
     answer(""); // the change
     answer(status("failed (Result: exit-code)", "10:05:00", "1s", 2000), 3); // the check afterwards
     answer(status("failed (Result: exit-code)", "10:05:00", "4s", 2000), 3); // and once more after it had time to settle
-    answer(""); // the rollback
-    answer(status("active (running)", "10:05:09", "1s", 2100)); // the check after the rollback
+    answer(""); // the rollback (a reload: the same process)
+    answer(withCpu("80ms", "3 days")); // the check after the rollback
     const res = (await broker.invoke(capability.key, reload)) as Record<string, unknown>;
     expect(res).toMatchObject({ checkPassed: false, rolledBack: true, backAsBefore: true, comparedBy: COMPARISON_TEXT.stable });
     expect(t.changes[0].status).toBe("failed");
     expect(t.changes[0].rollback).toMatchObject({ ran: true, restored: true, comparedWithBaseline: true, comparison: "stable" });
+    expect(t.changes[0].check?.baselineStableHash).toMatch(/^lines:7:[0-9a-f]{64}$/);
+  });
+
+  it("says that the service runs again under another process id by the card's expected text, not as the same output", async () => {
+    const { broker, t, capability, answer } = await setup();
+    answer(status("active (running)", "10:00:00", "3 days", 1234));
+    answer(status("active (running)", "10:00:00", "3 days", 1234));
+    answer("");
+    answer(status("failed (Result: exit-code)", "10:05:00", "1s", 2000), 3);
+    answer(status("failed (Result: exit-code)", "10:05:00", "4s", 2000), 3);
+    answer("");
+    answer(status("active (running)", "10:05:09", "1s", 2100));
+    const res = (await broker.invoke(capability.key, reload)) as Record<string, unknown>;
+    expect(res).toMatchObject({ rolledBack: true, backAsBefore: true, comparedBy: COMPARISON_TEXT.expected });
+    expect(t.changes[0].rollback).toMatchObject({ restored: true, comparison: "expected" });
+  });
+
+  it("reports a match from one look as not shown, neither restored nor not restored", async () => {
+    const { broker, t, capability, answer } = await setup();
+    // The check never passes here (its expected text is not in it), so the card's expected text decides nothing.
+    answer("expires 2027-03-01", 1); // before the change
+    answer("expires 2027-03-01\nsecond line", 1); // and again: another number of lines, so the two looks do not pair up
+    answer("");
+    answer("expires 2026-11-30", 1);
+    answer("expires 2026-11-30", 1);
+    answer("");
+    answer("expires 2026-12-24", 1); // after the rollback: another date
+    const res = (await broker.invoke(capability.key, reload)) as Record<string, unknown>;
+    expect(res).toMatchObject({ rolledBack: false, comparedBy: COMPARISON_TEXT.unproven });
+    expect(res.backAsBefore).toBeUndefined();
+    expect(String(res.next)).toMatch(/is not shown/);
+    expect(t.changes[0].status).toBe("uncertain");
     expect(t.changes[0].check?.baselineStableHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(t.changes[0].rollback).toMatchObject({ ran: true, comparedWithBaseline: true, comparison: "unproven" });
+    expect(t.changes[0].rollback?.restored).toBeUndefined();
   });
 
   it("still says so when the service is not back: the same words do not make a failed unit a running one", async () => {
     const { broker, t, capability, answer } = await setup();
+    answer(status("active (running)", "10:00:00", "3 days", 1234));
     answer(status("active (running)", "10:00:00", "3 days", 1234));
     answer("");
     answer(status("failed (Result: exit-code)", "10:05:00", "1s", 2000), 3);

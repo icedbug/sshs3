@@ -399,8 +399,10 @@ export interface AgentChange {
   /**
    * The command that takes the change back, and what happened if it had to run.
    * `restored`: after the rollback the check reads as it did before the change.
-   * `comparison`: how that was seen. `exact`: the same output. `stable`: the same once times,
-   * process ids and counters are left out. `expected`: the check passed before and passes again.
+   * `comparison`: how that was seen. `exact`: the same output. `stable`: the same once what changed by
+   * itself between two looks before the change is left out. `expected`: the check passed before and
+   * passes again. `unproven`: the same only with every time, process id and counter left out, from one
+   * look; `restored` is then not set, because it is not known.
    * `skipped`: why it did not run although the change did not hold.
    */
   rollback?: {
@@ -411,7 +413,7 @@ export interface AgentChange {
     checkAfter?: boolean;
     restored?: boolean;
     comparedWithBaseline?: boolean;
-    comparison?: "exact" | "stable" | "expected";
+    comparison?: "exact" | "stable" | "expected" | "unproven";
     skipped?: string;
   };
   /**

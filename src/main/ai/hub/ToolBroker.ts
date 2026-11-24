@@ -15,7 +15,7 @@ import { isPlainCommand } from "../../../shared/types/aiHub";
 import { CHAT_APP_TOOLS, mayKeepNotes, sensitiveFile, type ChatFenceCheck } from "./chatFence";
 import type { TerminalRegistry } from "./TerminalRegistry";
 import { isProdTag } from "./safetyPolicy";
-import { boundedContext, exactHash, observationHash, forApproval, maskStrings, safeError, clip } from "./privacy";
+import { boundedContext, exactHash, observationHash, forApproval, maskMarkIn, maskedValueRefusal, maskStrings, safeError, clip } from "./privacy";
 import { scriptedDemoNote } from "../../sim/scripted";
 
 /** A person's answer, and how it came about when nobody answered. */
@@ -90,6 +90,12 @@ export class ToolBrokerError extends Error {
       recoverable: this.recoverable,
     };
   }
+}
+
+/** Refuses a command that holds a mark sshs3 wrote in place of a secret (see `maskedValueRefusal`). */
+function refuseMaskedValue(text: unknown, what: string): void {
+  const mark = typeof text === "string" ? maskMarkIn(text) : undefined;
+  if (mark) throw new ToolBrokerError("precondition", maskedValueRefusal(what, mark), { code: "masked_value" });
 }
 
 class ApprovalRequiredSignal extends Error {
@@ -360,17 +366,73 @@ export const stableObservationHash = (id: string, observation: { exitCode: numbe
   exactHash(JSON.stringify([id, observation.exitCode, stableObservation(observation.output)]));
 
 /**
+ * Times said relative to now ("3min ago", uptime with its load, docker's "Up 3 minutes"): they differ at
+ * every look and are never a setting, so they are left out everywhere.
+ */
+function withoutRelativeTimes(line: string): string {
+  return (
+    line
+      .replace(/\bup\s+[^\n]{0,80}?load average:[^\n]*/g, "up <uptime>")
+      .replace(/\bload average:[ \d.,]+/g, "load average: <load>")
+      // eslint-disable-next-line security/detect-unsafe-regex -- each round begins with a digit and ends with a unit; it cannot backtrack
+      .replace(/\b(?:\d+(?:\.\d+)? ?(?:us|ms|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?|months?|y|years?)[, ]{0,2}){1,4}ago\b/g, "<ago>")
+      .replace(/\bUp (?:About )?(?:an?|\d+) (?:seconds?|minutes?|hours?|days?|weeks?|months?)\b/g, "Up <ago>")
+  );
+}
+
+const linesOf = (output: string): string[] => output.replace(/\r\n?/g, "\n").replace(/\n+$/, "").split("\n").map((line) => line.replace(/[ \t]+$/, ""));
+
+/**
+ * The lines that differ between two looks at a check taken one right after the other, before the change:
+ * what changes there by itself. Undefined when the two looks do not have the same number of lines, so
+ * that their lines cannot be paired.
+ */
+export function changingLines(first: string, second: string): number[] | undefined {
+  const a = linesOf(first);
+  const b = linesOf(second);
+  if (a.length !== b.length) return undefined;
+  return a.flatMap((line, i) => (withoutRelativeTimes(line) === withoutRelativeTimes(b[i]) ? [] : [i]));
+}
+
+/**
+ * A look at a check with only what changes by itself left out: times said relative to now everywhere,
+ * and the volatile parts `stableObservation` knows only on the lines that differed between the two looks
+ * before the change. A date, an address, a number or a process id on a line that read the same in both
+ * looks may be a setting (a certificate's end date, a service's IP, a memory limit), and is compared.
+ */
+export function steadyObservation(output: string, changing: readonly number[]): string {
+  const moving = new Set(changing);
+  return linesOf(output)
+    .map((line, i) => (moving.has(i) ? stableObservation(line) : withoutRelativeTimes(line).replace(/[ \t]+/g, " ").trim()))
+    .join("\n")
+    .trim();
+}
+
+/**
+ * The hash of a steady look, with the lines it left the volatile parts out of written in front
+ * (`lines:<i,j>:<sha256>`), so that a rollback made later, from the store, compares the same way.
+ * A hash without them was kept from one look (or by an earlier version): see `comparedWithBaseline`.
+ */
+export const steadyObservationHash = (id: string, observation: { exitCode: number; output: string }, changing: readonly number[]): string =>
+  `lines:${changing.join(",")}:${exactHash(JSON.stringify([id, observation.exitCode, steadyObservation(observation.output, changing)]))}`;
+
+/**
  * Whether a look at the check after a rollback reads as the look before the change did, and by
  * which comparison. Tried in this order:
  *
  * - `exact`: the same exit code and the same output.
- * - `stable`: the same exit code, and the same output once what differs at every look is left out
- *   (see `stableObservation`).
+ * - `stable`: the same exit code, and the same output once what changed by itself between two looks
+ *   before the change is left out (see `steadyObservation`).
  * - `expected`: the card's own word for "it works". The check passed before the change and passes
  *   again. Only that way round: a check that failed before and fails again proves nothing by
  *   itself, because there are many ways to fail.
+ * - `unproven`, only when the caller takes it (`unproven: true`): the same once every volatile part
+ *   `stableObservation` knows is left out, where the check was looked at once before the change (or its
+ *   two looks could not be paired). What it left out may be a setting, so this is not "restored".
+ *   Without `unproven: true` such a match is no match.
  *
- * `baseline` is the earlier look when it is still at hand; a rollback made later has its hashes.
+ * `baseline` is the earlier look when it is still at hand, with `changing` from its two looks; a
+ * rollback made later has its hashes.
  */
 export function comparedWithBaseline(args: {
   id: string;
@@ -381,28 +443,45 @@ export function comparedWithBaseline(args: {
   /** Whether the check passed before the change. */
   before?: boolean;
   passes: (look: { exitCode: number; output: string }) => boolean;
+  /** With `baseline`: the lines that differed between the two looks before the change (`changingLines`). */
+  changing?: readonly number[];
+  /** Whether the caller reports a match made from one look as `unproven` (else it is no match). */
+  unproven?: boolean;
 }): BaselineComparison | undefined {
   const { id, now, baseline } = args;
   if (baseline ? now.exitCode === baseline.exitCode && now.output === baseline.output : args.exactHash !== undefined && observationHash(id, now) === args.exactHash)
     return "exact";
+  const kept = /^lines:([\d,]*):([0-9a-f]{64})$/.exec(args.stableHash ?? "");
+  const changing = baseline ? args.changing : kept ? (kept[1] ? kept[1].split(",").map(Number) : []) : undefined;
   if (
-    baseline
-      ? now.exitCode === baseline.exitCode && stableObservation(now.output) === stableObservation(baseline.output)
-      : args.stableHash !== undefined && stableObservationHash(id, now) === args.stableHash
+    changing &&
+    (baseline
+      ? now.exitCode === baseline.exitCode && steadyObservation(now.output, changing) === steadyObservation(baseline.output, changing)
+      : steadyObservationHash(id, now, changing) === args.stableHash)
   )
     return "stable";
   if (args.before === true && args.passes(now)) return "expected";
+  if (
+    args.unproven &&
+    !changing &&
+    (baseline
+      ? now.exitCode === baseline.exitCode && stableObservation(now.output) === stableObservation(baseline.output)
+      : args.stableHash !== undefined && stableObservationHash(id, now) === args.stableHash)
+  )
+    return "unproven";
   return undefined;
 }
 
 /** The comparison, said to the agent and kept in the audit log. */
 export const COMPARISON_TEXT: Record<BaselineComparison, string> = {
   exact: "The check reads exactly as it did before the change.",
-  stable: "The check reads as it did before the change once times, process ids and counters are left out.",
+  stable: "The check reads as it did before the change once what changed by itself between two looks before the change (times, process ids, counters) is left out.",
   expected: "The check passed before the change and passes again. Its output is not the same as before.",
+  unproven:
+    "The check reads as it did before the change only with every time, date, process id and counter left out, and it could not be told which of those change by themselves (it was looked at once before the change, or its two looks did not pair up). One of them may be a setting that is not back, so this does not show that it is back as before.",
 };
 const NOT_AS_BEFORE =
-  "The check does not read as it did before the change: its output differs also with times, process ids and counters left out, and it did not pass both before the change and now.";
+  "The check does not read as it did before the change: its output differs also with what changes by itself left out, and it did not pass both before the change and now.";
 
 /** A wait in whole minutes, as said to the agent. */
 const minutes = (ms: number): string => {
@@ -744,6 +823,7 @@ export class ToolBroker {
       return;
     }
 
+    if (request.action === "sshs3_cluster_exec") refuseMaskedValue(request.payload?.command, "command");
     if (
       request.action === "context" ||
       request.action === "memory" ||
@@ -776,6 +856,12 @@ export class ToolBroker {
         "There is no dry run option. Nothing ran. Write the dry run command yourself, for example with --dry-run=server, terraform plan or rsync -n.",
         { code: "dry_run_removed" },
       );
+
+    // A mark of a hidden value is not the value: refused before anything of the call is typed or shown.
+    refuseMaskedValue(request.command, request.action === "change" ? "change" : "command");
+    refuseMaskedValue(request.check?.command, "check");
+    refuseMaskedValue(request.rollback, "rollback");
+    refuseMaskedValue(request.preflightCommand, "command");
 
     if (request.action === "verify") {
       const hasExpected =
@@ -1639,10 +1725,21 @@ export class ToolBroker {
     // Keep the observation in memory. Equality of two failed health checks alone proves nothing.
     let baseline: { output: string; exitCode: number };
     let before: boolean;
+    let changing: number[] | undefined;
     try {
       const beforeRes = await run(checkCommand);
       baseline = beforeRes;
       before = passes(beforeRes);
+      // A second look right away: what differs between the two changes by itself (a clock, a counter).
+      // Only that is left out when the check is compared after a rollback, never a date or a number
+      // that read the same both times: it may be a setting. Output with nothing of that kind in it
+      // ("active", "200") needs no second look: there is nothing it could leave out.
+      const every = beforeRes.output.split("\n").map((_line, i) => i);
+      if (steadyObservation(beforeRes.output, every) === steadyObservation(beforeRes.output, [])) changing = [];
+      else {
+        const again = await run(checkCommand);
+        changing = again.exitCode === beforeRes.exitCode ? changingLines(beforeRes.output, again.output) : undefined;
+      }
       if (!change.preflightSnapshot && beforeRes.output) {
         change.preflightSnapshot = boundedContext(beforeRes.output, 4000);
       }
@@ -1655,7 +1752,12 @@ export class ToolBroker {
       this.deps.changed();
       throw error;
     }
-    change.check = { ...change.check!, before, baselineHash: observationHash(change.id, baseline), baselineStableHash: stableObservationHash(change.id, baseline) };
+    change.check = {
+      ...change.check!,
+      before,
+      baselineHash: observationHash(change.id, baseline),
+      baselineStableHash: changing ? steadyObservationHash(change.id, baseline, changing) : stableObservationHash(change.id, baseline),
+    };
     this.deps.changed();
 
     let result: { exitCode: number; output: string; printedBefore?: string } | undefined;
@@ -1772,8 +1874,9 @@ export class ToolBroker {
       checkAfter = passes(observation);
       // "Taken back" means the rollback exited 0 and the check reads as before. Not by its exact
       // bytes alone: a time, a process id or a counter in the output differs at every look.
-      comparison = undone.exitCode === 0 ? comparedWithBaseline({ id: change.id, now: observation, baseline, before, passes }) : undefined;
-      restored = comparison !== undefined;
+      comparison = undone.exitCode === 0 ? comparedWithBaseline({ id: change.id, now: observation, baseline, before, passes, changing, unproven: true }) : undefined;
+      // A match from one look is not "restored", and not "not restored" either: it is not known.
+      restored = comparison === "unproven" ? undefined : comparison !== undefined;
     } catch {
       checkAfter = undefined;
     }
@@ -1784,7 +1887,7 @@ export class ToolBroker {
       output: boundedContext(undone.output, 2000),
       checkAfter,
       ...(restored !== undefined ? { restored, comparedWithBaseline: true } : {}),
-      ...(comparison ? { comparison } : {}),
+      ...(comparison ? { comparison, comparedWithBaseline: true } : {}),
     };
     change.status = restored ? "failed" : "uncertain";
     task.verification = "incomplete";
@@ -1808,11 +1911,13 @@ export class ToolBroker {
       checkPassesAfterRollback: checkAfter,
       backAsBefore: restored,
       // Which comparison says so, in words: the agent reports it as it is.
-      ...(restored !== undefined ? { comparedBy: comparison ? COMPARISON_TEXT[comparison] : NOT_AS_BEFORE } : {}),
+      ...(restored !== undefined || comparison ? { comparedBy: comparison ? COMPARISON_TEXT[comparison] : NOT_AS_BEFORE } : {}),
       next:
         undone.exitCode !== 0
           ? "The change did not pass its check, and the rollback failed too. Stop making changes. Report exactly this state to the person, with the outputs above."
-          : restored !== true
+          : comparison === "unproven"
+            ? "The change did not pass its check. The rollback ran, but that the check is back as before is not shown (see comparedBy). Stop making changes and report this state to the person."
+            : restored !== true
             ? "The change did not pass its check. The rollback ran, but the check does not read as it did before the change. Stop making changes and report this state to the person."
             : "The change did not pass its check and was rolled back. Do not make the same change again: find out why the check failed first.",
     };

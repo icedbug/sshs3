@@ -21,6 +21,8 @@ export interface RealShell {
   reconnect(): Promise<void>;
   /** Everything the terminal sent, raw. */
   transcript(): string;
+  /** What the registry handed on to be drawn in the person's terminal. */
+  shown(): string;
   /** Types into the terminal as a person does, past the registry. */
   type(text: string): void;
   close(): void;
@@ -33,11 +35,15 @@ export async function openShell(
     cwd?: string;
     /** Changes what is typed on its way to the terminal, as a terminal that drops input would. */
     tamper?: (typed: string) => string;
+    /** Lines a person types at the prompt before the terminal is connected to (their own settings). */
+    setup?: string[];
+    /** Extra environment for the shell (HISTFILE, say). */
+    env?: Record<string, string>;
   } = {},
 ): Promise<RealShell> {
   const args = shell === "zsh" ? ["-f"] : shell === "fish" ? ["--no-config"] : shell === "bash" ? ["--norc", "--noprofile"] : [];
   // The shell's own default prompt: a prompt handed down from whoever runs the tests would change what is tested.
-  const env = { ...process.env } as Record<string, string>;
+  const env = { ...process.env, ...(options.env ?? {}) } as Record<string, string>;
   delete env.PS1;
   delete env.PROMPT_COMMAND;
   delete env.ENV;
@@ -45,9 +51,10 @@ export async function openShell(
   const registry = new TerminalRegistry();
   registry.register({ id: "real", label: shell, kind: "local" }, (data) => terminal.write(options.tamper ? options.tamper(data) : data));
   let transcript = "";
+  let shown = "";
   const data = terminal.onData((chunk) => {
     transcript += chunk;
-    registry.feed("real", chunk);
+    shown += registry.feed("real", chunk);
   });
   const close = (): void => {
     registry.dispose();
@@ -62,6 +69,11 @@ export async function openShell(
   };
   try {
     await registry.whenAtPrompt("real", 15_000);
+    for (const line of options.setup ?? []) {
+      terminal.write(`${line}\r`);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    if (options.setup?.length) await registry.whenAtPrompt("real", 15_000);
     await take();
   } catch (error) {
     close();
@@ -76,6 +88,7 @@ export async function openShell(
       registry.claim("real", generation, "task");
     },
     transcript: () => transcript,
+    shown: () => shown,
     type: (text) => terminal.write(text),
     close,
   };

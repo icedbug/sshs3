@@ -162,16 +162,17 @@ describe("after a command ran out of time", () => {
     await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
   });
 
-  it("shows the person the end of the last line, which the frame was still holding back", async () => {
+  it("shows the person the question whole while the command waits, and holds nothing back for later", async () => {
     const { terminals, hang } = fake();
     const generation = await claimed(terminals);
+    const drawn: string[] = [];
+    terminals.on("output", (_id: string, text: string) => drawn.push(text));
     hang("[sudo] password for ops: ");
     await terminals.execute("t1", generation, "task-1", "sudo systemctl restart nginx", 60).catch(() => undefined);
-    // What comes next is shown with what was held back before it, so the question reads whole.
-    const shown = terminals.feed("t1", "\r\n");
-    expect(shown.endsWith("\r\n")).toBe(true);
-    const held = shown.slice(0, -2);
-    expect("[sudo] password for ops: ".endsWith(held)).toBe(true);
+    // The question reads whole while it waits (the frame used to hold its last 8 characters back).
+    expect(drawn.join("")).toMatch(/\[sudo\] password for ops: $/);
+    // What comes next is shown as it is: nothing was left to come with it.
+    expect(terminals.feed("t1", "\r\n")).toBe("\r\n");
   });
 
   it("does not take the prompt shown before the command for a prompt now, after a person took the terminal back", async () => {

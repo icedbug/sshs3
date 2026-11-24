@@ -291,7 +291,9 @@ explicitly enabled presentation on top of the same terminal authority.
   numbered line, a text written in place, a dated name) is never kept as a fix
   or a playbook step, and Ctrl+K offers a learned command only when it shares
   at least half of what the request asks for. Commands, snippets and
-  output are masked with `privacy.ts` before they are stored; counters and events
+  output are masked with `privacy.ts` before they are stored, and a command
+  that holds a secret is not learned at all (masked, it would not run as it
+  did); counters and events
   persist in `HubStore` (`selfLearningState`).
 - **`HubStore`** — the hub's own data, `<hub dir>/hub.json`, written through
   the app's shared `writeFileAtomic` (a temporary file, synced, then renamed).
@@ -301,6 +303,10 @@ explicitly enabled presentation on top of the same terminal authority.
   - A file that could not be read at all (locked, no permission) is left
     alone. The hub then runs with default settings and safety rules and saves
     nothing until the app is started again.
+  - No file at all is a first start, unless the folder still holds what the
+    hub writes beside it (the audit log, recordings, facts, the knowledge
+    base index, a copy kept aside): then the file was moved or deleted. The
+    hub starts fresh and says so, naming what it found.
   - A secret of an MCP server (a header, an environment value, its address)
     that is stored encrypted and cannot be decrypted on a start is empty in
     memory, and its ciphertext is written back unchanged until it is read on a
@@ -791,15 +797,28 @@ to change cards when a plain command would do the same is not known.
   did before; otherwise it says it is not back as it was. "Reads as it did
   before" is seen in one of three ways, tried in this order, and the result
   says which (`comparedBy`, `rollback.comparison`, the audit entry):
-  the same exit code and output (`exact`); the same once dates and times,
-  "… ago", process ids and the counters uptime and systemd print are left out
-  (`stable`, `stableObservation` in `ToolBroker.ts`); or the check passed
-  before the change and passes again by the card's own expected text
-  (`expected`). A check that failed before and fails again counts only by its
-  output: two failed checks are not the same state by themselves. A number
-  that may be a setting (a timeout, a port, a count of workers) is never
-  left out. A rollback from the Changes view compares the same way, from the
-  hashes kept with the change. `tests/main/changeRollbackComparison.test.ts`.
+  the same exit code and output (`exact`); the same once what changes by
+  itself is left out (`stable`); or the check passed before the change and
+  passes again by the card's own expected text (`expected`). What changes by
+  itself is found by looking at the check twice before the change, one look
+  right after the other: dates, times, process ids and counters are left out
+  only on the lines that differed between those two looks
+  (`changingLines`, `steadyObservation` in `ToolBroker.ts`). A date, an
+  address or a number on a line that read the same both times may be a
+  setting (a certificate's end date, a service's IP, a memory limit) and is
+  compared. Times said relative to now ("3min ago", uptime and its load,
+  docker's "Up 3 minutes") are left out on every line: they are never a
+  setting. Output with nothing of that kind in it ("active", "200") gets no
+  second look. When the two looks cannot be paired (a different number of
+  lines, another exit code), a match with every such part left out is
+  `unproven`: the agent and the audit entry say that it is not shown to be
+  back, and `restored` is not set either way. A check that failed before and
+  fails again counts only by its output: two failed checks are not the same
+  state by themselves. A rollback from the Changes view compares the same
+  way, from the hashes kept with the change (the hash names the lines it left
+  things out of); there a match that is only `unproven`, or one kept by an
+  earlier version, counts as not as before.
+  `tests/main/changeRollbackComparison.test.ts`.
   A rollback from the Changes view runs once. When the terminal refused it
   before anything was typed (something stands at its prompt, it is not ready
   any more), it is not recorded as run: the audit log gets "rollback-not-run"
@@ -847,12 +866,53 @@ to change cards when a plain command would do the same is not known.
   `smbclient -U name%…`, `ipmitool -P`, `rabbitmqctl add_user`, a flag whose
   name ends in password, token or api-key, and what `echo` or `printf` pipes
   into `chpasswd`, `sudo -S`, `passwd --stdin` or `--password-stdin`
-  (`maskCommandLineSecrets` in `privacy.ts`). The rules go by the program's
-  name: `-p` is a port to ssh and a password to sshpass. A variable or a
-  command substitution in that place is shown as it is. A program that is not
+  (`maskCommandLineSecrets` in `privacy.ts`). Also `redis-cli AUTH` and
+  `CONFIG SET requirepass`, `openssl pkcs12 -password pass:…`, SQL in any
+  text (`IDENTIFIED BY '…'`, `PASSWORD '…'`, `SET PASSWORD … = '…'`),
+  `keytool -storepass` and `-keypass`, `vault login TOKEN`,
+  `etcdctl --user name:…`, `influx -password`, `cqlsh -p`,
+  `useradd` and `usermod -p`, `snmpwalk -A` and `-X` (and the other snmp
+  tools), `xfreerdp /p:`, `rabbitmqadmin -p`, `consul -token`,
+  `jenkins-cli.jar -auth name:…`, and a variable whose name ends in PASS,
+  PASSWORD, PWD, TOKEN, SECRET or KEY (`export DBPASS=…`; a KEY that names a
+  file is not one). Not covered, as a review found them: `openssl passwd`,
+  `helm --set-string name=…`, `<(echo …)`, `net use`, `su -c` fed by `echo`,
+  `expect`'s `send`, PowerShell's `ConvertTo-SecureString`, a password
+  written into a file with `sed` or `echo` (`.pgpass`, `.netrc`), and a
+  program of one's own with `-p`, `--pwd`, `--secret` or `--key`. The rules go by the program's
+  name: `-p` is a port to ssh and a password to sshpass. A variable, a
+  command substitution or a placeholder of a runbook (`{{password}}`) in that
+  place is shown as it is, also after `--password`, `password=`, `curl -u` and
+  `mysql -p`. A program that is not
   on the list is not covered: a password given to it as a plain word is shown.
   The command that runs is always the one that was written, never the masked
   one. `tests/main/privacyCommandLines.test.ts` holds the list.
+- The agent only ever sees a secret masked. So a command it writes from what
+  it saw (its own earlier call, a runbook step, a learned command) holds
+  sshs3's mark and not the value, and run it would set a password to the word
+  "[redacted]". A command, a change card's command, check or rollback, and a
+  cluster command that holds one of the marks sshs3 writes in place of a
+  secret (`[redacted]`, `[private key redacted]`, `[email redacted]`,
+  `[ip redacted]`, `[phone redacted]`, `[host redacted]`, in any letter case)
+  is refused before anything is typed or put on a card. The agent is told
+  that the mark is not the real value and to ask the person to enter it. The
+  broker refuses it first, and the terminal registry refuses it again for
+  every other caller (`maskMarkIn`, `maskedValueRefusal` in `privacy.ts`).
+  When the tool calls a model is shown again hold such a mark, one line under
+  them says so. A command an external agent (ACP) runs in its own process is
+  not checked for this. `tests/main/maskedValueRefused.test.ts`.
+- Text that is run later is not changed when it is saved. The store masks
+  secrets in what it writes to disk, and a password in a runbook step or a
+  schedule's prompt came back as "[redacted]". Now a runbook step (its
+  command, prompt or expected text), a runbook input's default and a
+  schedule's prompt that hold a secret are refused when they are saved, with
+  the line shown hidden, by a person and by the agent alike. A runbook takes a
+  variable such as `{{password}}` instead, entered when the step is run in the
+  terminal. A schedule's run would never have had the secret: a model is only
+  shown it masked. A command that worked and holds a secret is not learned as
+  a skill, and the learning log says so. A runbook stored masked before this
+  says so on its card: a step that shows "[redacted]" does not run as written.
+  `tests/main/secretsInWorkRunLater.test.ts`.
 - Nothing is shortened for approval. A command, check, rollback or cluster
   command too long to show in full is refused, not cut.
 - The approved command reaches a bash, zsh, sh or dash shell byte for byte
@@ -1040,13 +1100,18 @@ reads them. There are none in the desktop app and none in the demo lab.
     it, so change cards and file writes are refused until it can be read.
 - **What a check reads.** The screen reads the newest entries from the end of
   the file. The chain is walked from the start on the first check after a
-  start, when anything but this app's own writes touched the file (its size
-  or time differ from what the app left), and for an export. In between, each
-  entry is checked as it is written and the check reads nothing. The names of
-  the anchors are listed at every check, so a removed anchor shows at once.
-  An anchor's content is read once and kept until the app closes or an
-  export. So an edit that keeps the file's size and puts its time back, or an
-  anchor rewritten in place, shows at the next start or export, not at once.
+  start, when anything but this app's own writes touched the file (its size,
+  the time it was written or the time its inode changed differ from what the
+  app left), and for an export. In between, each entry is checked as it is
+  written and the check reads nothing. The time a file was written can be
+  set back (`touch -d`); the time its inode changed (`ctime`) cannot, by any
+  user on Linux and macOS, so an edit in place that keeps the file's size
+  and puts its time back shows at the next check
+  (`tests/main/auditLogBreaks.test.ts`). On Windows a program with the right
+  to write the file can set that time too. The names of the anchors are
+  listed at every check, so a removed anchor shows at once. An anchor's
+  content is read once and kept until the app closes or an export. So an
+  anchor rewritten in place shows at the next start or export, not at once.
 - **The screen.** Changes → Audit log: newest first, the verdict, a filter,
   "Check it again", and Export (the file as it is on disk plus what a check
   of all of it found).
@@ -3311,9 +3376,27 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   approved, whatever the shell's line editor would have done with it. No typed
   line is longer than 800 characters. A long command is handed over in
   pieces, and the last line runs it only when every character arrived; when
-  not, nothing runs and the result says so (exit code 126). Each typed line
+  not, nothing runs and the result says so (exit code 126). Each piece is
+  added only where the pieces before it end, so pieces that arrive in
+  another order do not add up to a command either. Each typed line
   begins with a space, so a shell that is set to keep such lines out of its
-  history does. PowerShell and cmd carry the command base64 encoded, as
+  history does.
+- A typed line still goes through the shell's line editor, and a person's key
+  bindings could change it: in a bash with vi mode and a binding on "jj", the
+  letters were read as vi commands and a line from the history ran instead
+  of the approved command. So where the line editor shows that it reads with
+  bracketed paste on (`ESC[?2004h`, as bash's readline does at its prompt),
+  each typed line is sent as one bracketed paste with the Enter after it, and
+  a paste is taken as text. The registry keeps the last such switch the
+  terminal showed. A shell that showed it on when it was connected to gets
+  every command pasted; right after a command the switch is off until the
+  prompt is back, so the next command waits for it (two seconds at most, then
+  it is typed as before). A shell that never shows it (dash, sh) is typed into
+  as before. Tried in a real bash 5.2 with vi mode and "jj", an emacs macro
+  on "jk" and `stty kill @`, short and long commands, and in dash; a bash
+  left in vi command mode runs the command as approved or not at all. zsh
+  also switches bracketed paste on, and is pasted into the same way: that
+  has not been tried. `tests/main/terminalBracketedPaste.test.ts`. PowerShell and cmd carry the command base64 encoded, as
   before. fish is still typed as the command stands, so a tab in it may be
   completed away: that could not be tried in a real fish.
   `tests/main/shellAdaptersBytes.test.ts` runs this in a real bash, sh and
@@ -3324,6 +3407,14 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   false exit code, and an `exit` or `cd` in it does not end or move the
   person's shell. (A consequence: `cd` and `export` do not carry over from one
   agent command to the next.)
+- The envelope uses `command printf`, so an alias or a function a person
+  made called `printf` (`alias printf=echo` made a dash run another command)
+  is not used by it. What the command itself calls is the person's shell as
+  it is. A terminal set to turn typed capitals into small letters
+  (`stty iuclc`) changed the command on its way in. The envelope now checks
+  that a typed "A" arrives as one, and runs nothing when it does not; the
+  agent gets exit code 126 and is told why. Tried in a real bash and dash.
+  `tests/main/terminalPersonShellSettings.test.ts`.
 - What a terminal printed after a command was typed and before the command
   began is not the command's output: the end of an earlier command's output,
   a banner that was still arriving when the terminal was connected to. It
@@ -3333,7 +3424,18 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   and it is not worked out where the terminal delivers text late (Windows'
   pseudo console).
 - A frame that only looks like sshs3's own (a nonce it never issued) is
-  program output and becomes nothing.
+  program output and becomes nothing. Text that begins like a marker and
+  never ends (longer than 16,000 characters, or cut off by another escape
+  sequence) is the program's output, and the command's frame goes on to its
+  own end marker. It used to stop the frame with "Oversized shell marker".
+  `tests/main/terminalBrokenMarker.test.ts`.
+- A question an agent's command asks while it waits ("Delete 3 volumes?
+  [y/N] ", "[sudo] password for ops: ") is shown whole at once. While a
+  command runs, only what may be the start of a marker (from an ESC on) is
+  held back, never text a person reads, and a marker is never shown. When the
+  command is let go of, what was held back goes on with the next text, which
+  completes it. `tests/main/terminalQuestionShown.test.ts`, also in a real
+  bash and dash.
 - An answer typed at a password prompt is never kept as a command, so it can
   never be named as a failed command or learned.
 

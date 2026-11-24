@@ -48,8 +48,10 @@ import {
   headTailTruncate,
   HUB_PROMPT_MAX,
   maskContext,
+  maskMarkIn,
   maskSecrets,
   maskProviderText,
+  TOOL_LOG_HIDDEN_NOTE,
   workspaceHostNames,
   safeError,
   stripInvisibleUnicode,
@@ -1501,6 +1503,7 @@ export function conversationWithToolLog(task: AgentTask, capture?: SourceCapture
   if (log.length === 0) return messages;
   const render = (r: AgentToolRecord): string =>
     `- ${r.name}(${r.input}) → ${capture ? capture.historical(r) : r.output}`;
+  const hidden = (records: AgentToolRecord[]): string => (records.some((r) => maskMarkIn(r.input)) ? `\n${TOOL_LOG_HIDDEN_NOTE}` : "");
   // Newest first until the budget is used.
   const kept = new Set<AgentToolRecord>();
   let used = 0;
@@ -1518,7 +1521,7 @@ export function conversationWithToolLog(task: AgentTask, capture?: SourceCapture
     out.unshift({
       id: "toollog-earlier",
       role: "assistant",
-      text: `[Tool calls made in an earlier try at this, with their results. Check the current state before repeating one that changes something.]\n${earlier.map(render).join("\n")}`,
+      text: `[Tool calls made in an earlier try at this, with their results. Check the current state before repeating one that changes something.]\n${earlier.map(render).join("\n")}${hidden(earlier)}`,
       at: userTimes[0] - 1,
     });
   for (let turn = 0; turn < userTimes.length; turn++) {
@@ -1528,7 +1531,7 @@ export function conversationWithToolLog(task: AgentTask, capture?: SourceCapture
       (r) => kept.has(r) && r.at >= from && r.at < until,
     );
     if (records.length === 0) continue;
-    const text = `[Tool calls made for this answer, with their results]\n${records.map(render).join("\n")}`;
+    const text = `[Tool calls made for this answer, with their results]\n${records.map(render).join("\n")}${hidden(records)}`;
     // The last thing the assistant said in that turn, else a note of its own.
     let last = -1;
     out.forEach((m, i) => {

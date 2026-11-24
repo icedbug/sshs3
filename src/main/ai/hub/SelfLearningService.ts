@@ -24,7 +24,7 @@ import {
   type GovernedMemoryProposal,
   type MemorySourceTrust,
 } from "./MemoryDistiller";
-import { maskContext } from "./privacy";
+import { containsSecrets, maskContext } from "./privacy";
 
 export interface FailureCritique {
   taskId: string;
@@ -463,6 +463,18 @@ export class SelfLearningService {
     const cleanFix = maskContext(fixCommand.trim());
     const cleanFail = maskContext(failure.command.trim());
     if (!cleanFix || cleanFix === cleanFail) {
+      return { memories };
+    }
+    // A command that is kept to be run again is kept as it ran or not at all. One with a secret in it
+    // would be kept hidden, and run again it would type "[redacted]": it is not learned, and that is said.
+    if ([fixCommand, params.commandTemplate, params.verifyCommand].some((c) => typeof c === "string" && containsSecrets(c))) {
+      this.recordEvent({
+        kind: "failure_to_fix",
+        title: "Not learned: the command holds a secret",
+        summary: `After \`${cleanFail}\` failed on ${failure.label || scope || "workspace"}, \`${cleanFix}\` succeeded. It holds a password, key or token, so it was not kept as a skill: sshs3 keeps no secret in memory, and a copy with it hidden would not run as it did.`,
+        targetCluster: cluster,
+        confidence: 0,
+      });
       return { memories };
     }
     // An edit made for that one file as it was then is not a way to fix the next failure.

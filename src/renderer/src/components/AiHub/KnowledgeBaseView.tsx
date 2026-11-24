@@ -375,6 +375,12 @@ export function RunbookExecutor({
         </div>
       </div>
 
+      {runbook.steps.some((step) => /\[(?:private key )?redacted\]/i.test(`${step.command ?? ""} ${step.prompt ?? ""}`)) && (
+        <p className="ai-hint" role="note" data-testid={`runbook-hidden-${runbook.id}`}>
+          A password, key or token in this runbook was hidden when it was saved. A step that shows [redacted] does not run as written: the agent refuses it, and in the terminal it would type the word [redacted].
+        </p>
+      )}
+
       {runbook.inputs.length > 0 && (
         <div className="ai-form" data-testid={`runbook-inputs-${runbook.id}`}>
           <strong>Variables</strong>

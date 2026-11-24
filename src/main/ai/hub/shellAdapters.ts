@@ -198,6 +198,9 @@ const MAX_TYPED_LINE = 800;
 /** The exit code of a command that did not arrive whole in the terminal, so nothing of it ran. */
 export const NOT_WHOLE_EXIT = 126;
 const NOT_WHOLE_NOTE = "sshs3: the command did not arrive whole in this terminal. Nothing ran.";
+/** What the agent is told when the terminal changed the letters that were typed (see LETTERS_ARRIVE). */
+export const LETTERS_CHANGED_NOTE =
+  "sshs3: this terminal turns capital letters into small ones as they are typed (stty iuclc is set there), so the command could not arrive as it was approved. Nothing ran. A person can turn that off with stty -iuclc; or use another terminal.";
 
 /**
  * A command as a format for the shell's own `printf`, which writes it back byte for byte. Letters,
@@ -232,8 +235,14 @@ function readPrintfFormat(format: string): string | undefined {
   return Buffer.from(bytes).toString("utf8");
 }
 
-const posixBegin = (prefix: string): string => `printf '\\033]777;${prefix};BEGIN\\007'`;
-const posixEnd = (prefix: string): string => `printf '\\033]777;${prefix};END;%s;%s\\007' "$__sshs3_rc" "$PWD"`;
+// `command printf`: an alias or a function a person made called printf (`alias printf=echo`) is not used.
+const posixBegin = (prefix: string): string => `command printf '\\033]777;${prefix};BEGIN\\007'`;
+const posixEnd = (prefix: string): string => `command printf '\\033]777;${prefix};END;%s;%s\\007' "$__sshs3_rc" "$PWD"`;
+/**
+ * True in the shell only while an "A" that is typed arrives as an "A". A terminal set to turn capitals
+ * into small letters on their way in (`stty iuclc`) changes what is typed: the command is not run then.
+ */
+const LETTERS_ARRIVE = `[ "$(command printf '\\101')" = A ]`;
 
 /**
  * What is typed into a POSIX shell (bash, zsh, sh, dash) to run a command. The command is sent as
@@ -249,15 +258,17 @@ function posixEnvelope(command: string, prefix: string): string {
   const format = printfFormat(command);
   // The command runs in a subshell: what it defines (a function called printf, say) cannot reach the
   // line that reports its exit code, and an `exit` or `cd` in it does not end or move the person's shell.
-  const inline = ` ${posixBegin(prefix)}; (eval "$(printf '${format}')"); __sshs3_rc=$?; ${posixEnd(prefix)}`;
+  const inline = ` ${posixBegin(prefix)}; if ${LETTERS_ARRIVE}; then (eval "$(command printf '${format}')"); __sshs3_rc=$?; else command printf '%s\\n' '${NOT_WHOLE_NOTE}'; __sshs3_rc=${NOT_WHOLE_EXIT}; fi; ${posixEnd(prefix)}`;
   if (inline.length <= MAX_TYPED_LINE) return `${inline}\r`;
+  // Each piece after the first is added only where the pieces before it end: a piece that came out of
+  // order is left out, and then the length checked on the last line is not the whole one.
   const first = " __sshs3_c='";
-  const more = ` __sshs3_c="$__sshs3_c"'`;
-  const room = MAX_TYPED_LINE - more.length - 1;
+  const more = (at: number): string => ` [ "\${#__sshs3_c}" = ${at} ] && __sshs3_c="$__sshs3_c"'`;
+  const room = MAX_TYPED_LINE - more(format.length).length - 1;
   const lines: string[] = [];
-  for (let at = 0; at < format.length; at += room) lines.push(`${at === 0 ? first : more}${format.slice(at, at + room)}'`);
+  for (let at = 0; at < format.length; at += room) lines.push(`${at === 0 ? first : more(at)}${format.slice(at, at + room)}'`);
   lines.push(
-    ` ${posixBegin(prefix)}; if [ "\${#__sshs3_c}" = ${format.length} ]; then (eval "$(printf "$__sshs3_c")"); __sshs3_rc=$?; else printf '%s\\n' '${NOT_WHOLE_NOTE}'; __sshs3_rc=${NOT_WHOLE_EXIT}; fi; unset __sshs3_c; ${posixEnd(prefix)}`,
+    ` ${posixBegin(prefix)}; if [ "\${#__sshs3_c}" = ${format.length} ] && ${LETTERS_ARRIVE}; then (eval "$(command printf "$__sshs3_c")"); __sshs3_rc=$?; else command printf '%s\\n' '${NOT_WHOLE_NOTE}'; __sshs3_rc=${NOT_WHOLE_EXIT}; fi; unset __sshs3_c; ${posixEnd(prefix)}`,
   );
   return `${lines.join("\r")}\r`;
 }
@@ -270,7 +281,7 @@ function posixEnvelope(command: string, prefix: string): string {
 export function readPosixEnvelope(typed: string): { prefix: string; command: string } | undefined {
   const lines = typed.split(/\r\n|\r|\n/);
   const last = lines.pop() ?? "";
-  const head = /^ ?printf '\\033\]777;(SSHS3;[a-f0-9]{32});BEGIN\\007'; /.exec(last);
+  const head = /^ ?command printf '\\033\]777;(SSHS3;[a-f0-9]{32});BEGIN\\007'; /.exec(last);
   if (!head) return undefined;
   const prefix = head[1];
   const rest = last.slice(head[0].length);
@@ -278,13 +289,24 @@ export function readPosixEnvelope(typed: string): { prefix: string; command: str
   if (!rest.endsWith(tail)) return undefined;
   const body = rest.slice(0, -tail.length);
   let format: string | undefined;
+  const refused = `; __sshs3_rc=$?; else command printf '%s\\n' '${NOT_WHOLE_NOTE}'; __sshs3_rc=${NOT_WHOLE_EXIT}; fi`;
   if (lines.length === 0) {
-    format = /^\(eval "\$\(printf '([^']*)'\)"\); __sshs3_rc=\$\?$/.exec(body)?.[1];
+    const head = `if ${LETTERS_ARRIVE}; then (eval "$(command printf '`;
+    const tail = `')")${refused}`;
+    if (body.startsWith(head) && body.endsWith(tail)) format = body.slice(head.length, -tail.length);
+    if (format?.includes("'")) format = undefined;
   } else {
-    const pieces = lines.map((line, i) => (i === 0 ? /^ ?__sshs3_c='([^']*)'$/ : /^ ?__sshs3_c="\$__sshs3_c"'([^']*)'$/).exec(line)?.[1]);
+    let at = 0;
+    const pieces = lines.map((line, i) => {
+      const piece = (i === 0 ? /^ ?__sshs3_c='([^']*)'$/ : /^ ?\[ "\$\{#__sshs3_c\}" = (\d+) \] && __sshs3_c="\$__sshs3_c"'([^']*)'$/).exec(line);
+      if (!piece || (i > 0 && Number(piece[1]) !== at)) return undefined;
+      const text = piece[i === 0 ? 1 : 2];
+      at += text.length;
+      return text;
+    });
     if (pieces.some((p) => p === undefined)) return undefined;
     format = pieces.join("");
-    if (!body.startsWith(`if [ "\${#__sshs3_c}" = ${format.length} ]; then (eval "$(printf "$__sshs3_c")"); __sshs3_rc=$?; else `)) return undefined;
+    if (body !== `if [ "\${#__sshs3_c}" = ${format.length} ] && ${LETTERS_ARRIVE}; then (eval "$(command printf "$__sshs3_c")")${refused}; unset __sshs3_c`) return undefined;
   }
   if (format === undefined) return undefined;
   const command = readPrintfFormat(format);
@@ -292,7 +314,7 @@ export function readPosixEnvelope(typed: string): { prefix: string; command: str
 }
 
 /** Whether a line that was typed begins an envelope of `commandEnvelope` for a POSIX shell. */
-export const startsPosixEnvelope = (line: string): boolean => /^ ?(?:printf '\\033\]777;SSHS3;|__sshs3_c=)/.test(line);
+export const startsPosixEnvelope = (line: string): boolean => /^ ?(?:command printf '\\033\]777;SSHS3;|__sshs3_c=)/.test(line);
 
 function fishQuote(text: string): string {
   return `'${text.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
@@ -447,10 +469,15 @@ function promptGluedAt(raw: string, line: string, prompt: string): number | unde
   return got.ends[got.chars.length - want.length - 1];
 }
 
-/** How much of the typed line holds the frame's random id: `printf '\033]777;SSHS3;` and the 32 characters after it. */
-const ECHO_HEAD = 54;
+/** How much of the typed line holds the frame's random id: `command printf '\033]777;SSHS3;` and the 32 characters after it. */
+const ECHO_HEAD = 61;
 /** How much of what the terminal printed between the typing of a command and its start is kept. */
 const LEAD_MAX = 4000;
+
+/** How every marker of sshs3's begins. */
+const MARKER_START = "\x1b]777;";
+/** The longest a marker of sshs3's is (PowerShell's output frames are the longest, about 2,700). */
+const MAX_MARKER = 16_000;
 
 export const LATE_OUTPUT_NOTE =
   "[sshs3: the text from the marked line on reached the terminal after the command had ended. It may end with the shell's prompt, which is not output.]";
@@ -472,6 +499,11 @@ export class CommandFrames {
   private readonly firstTyped: string;
   /** What the terminal sent after the command was typed and before its frame began: the first of it. */
   private lead = "";
+  /**
+   * The markers came back in small letters: the terminal turned the capitals that were typed into small
+   * ones (`stty iuclc`), and the envelope did not run the command (see LETTERS_ARRIVE).
+   */
+  private lettersChanged = false;
   constructor(
     private readonly nonce: string,
     private readonly maxOutput = 128_000,
@@ -527,15 +559,16 @@ export class CommandFrames {
   }
   /** What the command has printed so far, the last of it: for a frame that is let go of before its end. */
   shownSoFar(): string {
-    return this.started ? (this.output + this.heldBack()).slice(-2000) : "";
+    return this.started ? this.output.slice(-2000) : "";
   }
   /**
-   * The last few characters, held back in case a marker begins in them. A frame that is let go of
-   * hands them over to be shown. Not when an escape sequence begins there: half of one would
-   * swallow the text after it.
+   * What is held back: only what may be the start of a marker (from an ESC on), never text a person
+   * reads. A frame that is let go of hands it on with the terminal's next text, which completes it:
+   * shown alone, half an escape sequence would swallow what follows it, and the end marker of the
+   * command that was let go of is looked for in what follows (TerminalRegistry `unsettled`).
    */
   heldBack(): string {
-    return this.ended || this.carry.includes("\x1b") ? "" : this.carry;
+    return this.ended ? "" : this.carry;
   }
   feed(chunk: string): CommandResult | undefined {
     if (this.ended) {
@@ -546,11 +579,15 @@ export class CommandFrames {
     }
     this.carry += chunk;
     while (this.carry) {
-      const start = this.carry.indexOf("\x1b]777;");
+      const start = this.carry.indexOf(MARKER_START);
       if (start === -1) {
-        const keep = Math.min(this.carry.length, 8);
-        this.append(this.carry.slice(0, -keep || undefined));
-        this.carry = this.carry.slice(-keep);
+        // Only what may begin a marker is held back: from the last ESC, while what follows it is still
+        // the start of one. Everything else is shown at once: a question the command asks ("Delete 3
+        // volumes? [y/N] ", "[sudo] password for ops: ") is read while the command waits for the answer.
+        const esc = this.carry.lastIndexOf("\x1b");
+        const keep = esc >= 0 && MARKER_START.startsWith(this.carry.slice(esc)) ? this.carry.length - esc : 0;
+        this.append(this.carry.slice(0, this.carry.length - keep));
+        this.carry = this.carry.slice(this.carry.length - keep);
         return;
       }
       this.append(this.carry.slice(0, start));
@@ -558,16 +595,30 @@ export class CommandFrames {
       const bell = this.carry.indexOf("\x07");
       const st = this.carry.indexOf("\x1b\\");
       const end = bell < 0 ? st : st < 0 ? bell : Math.min(bell, st);
+      // What only begins like a marker and is not one is the program's own output, and the frame goes
+      // on: a marker of sshs3's is short and holds no ESC, and a terminal ends a sequence at the next ESC.
+      // It used to end the frame with an error, and the agent was not told that the command finished.
+      const inner = this.carry.indexOf("\x1b", 1);
+      if (inner >= 0 && inner !== st && (end < 0 || inner < end)) {
+        this.append(this.carry.slice(0, inner));
+        this.carry = this.carry.slice(inner);
+        continue;
+      }
       if (end < 0) {
-        if (this.carry.length > 16_000)
-          throw new Error("Oversized shell marker");
+        if (this.carry.length > MAX_MARKER) {
+          this.append(this.carry);
+          this.carry = "";
+        }
         return;
       }
       const marker = this.carry.slice(6, end);
       this.carry = this.carry.slice(end + (end === st ? 2 : 1));
-      if (marker === `SSHS3;${this.nonce};BEGIN`) {
+      const lowered = marker === `sshs3;${this.nonce};begin`;
+      if (lowered) this.lettersChanged = true;
+      if (marker === `SSHS3;${this.nonce};BEGIN` || lowered) {
         this.started = true;
-        if (!this.options.handshake) {
+        // In small letters, the command did not run: it is not shown as running.
+        if (!this.options.handshake && !lowered) {
           const shell = this.options.shell;
           if (shell === "powershell" || shell === "pwsh") {
             this.displayBuffer += "\x1b[?25h";
@@ -585,7 +636,7 @@ export class CommandFrames {
           Buffer.from(encoded, "base64").toString("utf8")
         ).slice(-this.maxOutput);
       }
-      if (this.started && marker.startsWith(`SSHS3;${this.nonce};END;`)) {
+      if (this.started && marker.startsWith(this.lettersChanged ? `sshs3;${this.nonce};end;` : `SSHS3;${this.nonce};END;`)) {
         const parts = marker.split(";");
         if (!/^-?\d+$/.test(parts[3] ?? ""))
           throw new Error("Invalid shell completion");
@@ -597,6 +648,7 @@ export class CommandFrames {
           this.displayBuffer += `\x1b[?25h${trailing}`;
         }
         const ended = { exitCode: Number(parts[3]), cwd: parts.slice(4).join(";") };
+        if (this.lettersChanged) return { output: LETTERS_CHANGED_NOTE, exitCode: NOT_WHOLE_EXIT, cwd: ended.cwd };
         // Output that came in frames of its own cannot arrive late: nothing to wait for.
         if (!this.options.lateOutput || this.structuredOutput !== undefined) {
           const printedBefore = this.printedBefore();

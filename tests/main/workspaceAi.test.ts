@@ -2136,11 +2136,20 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       fixCommand: "curl -k https://admin:topsecret@10.10.1.10/api/health", // pragma: allowlist secret
       scope: "server:ontap-prod-01",
     });
-    // Unproven, it is a proposal for a person, not a saved skill; masked either way.
-    const learnedOrProposed = maskedLearn.learnedSkill ?? maskedLearn.proposal;
-    expect(learnedOrProposed).toBeDefined();
-    expect(learnedOrProposed?.text).not.toContain("topsecret");
-    expect(learnedOrProposed?.sourceCommand ?? "").not.toContain("topsecret");
+    // A command with a secret in it is not kept to be run again: hidden, it would not run as it did.
+    expect(maskedLearn.learnedSkill).toBeUndefined();
+    expect(maskedLearn.proposal).toBeUndefined();
+    const notLearned = hub.selfLearning.getStatus({ memories: [], kbDocuments: [], infraEdges: [], tasks: [], mcpServerCount: 0 }).recentEvents;
+    expect(notLearned[0]).toMatchObject({ title: "Not learned: the command holds a secret" });
+    expect(JSON.stringify(notLearned)).not.toContain("topsecret");
+    const cleanLearn = hub.selfLearning.learnFromCommandResolution({
+      memories: [],
+      failure: { label: "ontap-prod-01", command: "curl https://10.10.1.10/api", exitCode: 1, snippet: "HTTP 503" },
+      fixCommand: "sudo systemctl restart ontap-api",
+      scope: "server:ontap-prod-01",
+    });
+    // Unproven, it is a proposal for a person, not a saved skill.
+    expect(cleanLearn.learnedSkill ?? cleanLearn.proposal).toBeDefined();
     expect(hub.store.data.selfLearningState?.failureToFixCount).toBeGreaterThanOrEqual(1);
 
     // F7: Ephemeral auto-node:* (from collectExtraContext) and builtin-* memories are never persisted into hub.store.data.memories on memory-feedback or self-learn-reflect

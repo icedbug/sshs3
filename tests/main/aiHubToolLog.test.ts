@@ -90,6 +90,23 @@ describe("conversationWithToolLog", () => {
     expect(out[3].text).toContain("new(");
     expect(conversationWithToolLog(task({ messages }))).toEqual(messages);
   });
+
+  it("says under the calls, once, that a mark of a hidden value in one of them is not the real value", () => {
+    const out = conversationWithToolLog(
+      task({
+        messages,
+        toolLog: [
+          { name: "terminal_command", input: `{"command":"echo 'deploy:[redacted]' | sudo chpasswd"}`, output: '{"exitCode":0}', at: 105 },
+          { name: "terminal_command", input: '{"command":"ssh [ip redacted] uptime"}', output: "up", at: 106 },
+          { name: "terminal_command", input: '{"command":"free -m"}', output: "Mem: 2000 free", at: 205 },
+        ],
+      }),
+    );
+    const note = /\[sshs3\] A call above holds "\[redacted\]" or a mark like it where sshs3 hid a value from you\. The mark is not the real value/g;
+    expect(out[1].text.match(note)).toHaveLength(1);
+    // A turn whose calls hold no mark gets no note.
+    expect(out[3].text).not.toMatch(note);
+  });
 });
 
 describe("tool log across runs", () => {

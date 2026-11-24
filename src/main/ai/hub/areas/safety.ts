@@ -26,7 +26,7 @@ import {
   isDemoMode,
   restoreDemoBuiltins,
 } from "../demoWorkspace";
-import { boundedContext, boundedPrompt, clip, PERSON_PROMPT_MAX, safeError } from "../privacy";
+import { boundedContext, boundedPrompt, clip, PERSON_PROMPT_MAX, safeError, secretLine } from "../privacy";
 import { resolveTargetSelector } from "../WorkforceRunner";
 import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, todosFromPlan } from "../PlanMode";
 import { requiredText, integer } from "../hubHelpers";
@@ -1029,6 +1029,20 @@ export class SafetyPart {
             throw new Error("Each runbook input needs a name");
         if (rb.targetSelector !== undefined && (typeof rb.targetSelector !== "object" || rb.targetSelector === null || Array.isArray(rb.targetSelector)))
           throw new Error("A runbook's target is a selector of servers");
+        // A step is run later as it stands, so a secret in it is refused, not hidden on save: hidden, the
+        // step would type "[redacted]". A model is never shown one anyway; a variable is entered at run time.
+        (rb.steps ?? []).forEach((step, index) => {
+          const secret = [step.command, step.prompt, step.expected].map((t) => (typeof t === "string" ? secretLine(t) : undefined)).find(Boolean);
+          if (secret)
+            throw new Error(
+              `Step ${index + 1}${step.title ? ` ("${clip(step.title, 80)}")` : ""} holds a password, key or token, here shown hidden: "${secret}". sshs3 does not keep one in a runbook. Put a variable such as {{password}} in its place and enter the value when you run the step in the terminal. A model is never shown a secret, so a step that needs one is for a person to run.`,
+            );
+        });
+        for (const field of rb.inputs ?? []) {
+          const secret = typeof field.defaultValue === "string" ? secretLine(field.defaultValue) : undefined;
+          if (secret)
+            throw new Error(`The default value of the input "${clip(field.name, 80)}" holds a password, key or token. sshs3 does not keep one in a runbook. Leave the default empty and enter the value when you run the runbook.`);
+        }
         const extra = this.storeDataExtra();
         const list = extra.runbooks ?? [];
         const id = rb.id?.trim() || crypto.randomUUID();

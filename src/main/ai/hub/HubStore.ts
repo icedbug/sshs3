@@ -211,6 +211,18 @@ export const defaultHubData = (): HubData => ({
   s3SyncedServers: [],
 });
 
+/** What the hub writes beside its data file, and what a person calls it. */
+const HUB_FILES_BESIDE: Array<[string, string]> = [
+  ["audit", "the audit log"],
+  ["recordings", "terminal recordings"],
+  ["notify.json", "notification settings"],
+  ["facts", "facts read from the servers"],
+  ["chat", "chat settings"],
+  ["kb-embeddings.json", "the knowledge base index"],
+  ["kb-originals", "knowledge base files"],
+  ["atlassian.json", "Atlassian settings"],
+];
+
 /** One process owns the store. Serial atomic replacements preserve the last valid snapshot. */
 export class HubStore {
   data = defaultHubData();
@@ -310,7 +322,14 @@ export class HubStore {
       }
       this.prune();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        // No file is a first start, unless the folder still holds what the hub wrote beside it: then the
+        // file was moved or deleted, and starting fresh is said, as for a file that could not be read.
+        const others = await this.otherHubFiles();
+        if (others.length)
+          this.loadProblem = `The AI hub's data file is missing, though its folder still holds ${others.join(", ")}: it was moved or deleted. The hub started fresh: conversations, memory, settings and safety rules are at their defaults. If you have a copy, close sshs3, put it back as ${this.file} and start sshs3 again.`;
+        return;
+      }
       // Only a file that was read and is not a store is replaced, and only once it is kept aside. A file
       // that could not be read at all (locked by antivirus or a sync client, too many open files) is not
       // known to be broken: nothing is written over it, and the hub says so instead of starting empty.
@@ -335,6 +354,20 @@ export class HubStore {
       this.data = defaultHubData();
       this.loadProblem = `The AI hub's data file could not be understood, so the hub started fresh: conversations, memory, settings and safety rules are at their defaults. The file was kept as ${copy}.`;
     }
+  }
+
+  /** What the hub keeps beside its data file that is there now, in words: a sign that the hub ran here before. */
+  private async otherHubFiles(): Promise<string[]> {
+    const dir = path.dirname(this.file);
+    const found: string[] = [];
+    for (const [name, what] of HUB_FILES_BESIDE) {
+      const entry = await fs.stat(path.join(dir, name)).catch(() => undefined);
+      const filled = entry?.isDirectory() ? (await fs.readdir(path.join(dir, name)).catch(() => [])).length > 0 : Boolean(entry);
+      if (filled) found.push(what);
+    }
+    const copies = (await fs.readdir(dir).catch(() => [] as string[])).some((f) => f.startsWith(`${path.basename(this.file)}.corrupt-`));
+    if (copies) found.push("copies of an earlier data file kept aside");
+    return found;
   }
 
   /** False after a load that could not read the file: a save would write over data that was never read. */

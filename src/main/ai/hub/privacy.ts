@@ -285,16 +285,18 @@ export function maskContext(value: string, options: MaskContextOptions = {}): st
 /**
  * One word on a command line that may be a password: single-quoted (always taken), or double-quoted
  * or bare. A double-quoted or bare word that is a variable or a command substitution is not taken:
- * it holds no secret, and it is code a person approving the command should see.
+ * it holds no secret, and it is code a person approving the command should see. Nor is a placeholder
+ * of a runbook or a template (`{{password}}`), quoted or not: its value is put in later. A bare word
+ * ends before a backtick, which in a shell starts code and in prose closes it.
  */
-const WORD = "(?:'[^'\\r\\n]*'|(?!\"?\\$[({A-Za-z_]|\"?`)(?:\"[^\"\\r\\n]*\"|[^\\s;&|\"'<>]+))";
+const WORD = "(?![\"']?\\{\\{)(?:'[^'\\r\\n]*'|(?!\"?\\$[({A-Za-z_]|\"?`)(?:\"[^\"\\r\\n]*\"|[^\\s;&|\"'<>`]+))";
 /** The same, as a word of its own after a flag: an option that follows (`-p --eval …`) is not the flag's value. */
 const NEXT_WORD = `(?!-)${WORD}`;
 /** The rest of one command: up to the next `;`, `&`, `|` or line break that is not inside quotes. Bounded. */
 const REST = "(?:[^\\n;&|'\"]|'[^'\\n]*'|\"[^\"\\n]*\"){0,400}";
 
 /** A word that is a variable, a command substitution or a redirection: shown as it is. */
-const IS_CODE = /^"?\$[({A-Za-z_]|^"?`|^\d*[<>]/;
+const IS_CODE = /^"?\$[({A-Za-z_]|^"?`|^\d*[<>]|^["']?\{\{/;
 
 type SegmentRule = (segment: string) => string;
 const flagRule = (flag: string, word = WORD, flags = "g"): SegmentRule => {
@@ -312,7 +314,7 @@ const registryLogin = when(/\slogin\b/, flagRule("-p[\\s=]*", NEXT_WORD, ""));
 const archivePassword = flagRule("-h?p", "(?!\\s)" + WORD);
 const puttyPassword = flagRule("-pw\\s+", NEXT_WORD);
 /** `-U name%password`, quoted or not. */
-const sambaUser: SegmentRule = (segment) => segment.replace(/(\s(?:-U\s*|--user[=\s])["']?[^\s%;&|"']{1,100}%)[^\s;&|"']+/g, "$1[redacted]");
+const sambaUser: SegmentRule = (segment) => segment.replace(/(\s(?:-U\s*|--user[=\s])["']?[^\s%;&|"']{1,100}%)(?!\{\{|\$[({A-Za-z_])[^\s;&|"']+/g, "$1[redacted]");
 /**
  * `htpasswd -b [file] user password`: with `b` among its flags the password is a word of the command,
  * the third after the flags, or the second when `n` (print, no file) is among them.
@@ -327,13 +329,23 @@ const htpasswd: SegmentRule = (segment) => {
   return `${segment.slice(0, password.index)}[redacted]${segment.slice(password.index + password[0].length)}`;
 };
 
+const snmpPassphrases = flagRule("-[AX]\\s*", NEXT_WORD);
+/** FreeRDP's `/p:password`. */
+const freerdpPassword: SegmentRule = (segment) =>
+  segment.replace(/(\s\/p:)(?!\{\{|\$[({A-Za-z_])("[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"']+)/g, "$1[redacted]");
+
 /**
  * Programs that take a password as an ordinary word on their command line, and where in the command
  * it stands. Anchored on the program's name, so ordinary text is left alone: `-p` is a port to ssh
  * and a password to sshpass.
  */
 const COMMAND_RULES: Record<string, SegmentRule> = {
-  "redis-cli": flagRule("-a\\s+", NEXT_WORD),
+  "redis-cli": both(
+    flagRule("-a\\s+", NEXT_WORD),
+    // `AUTH [user] password`: the last word of it.
+    flagRule("auth\\s+(?:[^\\s;&|'\"<>]+\\s+(?=[^\\s;&|-]))?", NEXT_WORD, "gi"),
+    flagRule("config\\s+set\\s+(?:requirepass|masterauth)\\s+", NEXT_WORD, "gi"),
+  ),
   "redis-benchmark": flagRule("-a\\s+", NEXT_WORD),
   docker: registryLogin,
   podman: registryLogin,
@@ -381,15 +393,38 @@ const COMMAND_RULES: Record<string, SegmentRule> = {
   rpcclient: sambaUser,
   smbget: sambaUser,
   htpasswd,
-  openssl: both(flagRule("-pass(?:in|out)?\\s+pass:", "(?!\\s)" + WORD), when(/\senc\b/, flagRule("-k\\s+", NEXT_WORD))),
+  openssl: both(flagRule("-pass(?:in|out|word)?\\s+pass:", "(?!\\s)" + WORD), when(/\senc\b/, flagRule("-k\\s+", NEXT_WORD))),
+  // A keystore's password (`-storepass:env NAME` and `:file` name where it is, and are not taken).
+  keytool: flagRule("-(?:src|dest|new)?(?:storepass|keypass)\\s+|-new\\s+", NEXT_WORD),
+  // `vault login TOKEN`; `name=value` after it is the generic rule's.
+  vault: when(/\slogin\b/, flagRule("login\\s+(?:-\\S+\\s+)*", "(?![^\\s=]*=)" + NEXT_WORD, "")),
+  etcdctl: (segment) => segment.replace(/(\s--user[=\s]["']?[^\s:;&|"']{1,100}:)(?!\{\{|\$[({A-Za-z_])[^\s;&|"']+/g, "$1[redacted]"),
+  influx: flagRule("-password(?:=|\\s+)", NEXT_WORD),
+  cqlsh: flagRule("-p\\s*", NEXT_WORD),
+  useradd: flagRule("-p\\s+", NEXT_WORD),
+  usermod: flagRule("-p\\s+", NEXT_WORD),
+  // SNMPv3's passphrases: -A for authentication, -X for privacy (-a and -x are the protocols).
+  snmpwalk: snmpPassphrases,
+  snmpbulkwalk: snmpPassphrases,
+  snmpget: snmpPassphrases,
+  snmpgetnext: snmpPassphrases,
+  snmpbulkget: snmpPassphrases,
+  snmpset: snmpPassphrases,
+  snmptable: snmpPassphrases,
+  snmptrap: snmpPassphrases,
+  xfreerdp: freerdpPassword,
+  wlfreerdp: freerdpPassword,
+  "sdl-freerdp": freerdpPassword,
   rabbitmqctl: flagRule("(?:add_user|change_password|authenticate_user)\\s+\\S+\\s+", NEXT_WORD, ""),
+  rabbitmqadmin: flagRule("-p\\s+", NEXT_WORD),
+  consul: flagRule("-token(?:=|\\s+)", NEXT_WORD),
   mysqladmin: flagRule("password\\s+", NEXT_WORD, ""),
   nmcli: flagRule("(?:password|wifi-sec\\.psk|802-1x\\.password)\\s+", NEXT_WORD),
   aws: flagRule("configure\\s+set\\s+\\S*(?:secret|token)\\S*\\s+", NEXT_WORD, ""),
   kubectl: when(/\screate\s+secret\b/, flagRule("--from-literal[=\\s][\\w.-]+=", "(?!\\s)" + WORD)),
   oc: when(/\screate\s+secret\b/, flagRule("--from-literal[=\\s][\\w.-]+=", "(?!\\s)" + WORD)),
-  lftp: (segment) => segment.replace(/(\s-u\s+[^\s,;&|"']{1,100},)[^\s;&|"']+/, "$1[redacted]"),
-  sqlplus: (segment) => segment.replace(/(\s[\w$#.-]{1,60}\/)[^\s@;&|"'/]+(?=@|\s|$)/, "$1[redacted]"),
+  lftp: (segment) => segment.replace(/(\s-u\s+[^\s,;&|"']{1,100},)(?!\{\{|\$[({A-Za-z_])[^\s;&|"']+/, "$1[redacted]"),
+  sqlplus: (segment) => segment.replace(/(\s[\w$#.-]{1,60}\/)(?!\{\{|\$[({A-Za-z_])[^\s@;&|"'/]+(?=@|\s|$)/, "$1[redacted]"),
 };
 // eslint-disable-next-line security/detect-non-literal-regexp -- the program names above and the fixed pieces
 const COMMAND_SEGMENT = new RegExp(`(?<![\\w./-])(${Object.keys(COMMAND_RULES).join("|")})(?![\\w.-])${REST}`, "g");
@@ -409,12 +444,23 @@ const CHPASSWD_HEREDOC = /(\bchpasswd\b[^\n]{0,80}<<-?\s*["']?(\w{1,40})["']?[^\
 /** sshpass -e and redis-cli read these from the environment. */
 const PASSWORD_ENV = new RegExp(`\\b((?:SSHPASS|REDISCLI_AUTH)=)${WORD}`, "g");
 
+/**
+ * An environment variable whose name ends in PASS, PASSWORD, PWD, TOKEN, SECRET or KEY: `export DBPASS=…`.
+ * A KEY that names a file (`SSH_KEY=~/.ssh/id_ed25519`) is not one, nor is a small number or a yes or
+ * no (`BYPASS=1`, `NO_TOKEN=true`).
+ */
+const SECRET_ENV = new RegExp(`\\b([A-Z][A-Z0-9_]{0,60}(?:PASS|PASSWD|PASSWORD|PWD|TOKEN|SECRET)=)(?!(?:\\d{1,6}|true|false|yes|no|on|off)(?![^\\s;&|]))${WORD}`, "g");
+const KEY_ENV = new RegExp(`\\b([A-Z][A-Z0-9_]{0,60}KEY=)(?![~/.]|(?:\\d{1,6}|true|false|yes|no|on|off)(?![^\\s;&|]))${WORD}`, "g");
+
 /** `name:password` with the password masked; anything else masked whole. */
 function maskCredential(word: string, keepName: boolean): string {
   if (IS_CODE.test(word)) return word;
   const quote = /^["']/.test(word) ? word[0] : "";
   const inner = quote ? word.slice(1, word.endsWith(quote) ? -1 : undefined) : word;
   const name = keepName ? /^[\w.@-]{1,64}:/.exec(inner)?.[0] : undefined;
+  // `name:{{password}}` is a placeholder, put in later; `"name:$PW"` a variable (in single quotes it is the literal text).
+  const value = inner.slice(name?.length ?? 0);
+  if (value.startsWith("{{") || (quote !== "'" && IS_CODE.test(value))) return word;
   // A printf format keeps its line break: only the value is the secret.
   const tail = /(?:\\n|\\r)+$/.exec(inner)?.[0] ?? "";
   return `${quote}${name ?? ""}[redacted]${tail}${quote}`;
@@ -446,7 +492,19 @@ function maskCommandLineSecrets(value: string): string {
     .replace(CHPASSWD_HEREDOC, (_match: string, head: string, _tag: string, body: string, end: string) =>
       `${head}${body.replace(/^([ \t]*[\w.@-]{1,64}:)\S+/gm, "$1[redacted]")}${end}`,
     )
-    .replace(PASSWORD_ENV, "$1[redacted]");
+    .replace(PASSWORD_ENV, "$1[redacted]")
+    // SQL, also inside `mysql -e "…"` or `psql -c "…"`: CREATE/ALTER USER … IDENTIFIED BY '…',
+    // ALTER ROLE … [WITH] [ENCRYPTED] PASSWORD '…', SET PASSWORD [FOR …] = '…' (or PASSWORD('…')).
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+    .replace(/(\bIDENTIFIED\s+(?:WITH\s+[\w$]+\s+)?BY\s+(?:PASSWORD\s+)?)'[^'\r\n]*'/gi, "$1'[redacted]'")
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+    .replace(/(\bSET\s+PASSWORD\b[^=;\r\n]{0,160}=\s*(?:PASSWORD\s*\(\s*)?)'[^'\r\n]*'/gi, "$1'[redacted]'")
+    .replace(/(\bPASSWORD\s+)'(?!\{\{)[^'\r\n]*'/gi, "$1'[redacted]'")
+    // An environment variable named as a secret (SECRET_ENV, KEY_ENV).
+    .replace(SECRET_ENV, "$1[redacted]")
+    .replace(KEY_ENV, "$1[redacted]")
+    // jenkins-cli.jar -auth user:password (`-auth @file` reads it from a file).
+    .replace(/\b(jenkins-cli\b[^\n;&|]{0,200}?\s-auth\s+["']?[^\s:;&|"'@]{1,100}:)(?!\{\{|\$[({A-Za-z_])[^\s;&|"']+/g, "$1[redacted]");
 }
 
 /**
@@ -500,13 +558,13 @@ export function maskSecrets(value: string): string {
     .replace(/\b((?:client-key|token)-data:\s*)\S+/g, "$1[redacted]")
     .replace(/("auth"\s*:\s*")[^"]+"/g, '$1[redacted]"')
     // A password given as a flag: --password x, --password=x, mysql -pSECRET.
-    .replace(/(--pass(?:word)?[= ])(?!\$\(|`)[^\s;&|]+/gi, "$1[redacted]")
+    .replace(/(--pass(?:word)?[= ])(?!["']?(?:\$[({A-Za-z_]|`|\{\{))[^\s;&|]+/gi, "$1[redacted]")
     // A flag whose name ends in password, passphrase, token or api-key, with its value as the next word:
     // --http-password x, --token x, --api-key x. (With `=` the rule for `name = value` further down has it.)
     // eslint-disable-next-line security/detect-unsafe-regex -- the optional first part is bounded and ends in a fixed `-`, so it cannot backtrack
-    .replace(/(--(?:[a-z][a-z-]{0,30}-)?(?:password|passphrase|token|api-?key) )(?!-|\$[({A-Za-z_]|"\$|`|\[redacted\])(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'<>]+)/gi, "$1[redacted]")
-    .replace(/\b(curl\b[^\n;&|]{0,200}?\s(?:-u|--user|-U|--proxy-user)\s*["']?[^\s:;&|"']{1,100}:)(?!\$\(|`)[^\s;&|"']+/g, "$1[redacted]")
-    .replace(/\b((?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n;&|]*?\s-p)(?!\s)[^\s;&|]+/g, "$1[redacted]")
+    .replace(/(--(?:[a-z][a-z-]{0,30}-)?(?:password|passphrase|token|api-?key) )(?!-|\$[({A-Za-z_]|"\$|`|\[redacted\]|["']?\{\{)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'<>]+)/gi, "$1[redacted]")
+    .replace(/\b(curl\b[^\n;&|]{0,200}?\s(?:-u|--user|-U|--proxy-user)\s*["']?[^\s:;&|"']{1,100}:)(?!\$[({A-Za-z_]|`|\{\{)[^\s;&|"']+/g, "$1[redacted]")
+    .replace(/\b((?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n;&|]*?\s-p)(?!\s|["']?(?:\$[({A-Za-z_]|`|\{\{))[^\s;&|]+/g, "$1[redacted]")
     // The runs before `://` and around the keyword are bounded: unbounded, each
     // start position scans to the end of a long unbroken run (base64, a hex
     // dump, minified JSON) and masking 30,000 such characters takes a second.
@@ -517,7 +575,7 @@ export function maskSecrets(value: string): string {
       "$1[redacted]@",
     )
     .replace(
-      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential|pre-?shared[-_]?key|psk|snmp[\w-]{0,20}community|community[_-]?string|_pass|_pwd|^pwd|\bpwd|\bpw\b)[\w-]{0,40}["']?\s*[:=]\s*)(?:"(?![^"\r\n]*(?:\$\(|`))[^"\r\n]*"|'[^'\r\n]*'|(?!\$\(|`)[^\s,;&|<>()`"']+)/gi,
+      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential|pre-?shared[-_]?key|psk|snmp[\w-]{0,20}community|community[_-]?string|_pass|_pwd|^pwd|\bpwd|\bpw\b)[\w-]{0,40}["']?\s*[:=]\s*)(?:"(?!\$[({A-Za-z_]|[^"\r\n]*(?:\$\(|`|\{\{))[^"\r\n]*"|'(?!\{\{)[^'\r\n]*'|(?!\$[({A-Za-z_]|`|\{\{)[^\s,;&|<>()`"']+)/gi,
       (match: string, prefix: string, offset: number, whole: string) =>
         isPolicyValue(prefix, match.slice(prefix.length), whole.slice(offset + match.length, offset + match.length + 24))
           ? match
@@ -531,6 +589,8 @@ export function maskSecrets(value: string): string {
       (match: string, prefix: string, value: string) => {
         const quoted = /^["']/.test(value);
         const bare = quoted ? value.slice(1, -1) : value.replace(/[.!?):]+$/, "");
+        // A placeholder of a runbook or a template: its value is put in later.
+        if (bare.startsWith("{{")) return match;
         if (!quoted && !looksLikeSecret(bare)) return match;
         return `${prefix}${quoted ? `${value[0]}[redacted]${value[0]}` : `[redacted]${value.slice(bare.length)}`}`;
       },
@@ -543,6 +603,20 @@ export function maskSecrets(value: string): string {
  */
 export function containsSecrets(value: string): boolean {
   return maskSecrets(value) !== value;
+}
+
+/**
+ * The first line of a text that holds a secret, as it reads with the secret hidden: to show a person
+ * where it is without showing it. Undefined when the text holds none.
+ */
+export function secretLine(value: string): string | undefined {
+  const masked = maskSecrets(value).split("\n");
+  const lines = value.split("\n");
+  // A key that spans lines leaves fewer lines once masked: its first one is where it begins.
+  const at = masked.findIndex((line, i) => line !== lines[i]);
+  if (at < 0) return undefined;
+  const line = oneLine(masked[at]);
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
 }
 
 /** Units that, after a number, make a policy ("90 days", "12 characters"), not a secret. */
@@ -724,6 +798,31 @@ export function safeError(error: unknown): string {
     2000,
   );
 }
+
+/**
+ * The marks sshs3 writes where it hid a secret: `maskSecrets` and `maskHighEntropySecrets` ("[redacted]",
+ * "[private key redacted]"), `scrubPii` ("[email redacted]", "[ip redacted]", "[phone redacted]"),
+ * `maskProviderText` ("[host redacted]"), and the panel's own mask ("[REDACTED]").
+ */
+const MASK_MARK = /\[(?:private key |email |ip |phone |host )?redacted\]/i;
+
+/** The first mark of a hidden value in a text, or undefined. */
+export function maskMarkIn(value: string): string | undefined {
+  return MASK_MARK.exec(value)?.[0];
+}
+
+/**
+ * What the agent is told when a command it asked for holds such a mark. The agent only ever sees
+ * secrets masked, so a command it writes from what it saw (its own earlier call, a runbook, a
+ * memory) holds the mark and not the value: run, it would set a password to the word "[redacted]".
+ */
+export function maskedValueRefusal(what: string, mark: string): string {
+  return `Nothing ran. The ${what} holds "${mark}". sshs3 wrote that in place of a password, key or token it hid from you, so it is not the real value: run as it stands, the ${what} would use the text "${mark}". You never see the real value. Ask the person to enter it themselves: they can run this step in the terminal with the real value, or put the value on the server (a file only they can read, an environment variable) for your command to read.`;
+}
+
+/** One line under the tool calls a model is shown again, when a call there holds such a mark. */
+export const TOOL_LOG_HIDDEN_NOTE =
+  '[sshs3] A call above holds "[redacted]" or a mark like it where sshs3 hid a value from you. The mark is not the real value, and a command that holds it is refused.';
 
 /** sha256 of an exact text: to match what was approved against what runs without keeping the text. */
 export const exactHash = (value: string): string => crypto.createHash("sha256").update(value, "utf8").digest("hex");

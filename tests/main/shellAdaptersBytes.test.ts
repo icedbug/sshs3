@@ -172,6 +172,25 @@ describe.each(["bash", "sh", "dash", "zsh"] as ShellKind[])("a command runs byte
     expect(fs.existsSync(path.join(dir, "keep.txt"))).toBe(true);
     expect(fs.existsSync(path.join(dir, "long.txt"))).toBe(false);
   }, 30_000);
+
+  it.skipIf(!there)(`${name}: a long command whose pieces arrived in another order runs nothing and says so`, async () => {
+    // Two whole pieces change places: the length alone still adds up.
+    let swapped = false;
+    shell = await openShell(kind, {
+      cwd: dir,
+      tamper: (typed) => {
+        const lines = typed.split("\r");
+        if (swapped || lines.length < 5) return typed;
+        swapped = true;
+        return [lines[0], lines[2], lines[1], ...lines.slice(3)].join("\r");
+      },
+    });
+    const result = await shell.run(`echo ${"A".repeat(760)}${"B".repeat(780)}${"C".repeat(400)} > out.txt`);
+    expect(swapped).toBe(true);
+    expect(result.exitCode).toBe(NOT_WHOLE_EXIT);
+    expect(result.output).toContain("the command did not arrive whole in this terminal. Nothing ran.");
+    expect(fs.existsSync(path.join(dir, "out.txt"))).toBe(false);
+  }, 30_000);
 });
 
 describe("fish", () => {

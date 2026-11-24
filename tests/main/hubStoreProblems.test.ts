@@ -66,6 +66,29 @@ describe("a store file that cannot be used", () => {
     expect(store.problem).toBeUndefined();
   });
 
+  it("says that the file is missing when the folder still holds what the hub wrote beside it", async () => {
+    const { dir, file } = await tmp();
+    await fs.mkdir(path.join(dir, "audit"));
+    await fs.writeFile(path.join(dir, "audit", "audit-client-1.jsonl"), "{}\n");
+    await fs.mkdir(path.join(dir, "recordings"));
+    await fs.writeFile(path.join(dir, "recordings", "run-1.cast"), "{}\n");
+    // An empty folder of the hub's is no sign of an earlier start.
+    await fs.mkdir(path.join(dir, "facts"));
+    const store = new HubStore(file);
+    await store.load();
+    expect(store.problem).toBe(
+      `The AI hub's data file is missing, though its folder still holds the audit log, terminal recordings: it was moved or deleted. The hub started fresh: conversations, memory, settings and safety rules are at their defaults. If you have a copy, close sshs3, put it back as ${file} and start sshs3 again.`,
+    );
+    expect(store.data.memories).toEqual([]);
+    // It goes on and saves: there was nothing there to write over.
+    store.data.memories.push(memory);
+    await store.save();
+    const again = new HubStore(file);
+    await again.load();
+    expect(again.data.memories).toHaveLength(1);
+    expect(again.problem).toBeUndefined();
+  });
+
   it("keeps an empty file beside it and says that the hub started fresh", async () => {
     const { dir, file } = await tmp();
     await fs.writeFile(file, "");

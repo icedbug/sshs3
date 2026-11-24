@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { HubReply, AgentSchedule, AgentTask } from "../../../../shared/types/aiHub";
 import { SHELL_KINDS, isPlainCommand } from "../../../../shared/types/aiHub";
 import { getDemoSchedules, isDemoMode } from "../demoWorkspace";
-import { boundedPrompt, clip, PERSON_PROMPT_MAX, safeError } from "../privacy";
+import { boundedPrompt, clip, PERSON_PROMPT_MAX, safeError, secretLine } from "../privacy";
 import { requiredText, integer } from "../hubHelpers";
 import { active } from "../hubShared";
 import { nextCronTime } from "../../../../shared/scheduleTiming";
@@ -159,6 +159,13 @@ export class SchedulesPart {
           )
         )
           throw new Error("Invalid schedule");
+        // A scheduled run reads its prompt masked, as every model does, so a secret in it would never reach
+        // the run, and the store would keep it hidden. Refused here, with where it is, instead of changed.
+        const secret = typeof s.prompt === "string" ? secretLine(s.prompt) : undefined;
+        if (secret)
+          throw new Error(
+            `The prompt holds a password, key or token, here shown hidden: "${secret}". sshs3 does not keep one in a schedule, and the scheduled run would not see it: a model is never shown a secret. Take it out. Keep it on the server where the command can read it (a file or an environment variable), and say in the prompt where it is.`,
+          );
         const id = s.id || crypto.randomUUID();
         const previous = this.store.data.schedules.find((item) => item.id === id);
         const now = Date.now();
