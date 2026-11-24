@@ -50,6 +50,7 @@
     "docs:lint": "node scripts/docs-lint.mjs",
     "deploy": "./scripts/deploy.sh",
     "copr": "./scripts/copr-build.sh",
+    "lab": "tsx lab/cli.ts",
     "lab:test": "vitest run --config lab/vitest.config.ts",
     "lab:typecheck": "tsc -p lab/tsconfig.json",
     "lab:up": "tsx lab/cli.ts up",
