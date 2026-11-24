@@ -9,12 +9,18 @@ import { pgWalFull } from './db/pg-wal-full';
 import { slowQueryMissingIndex } from './db/slow-query-missing-index';
 import { lifecycleDeletesEarly } from './storage/lifecycle-deletes-early';
 import { s3BackupDenied } from './storage/s3-backup-denied';
+import { cronRunaway } from './system/cron-runaway';
 import { diskNearlyFull } from './system/disk-nearly-full';
+import { dnsWrongHost } from './system/dns-wrong-host';
+import { firewallBlocksPort } from './system/firewall-blocks-port';
 import { noisyNeighbour } from './system/noisy-neighbour';
 import { healthySystem } from './trap/healthy-system';
 import { certExpired } from './web/cert-expired';
+import { inodeExhaustion } from './web/inode-exhaustion';
+import { logDiskFull } from './web/log-disk-full';
 import { nginxBadConfig } from './web/nginx-bad-config';
 import { upstream502 } from './web/upstream-502';
+import { wrongOwnerAfterDeploy } from './web/wrong-owner-after-deploy';
 
 /** Every task, in the order a campaign runs them. */
 export const SCENARIOS: Scenario[] = [
@@ -26,6 +32,12 @@ export const SCENARIOS: Scenario[] = [
   diskNearlyFull,
   redisAuthMismatch,
   healthySystem,
+  inodeExhaustion,
+  wrongOwnerAfterDeploy,
+  logDiskFull,
+  cronRunaway,
+  dnsWrongHost,
+  firewallBlocksPort,
   pgReplicationBroken,
   pgTooManyConnections,
   slowQueryMissingIndex,
