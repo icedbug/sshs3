@@ -59,6 +59,15 @@ describe('the lab fleet', () => {
     }
   });
 
+  it("the person's own account asks systemd and reads the journal without sudo, as on a real Ubuntu server", async () => {
+    // Without D-Bus, systemctl run by a user says "Failed to connect to bus", and an agent took that to
+    // mean the server had no systemd and started nginx by hand.
+    const r = await exec(ip('web-01'), 'sudo -u ops systemctl is-active nginx && sudo -u ops journalctl -u nginx -n 5 --no-pager');
+    expect(r.code, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('active');
+    expect(r.stdout).not.toContain('not seeing messages from other users');
+  });
+
   it('S3 has room for every bucket to grow its volumes', async () => {
     // SeaweedFS grows 7 volumes at a time for a bucket that has none, and its default ceiling follows the
     // machine's free disk: with three buckets in use there was no room left for the backups bucket.

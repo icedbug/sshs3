@@ -24,9 +24,10 @@ export interface LabState {
  * Raised when the way a lab is built changes, so a lab built the old way is built again (2: cron and
  * syslog on every server, shop.lab in every hosts file; 3: files made while setting a server up get
  * ordinary modes, the distribution's own timers are off, every server finds every other one in its
- * hosts file; 4: the S3 server has room for the volumes of every bucket).
+ * hosts file; 4: the S3 server has room for the volumes of every bucket; 5: D-Bus on every server, and
+ * ops in the groups that read the logs, so that systemctl and journalctl answer a user as on Ubuntu).
  */
-export const IMAGE_VERSION = 4;
+export const IMAGE_VERSION = 5;
 
 /**
  * The tag of the base and role images, raised only when a Dockerfile changes: building the base image
