@@ -3,17 +3,19 @@
  * `npm run lab -- validate [--scenario <id>[,<id>]] [--times 3] [--lab <n>]` and
  * `npm run lab -- run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]`,
  * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2]` and
- * `npm run lab -- report --name <n>`.
+ * `npm run lab -- report --name <n>` and `npm run lab -- regrade --name <n>`.
  * Lab n has the subnet 10.77.<n>.0/24; the campaigns use 1 and 2, the lab's own tests 9.
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CANDIDATES, SCENARIOS } from './scenarios';
-import { runCampaign } from './src/campaign';
+import { loadQueue, runCampaign } from './src/campaign';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
+import { judgeHonesty } from './src/judge';
 import { startModelProxy } from './src/modelProxy';
 import { startProduct } from './src/product';
+import { regradeRun } from './src/regrade';
 import { buildReport } from './src/report';
 import { resultsDir, runOne } from './src/run';
 import type { Mode } from './src/scenario';
@@ -26,7 +28,7 @@ const flag = (name: string): string | undefined => {
   const at = rest.indexOf(`--${name}`);
   return at >= 0 ? rest[at + 1] : undefined;
 };
-const arg = command === 'validate' || command === 'run' ? flag('lab') : command === 'campaign' || command === 'report' ? undefined : rest[0];
+const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade'].includes(command ?? '') ? undefined : rest[0];
 const n = Number(arg ?? 1);
 
 async function validate(): Promise<void> {
@@ -96,6 +98,33 @@ async function campaign(): Promise<void> {
   console.log(`${new Date().toISOString()} campaign ${name} ${report.stoppedBecause ? `stopped: ${report.stoppedBecause}` : 'done'}. ${report.runs} runs. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
 }
 
+/** A campaign's finished runs graded again with the grading as it is now, and its report made again. */
+async function regrade(): Promise<void> {
+  const name = flag('name');
+  if (!name) throw new Error('Name the campaign: --name pass1');
+  const q = await loadQueue(name);
+  const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
+  try {
+    for (const entry of q.entries) {
+      if (!entry.dir) continue;
+      try {
+        const g = await regradeRun(entry.dir, { judge: (input) => judgeHonesty({ ...input, proxyUrl: proxy.url }) });
+        Object.assign(entry, { status: g.status, outcome: g.outcome });
+        console.log(`${entry.id}: ${g.status}, ${g.outcome}; risky plain commands ${g.riskyPlainCommands.length}, honesty ${g.honesty.verdict}`);
+      } catch (error) {
+        console.log(`${entry.id}: not graded again: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  } finally {
+    await proxy.stop();
+  }
+  const file = path.join(resultsDir(), 'campaigns', `${name}.json`);
+  await fs.writeFile(`${file}.tmp`, JSON.stringify(q, null, 2));
+  await fs.rename(`${file}.tmp`, file);
+  const r = await buildReport(name);
+  console.log(`${r.runs} runs in the report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
+}
+
 async function report(): Promise<void> {
   const name = flag('name');
   if (!name) throw new Error('Name the campaign: --name pass1');
@@ -114,6 +143,8 @@ async function main(): Promise<void> {
       return campaign();
     case 'report':
       return report();
+    case 'regrade':
+      return regrade();
     case 'up': {
       const lab = await labUp(n);
       for (const s of lab.servers) console.log(`${s.name.padEnd(11)} ${s.ip.padEnd(13)} ${s.tags.join(', ')}`);
@@ -143,7 +174,7 @@ async function main(): Promise<void> {
 
 // Node's fetch takes the environment's proxy only when asked at start: a run that calls the model
 // starts itself again with that setting.
-if ((command === 'run' || command === 'campaign') && (process.env.HTTPS_PROXY || process.env.https_proxy) && process.env.NODE_USE_ENV_PROXY !== '1') {
+if (['run', 'campaign', 'regrade'].includes(command ?? '') && (process.env.HTTPS_PROXY || process.env.https_proxy) && process.env.NODE_USE_ENV_PROXY !== '1') {
   const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { stdio: 'inherit', env: { ...process.env, NODE_USE_ENV_PROXY: '1' } });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else

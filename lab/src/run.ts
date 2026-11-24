@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentTask } from '../../src/shared/types/aiHub';
 import { decideChange, decidePlan } from './approver';
-import { changesThatRan, grade, plainCommands, type Approval, type Grade, type RunRecord, type ToolCallSeen } from './grade';
+import { evidenceOf, grade, plainCommands, toolCallsOf, type Approval, type Grade, type RunRecord, type ToolCallSeen } from './grade';
 import { judgeHonesty } from './judge';
 import { labGateway, labHealthy, labReset, loadLab, type LabState } from './lab';
 import type { ModelProxy } from './modelProxy';
@@ -54,7 +54,7 @@ export function makeRunId(scenario: string, model: string, at = new Date()): str
 const DONE: ReadonlyArray<AgentTask['status']> = ['completed', 'failed', 'cancelled', 'interrupted'];
 
 /** The hub's reports of each tool call of this conversation, in order (the task itself keeps only the last 60). */
-function toolsOf(events: CapturedEvent[], taskId: string): ToolCallSeen[] {
+export function toolsOf(events: CapturedEvent[], taskId: string): ToolCallSeen[] {
   return events.flatMap((e) => {
     const d = e.channel === 'ai-hub:delta' ? (e.args[0] as { taskId?: string; type?: string; tool?: ToolCallSeen }) : undefined;
     return d?.taskId === taskId && d.type === 'tool.result' && d.tool ? [{ name: d.tool.name, input: d.tool.input, output: d.tool.output }] : [];
@@ -253,8 +253,9 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
       } else questionSince = 0;
 
       const calls = (await opts.proxy.calls(runId)).length;
-      // Commands: what ran in the terminal and every change asked for; reading tools are not counted.
-      const commands = plainCommands({ tools: toolsOf(account.events.slice(eventsFrom), taskId) }).length + task.changes.length;
+      // Commands: every command and change the agent ran or asked for. The product records each of them
+      // (a plain command too) as a change of its own; reading tools are not counted.
+      const commands = task.changes.length || plainCommands({ tools: toolsOf(account.events.slice(eventsFrom), taskId) }).length;
       if (calls >= CAPS.modelCalls) stoppedBy = `${CAPS.modelCalls} model calls`;
       else if (commands >= CAPS.commands) stoppedBy = `${CAPS.commands} commands`;
       else if (Date.now() - started >= CAPS.minutes * 60_000) stoppedBy = `${CAPS.minutes} minutes`;
@@ -300,10 +301,27 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
   const lastAnswer = task?.messages.at(-1)?.role === 'assistant' ? task.messages.at(-1)!.text : '';
   const honesty = harnessError
     ? { verdict: 'n/a' as const, reason: 'The lab failed.' }
-    : await judgeHonesty({ proxyUrl: opts.proxy.url, runId, scenario: s, answer: lastAnswer, checks, damage, commands: [...plainCommands(record), ...changesThatRan(record).flatMap((c) => c.command ?? [])] });
+    : await judgeHonesty({ proxyUrl: opts.proxy.url, runId, scenario: s, answer: lastAnswer, checks, damage, evidence: evidenceOf(record), toolCalls: toolCallsOf(record) });
   const g = grade(record, honesty);
 
-  Object.assign(meta, { state: 'done', endedAt: new Date().toISOString(), taskId, taskStatus: task?.status, taskError: task?.error, stoppedBy, harnessError, askedAndWaited: asked, approvals, refusedAnswers });
+  Object.assign(meta, {
+    state: 'done',
+    endedAt: new Date().toISOString(),
+    taskId,
+    taskStatus: task?.status,
+    taskError: task?.error,
+    stoppedBy,
+    harnessError,
+    askedAndWaited: asked,
+    approvals,
+    refusedAnswers,
+    // Kept so that the run can be graded again without the lab: the servers' state is gone after the run.
+    checks,
+    damage,
+    productDataDir: opts.product.dataDir,
+  });
+  // The product's own record of the conversation: every command with its reference, and its answers.
+  if (task) await fs.writeFile(path.join(dir, 'task.json'), JSON.stringify({ status: task.status, error: task.error, messages: task.messages, changes: task.changes, plan: task.plan }, null, 2));
   await fs.writeFile(path.join(dir, 'run.json'), JSON.stringify(meta, null, 2));
   await fs.writeFile(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   await fs.writeFile(path.join(dir, 'model.jsonl'), calls.map((c) => JSON.stringify(c)).join('\n') + '\n');

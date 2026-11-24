@@ -92,9 +92,62 @@ function commandOf(tool: ToolCallSeen): string | undefined {
   }
 }
 
-/** The plain terminal commands that ran (looking or not), in order. */
-export function plainCommands(r: Pick<RunRecord, 'tools'>): string[] {
+/**
+ * The plain commands that ran (looking or not), in order. The product records each one it ran (in the
+ * terminal, across servers, as a check) as a change of its own, with the reference the agent cites; the
+ * terminal tool calls stand in when there is no such record.
+ */
+export function plainCommands(r: Pick<RunRecord, 'tools' | 'task'>): string[] {
+  const recorded = (r.task?.changes ?? []).filter((c) => RAN.includes(c.status) && isPlainCommand(c));
+  if (recorded.length) return recorded.flatMap((c) => c.command ?? []);
   return r.tools.filter((t) => t.name === 'terminal_command' && !refused(t.output)).flatMap((t) => commandOf(t) ?? []);
+}
+
+/** One thing that ran, as the honesty judge is shown it. */
+export interface Evidence {
+  ref?: string;
+  target: string;
+  kind: 'command' | 'change card' | 'file write' | 'setting' | 'tool call';
+  command: string;
+  status: AgentChange['status'];
+  exitCode?: number;
+  output?: string;
+  /** A change card's own check: what it showed before and after the change. */
+  check?: { command: string; expected?: string; passedBefore?: boolean; passedAfter?: boolean; output?: string; skipped?: string };
+  rollback?: { command: string; ran?: boolean; restored?: boolean };
+}
+
+/** The run's tool calls by name and the start of their input, for the judge: memory, plans, reads and the rest. */
+export function toolCallsOf(r: Pick<RunRecord, 'tools'>): Array<{ name: string; input: string }> {
+  return r.tools.map((t) => ({ name: t.name, input: t.input.slice(0, 300) }));
+}
+
+/** Everything that ran, from the product's own record, with the references the agent cites ([c3]). */
+export function evidenceOf(r: Pick<RunRecord, 'task'>): Evidence[] {
+  return (r.task?.changes ?? [])
+    .filter((c) => RAN.includes(c.status))
+    .map((c) => ({
+      ref: c.ref,
+      target: c.target,
+      kind: isPlainCommand(c) ? 'command' : c.kind === 'file' ? 'file write' : c.kind === 'setting' ? 'setting' : c.toolCall ? 'tool call' : 'change card',
+      command: c.command ?? c.description,
+      status: c.status,
+      exitCode: c.exitCode,
+      output: c.output === undefined ? undefined : c.output.slice(0, 400),
+      ...(c.check
+        ? {
+            check: {
+              command: c.check.command,
+              expected: c.check.expected,
+              passedBefore: c.check.before,
+              passedAfter: c.check.after,
+              output: c.check.output === undefined ? undefined : c.check.output.slice(0, 300),
+              skipped: c.check.skipped,
+            },
+          }
+        : {}),
+      ...(c.rollback ? { rollback: { command: c.rollback.command, ran: c.rollback.ran, restored: c.rollback.restored } } : {}),
+    }));
 }
 
 /**
