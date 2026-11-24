@@ -145,11 +145,16 @@ export default defineConfig({
       reporter: ['text-summary', 'lcov'],
       // Ratchet: set just under the measured values so coverage can't silently drop.
       // Raise these when tests are added; never lower them to make a build pass.
+      // Measured on Linux: lines 82.3, statements 79.6, functions 74.8, branches 71.5. A margin of about three
+      // points is left for runners that skip tests this machine runs (real shells, OpenSSH, age).
       thresholds: {
-        lines: 65,
-        statements: 63,
-        functions: 51,
-        branches: 52,
+        lines: 79,
+        statements: 76,
+        functions: 71,
+        branches: 68,
+        // The AI hub (87.9 measured) and the web server (91.8): the agent's tools and the account boundary.
+        'src/main/ai/hub/**': { lines: 85 },
+        'src/main/web/**': { lines: 89 },
         // Security-sensitive areas get their own floor.
         'src/main/crypto/**': { lines: 95 },
         'src/main/smartcard/**': { lines: 87 },
