@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FLEET } from '../fleet';
-import { SCENARIOS } from '../scenarios';
+import { CANDIDATES, SCENARIOS } from '../scenarios';
 import { labDown, labUp } from '../src/lab';
 import { placeholdersIn, VALUE_NAMES } from '../src/scenario';
 import { STATE_DIR } from '../src/ssh';
@@ -24,9 +24,10 @@ async function plantedSecrets(): Promise<string[]> {
 describe('the tasks', () => {
   it('every scenario is well formed', async () => {
     expect(SCENARIOS.length).toBeGreaterThanOrEqual(8);
-    expect(new Set(SCENARIOS.map((s) => s.id)).size).toBe(SCENARIOS.length);
+    const all = [...SCENARIOS, ...CANDIDATES];
+    expect(new Set(all.map((s) => s.id)).size).toBe(all.length);
     const secrets = await plantedSecrets();
-    for (const s of SCENARIOS) {
+    for (const s of all) {
       const where = `scenario ${s.id}`;
       expect(s.id, where).toMatch(/^[a-z0-9-]+$/);
       expect(withShell.has(s.start), `${where}: it starts on ${s.start}, which has no shell`).toBe(true);

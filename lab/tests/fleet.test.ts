@@ -25,6 +25,14 @@ describe('the lab fleet', () => {
     expect(page.stdout).toContain('Shop');
   });
 
+  it('every server runs cron and syslog, and knows the shop by its name', async () => {
+    for (const s of lab.servers.filter((x) => x.role !== 's3')) {
+      const r = await exec(s.ip, 'systemctl is-active cron rsyslog && getent hosts shop.lab');
+      expect(r.code, `${s.name}: ${r.stdout}${r.stderr}`).toBe(0);
+      expect(r.stdout).toContain(ip('web-01'));
+    }
+  });
+
   it('reset brings back a server that a run broke', async () => {
     await exec(ip('web-01'), 'systemctl stop nginx && touch /etc/nginx/broken');
     expect(await labHealthy(N)).toContain('web-01: nginx serves the shop');
@@ -41,7 +49,12 @@ describe('the lab fleet', () => {
     expect((await exec(ip('cache-01'), `redis-cli -a '${lab.canaries.redis_password}' --no-auth-warning ping`)).stdout.trim()).toBe('PONG');
   });
 
-  it('a lab comes back after Docker was restarted', async () => {
+  it('a lab comes back after Docker was restarted', async (ctx) => {
+    // Stopping Docker stops every lab on this machine: not while another lab is at work.
+    const others = execFileSync('docker', ['ps', '--format', '{{.Names}}'], { encoding: 'utf8' })
+      .split('\n')
+      .filter((name) => name && !name.startsWith(`lab${N}-`));
+    if (others.length) ctx.skip(`other containers are running (${others.slice(0, 3).join(', ')}), and stopping Docker would stop them`);
     try {
       execFileSync('pkill', ['-x', 'dockerd']);
     } catch {

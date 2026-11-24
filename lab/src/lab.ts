@@ -16,7 +16,12 @@ export interface LabState {
   /** known_hosts lines for every server that runs sshd, by address. */
   hostKeys: string;
   k8s?: { kubeconfigPath: string; server: string };
+  /** The image version the lab was built from; a lab of an older one is built again. */
+  imageVersion?: number;
 }
+
+/** Raised when the images change (2: cron and syslog on every server, shop.lab in every hosts file). */
+export const IMAGE_VERSION = 2;
 
 /** This machine's own address on a lab's network (Docker gives a network's gateway the first address). */
 export const labGateway = (lab: Pick<LabState, 'index'>): string => `10.77.${lab.index}.1`;
@@ -31,8 +36,9 @@ const labDir = (n: number): string => path.join(STATE_DIR, `lab-${n}`);
 const statePath = (n: number): string => path.join(STATE_DIR, `lab-${n}.json`);
 const container = (n: number, name: string): string => `lab${n}-${name}`;
 const golden = (n: number, name: string): string => `sshs3lab/lab${n}-${name}:golden`;
+const BASE_IMAGE = `sshs3lab/base:${IMAGE_VERSION}`;
 const roleImage = (s: LabServerSpec): string =>
-  s.role === 's3' ? S3_IMAGE : s.role === 'bastion' ? 'sshs3lab/base:1' : `sshs3lab/role-${s.role}:1`;
+  s.role === 's3' ? S3_IMAGE : s.role === 'bastion' ? BASE_IMAGE : `sshs3lab/role-${s.role}:${IMAGE_VERSION}`;
 
 function run(file: string, args: string[], opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ExecResult> {
   return new Promise((resolve) => {
@@ -89,7 +95,17 @@ function composeFile(n: number, servers: LabState['servers'], fromGolden: boolea
             networks: network,
             ...order,
           }
-        : { image, container_name: container(n, s.name), hostname: s.name, privileged: true, stop_signal: 'SIGRTMIN+3', networks: network, ...order };
+        : {
+            image,
+            container_name: container(n, s.name),
+            hostname: s.name,
+            privileged: true,
+            stop_signal: 'SIGRTMIN+3',
+            networks: network,
+            // The shop's own name, as the people in the tasks call it.
+            extra_hosts: [`shop.lab:${servers.find((x) => x.name === 'web-01')!.ip}`],
+            ...order,
+          };
   }
   return { name: project(n), services, networks: { lab: { name: project(n), ipam: { config: [{ subnet: `10.77.${n}.0/24` }] } } } };
 }
@@ -99,10 +115,10 @@ async function imageExists(tag: string): Promise<boolean> {
 }
 
 async function buildImages(): Promise<void> {
-  if (!(await imageExists('sshs3lab/base:1'))) await docker(['build', '-q', '-t', 'sshs3lab/base:1', path.join(IMAGES, 'base')], 'Building the base image');
+  if (!(await imageExists(BASE_IMAGE))) await docker(['build', '-q', '-t', BASE_IMAGE, path.join(IMAGES, 'base')], 'Building the base image');
   for (const role of ['web', 'app', 'db', 'cache'])
-    if (!(await imageExists(`sshs3lab/role-${role}:1`)))
-      await docker(['build', '-q', '-t', `sshs3lab/role-${role}:1`, path.join(IMAGES, role)], `Building the ${role} image`);
+    if (!(await imageExists(`sshs3lab/role-${role}:${IMAGE_VERSION}`)))
+      await docker(['build', '-q', '--build-arg', `BASE=${BASE_IMAGE}`, '-t', `sshs3lab/role-${role}:${IMAGE_VERSION}`, path.join(IMAGES, role)], `Building the ${role} image`);
 }
 
 /** The lab's CA, the shop's TLS certificate from it, and web-01's deploy key, made on this machine. */
@@ -187,7 +203,7 @@ async function build(n: number): Promise<LabState> {
   const hostKeys = (await Promise.all(withSshd.map((s) => must('ssh-keyscan', ['-t', 'ed25519', s.ip], `Reading ${s.name}'s host key`, { timeoutMs: 30_000 }))))
     .map((out) => out.trim())
     .join('\n');
-  const state: LabState = { index: n, subnet: `10.77.${n}.0/24`, servers, canaries, hostKeys };
+  const state: LabState = { index: n, subnet: `10.77.${n}.0/24`, servers, canaries, hostKeys, imageVersion: IMAGE_VERSION };
   await fs.writeFile(statePath(n), JSON.stringify(state, null, 2), { mode: 0o600 });
   return state;
 }
@@ -228,6 +244,11 @@ export async function labUp(n: number, opts: { waitHealthy?: boolean } = {}): Pr
     state = undefined;
   }
   const haveGolden = state ? (await Promise.all(state.servers.map((s) => imageExists(golden(n, s.name))))).every(Boolean) : false;
+  if (state && (state.imageVersion ?? 1) !== IMAGE_VERSION) {
+    // Built from older images: down, and built again from the new ones.
+    await composeUp(n, 'down', '--remove-orphans').catch(() => {});
+    state = undefined;
+  }
   if (!state || !haveGolden) state = await build(n);
   else await composeUp(n, 'up', '-d');
   if (opts.waitHealthy !== false) await waitHealthy(n);

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { LabState } from './lab';
+import { ipValue } from './scenario';
 import { STATE_DIR } from './ssh';
 
 /**
@@ -86,5 +87,6 @@ async function expiredShopCert(n: number): Promise<{ expired_shop_cert: string; 
 }
 
 export async function labValues(lab: LabState): Promise<Record<string, string>> {
-  return { ...secretValues(lab), ...(await expiredShopCert(lab.index)) };
+  const addresses = Object.fromEntries(lab.servers.map((s) => [ipValue(s.name), s.ip]));
+  return { ...secretValues(lab), ...(await expiredShopCert(lab.index)), lab_prefix: `10.77.${lab.index}`, ...addresses };
 }

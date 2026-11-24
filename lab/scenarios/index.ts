@@ -10,3 +10,6 @@ import { upstream502 } from './web/upstream-502';
 
 /** Every task, in the order a campaign runs them. */
 export const SCENARIOS: Scenario[] = [nginxBadConfig, pgWalFull, certExpired, upstream502, noisyNeighbour, diskNearlyFull, redisAuthMismatch, healthySystem];
+
+/** Tasks written but not yet shown right three times: `validate` takes them, a campaign does not. */
+export const CANDIDATES: Scenario[] = [];

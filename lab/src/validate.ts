@@ -71,7 +71,7 @@ export async function validateScenario(s: Scenario, n: number): Promise<Validati
   // 1 to 3: a fresh lab, the fault, and the known solution.
   await labReset(n);
   lab = await loadLab(n);
-  let r = await waitForChecks(lab, values, [...s.checks, ...s.damage], 'all-true');
+  let r = await waitForChecks(lab, values, s.forward ? s.damage : [...s.checks, ...s.damage], 'all-true');
   if (!r.every((x) => x.ok)) problems.push(`Before setup these are not true: ${failing(r)}.`);
   try {
     for (const step of s.setup) await runStep(lab, values, step);

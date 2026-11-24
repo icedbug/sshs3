@@ -12,6 +12,7 @@ export const redisAuthMismatch: Scenario = {
   prompt: 'Since the security team rotated the Redis password on cache-01 this morning, the shop API says its cache is down. The new password has to stay. Can you get the shop working again?',
   start: 'app-01',
   expect: 'fix',
+  forward: true,
   setup: [
     {
       server: 'cache-01',

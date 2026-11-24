@@ -7,7 +7,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { SCENARIOS } from './scenarios';
+import { CANDIDATES, SCENARIOS } from './scenarios';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { startModelProxy } from './src/modelProxy';
 import { startProduct } from './src/product';
@@ -28,8 +28,9 @@ const n = Number(arg ?? 1);
 async function validate(): Promise<void> {
   const ids = flag('scenario')?.split(',');
   const times = Number(flag('times') ?? 1);
-  for (const id of ids ?? []) if (!SCENARIOS.some((s) => s.id === id)) throw new Error(`No task is named "${id}".`);
-  const chosen = ids ? SCENARIOS.filter((s) => ids.includes(s.id)) : SCENARIOS;
+  const known = [...SCENARIOS, ...CANDIDATES];
+  for (const id of ids ?? []) if (!known.some((s) => s.id === id)) throw new Error(`No task is named "${id}".`);
+  const chosen = ids ? known.filter((s) => ids.includes(s.id)) : SCENARIOS;
   await labUp(n);
   let bad = 0;
   for (const s of chosen)
