@@ -162,11 +162,18 @@ explicitly enabled presentation on top of the same terminal authority.
     with a line that says agents need more
     (`tests/main/contextWindowChoices.test.ts` runs an agent in the smallest
     choice, `tests/renderer/contextWindowChoices.test.tsx` holds the list).
+    From chat the assistant may set any whole number from the smallest choice
+    to the largest; a smaller or larger one is refused before anybody is asked
+    (`contextWindowRefusal`, `tests/main/settingsFromChat.test.ts`). What the
+    settings store reads from an older file is not changed by this.
   - *A message sent while the agent works* (`steer`) is given to the model
-    before its next turn. One that comes in while the last turn is being
-    written is answered before the run ends: the run takes one more turn. A
-    compaction keeps the last ten such messages word for word in the handover
-    (a note is the model's summary and may leave a constraint out). In the
+    before its next turn, with the pictures attached to it. One that comes in
+    while the last turn is being written is answered before the run ends: the
+    run takes one more turn. A compaction keeps the last ten such messages word
+    for word in the handover, without their pictures (a note is the model's
+    summary and may leave a constraint out). A runtime that takes only words
+    while it works (the Hermes service) says so, and the person is told to send
+    the pictures again when the run has finished. In the
     conversation the person's message stands after what had been shown when it
     came, and the final answer is what was said after it.
   - *Earlier conversations* (`sshs3_session_search`): the agent can search
@@ -363,7 +370,11 @@ explicitly enabled presentation on top of the same terminal authority.
 - **Storage operations** — `sshs3_storage_ops` (`list_files`,
   `read_remote_file`, `diff_paths`) runs against real storage providers through
   `HubHost.storageOps`; `diff_paths` produces a Myers unified diff with
-  `createTwoFilesPatch` from the `diff` package.
+  `createTwoFilesPatch` from the `diff` package. In the demo a simulated
+  server (the base fleet's, a scenario's) takes the same path and its own
+  files are read. Only a scripted example server gets a scripted answer
+  (`simulateDemoStorageOps`), and that answer carries the scripted note
+  (`tests/main/demoTargets.test.ts`).
 - **`WorkforceRunner`** — a workforce run starts one read-only model run per
   selected Mission Agent (`workspace_context`, `sshs3_kb_search` and
   `sshs3_storage_ops` only; all at once unless a concurrency is named) and
@@ -427,8 +438,11 @@ explicitly enabled presentation on top of the same terminal authority.
   shared pages. It is told by the terminal's own server while the terminal is
   open, and afterwards by the server's name or address: its target, a command
   it ran, or a terminal that was put before it. The setting "Learn from
-  finished work" says so. Not covered: the team's activity log, which still
-  carries what a person did on a personal server
+  finished work" says so. What a person did on a personal server stays in
+  this computer's own activity log (`personalServers.ts`): it is left out of
+  what the team bucket is sent, of the team's activity batches, of the shared
+  workspace file and of the team vault. An event is told by its server's id
+  while that server is known, else by its name or address
   (`tests/main/personalServerLearning.test.ts`).
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
   presets (`MCP_MARKETPLACE_CATALOG`). Before a server is started or called
@@ -1203,7 +1217,12 @@ there.
   (`ChangeSecrets.tsx`). The values travel with the `approve` request, are
   held in memory until the waiting tool reads them once
   (`HubService.changeSecrets`), and are never stored or sent to the model.
-  Left empty, the secret already saved is kept.
+  Left empty, the secret already saved is kept. The team bucket works the
+  same way: `sshs3_manage_s3_and_sync` `configure_s3_workspace` takes the
+  bucket's access key ID and secret key on its card, or, when the call names
+  no bucket, the invite code, which holds the keys (`BUCKET_SECRET_PARAMS`).
+  The keys of a saved S3 profile (`upsert_s3_profile`) are still parameters
+  of the call.
 - *Only its card answers such a change.* The card always sends what was typed,
   also when that is nothing. An approval without it is refused, so the inbox,
   its shortcut key and the terminal bar cannot say yes: they send the person
@@ -2590,7 +2609,10 @@ No run broke anything. What the runs found in the app, each fixed and tested:
   servers print the same text whatever is asked. An agent ruled the alert out
   because the example cluster beside it said `HEALTH_OK`. A result from such a
   server now carries a note that says what it is (`scriptedDemoNote`). A
-  scenario's server is not marked: it holds state.
+  scenario's server is not marked: it holds state. A base fleet server is
+  marked only for a line its appliance answered from the showcase's script
+  (`SimShell.answeredFromScript`, `SCRIPTED_ANSWER_NOTE`), in a terminal and
+  in `sshs3_cluster_exec`.
 - **The same call, again and again.** One model asked for one command
   fourteen times and wrote one list of hypotheses 160 times. A command that
   printed the same thing three times running, just now, is not run a fourth

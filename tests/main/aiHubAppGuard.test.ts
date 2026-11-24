@@ -110,7 +110,10 @@ describe("which calls move the fence", () => {
     expect(bucket.title).toBe("Change where the team's workspace is synced to");
     expect(bucket.detail).toContain("bucket: somewhere-else");
     expect(bucket.detail).not.toContain("do-not-show");
-    expect(bucket.detail).toContain("inviteCode: (given)");
+    // The keys and the invite code are typed on the card (a call that carries one is refused before this).
+    expect(bucket.detail).not.toContain("AKIAXXXXXXXXXXXXXXXX");
+    expect(bucket.secrets?.map((f) => f.key)).toEqual(["accessKeyId", "secretAccessKey"]);
+    expect(guardAsk(sync, { operation: "configure_s3_workspace" }, run("assisted"), known)?.secrets).toEqual([{ key: "inviteCode", label: "the invite code" }]);
     expect(guardAsk(sync, { operation: "disconnect_s3_workspace" }, run("autonomous"), known)).toBeDefined();
     expect(guardAsk(sync, { operation: "save_dir_sync_profile", localPath: "/home/me" }, run("autonomous"), known)?.title).toBe("Set up syncing of a folder to a bucket");
     expect(guardAsk(sync, { operation: "sync_now" }, run("assisted"), known)).toBeUndefined();

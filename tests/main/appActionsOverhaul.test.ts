@@ -121,6 +121,8 @@ function createHarness(options: {
     // No card in these tests takes a secret or shows one.
     takeChangeSecrets: () => ({}),
     keepChangeReveal: vi.fn(),
+    // Nothing here runs long enough to be written down as started.
+    noteStartedAfterAWhile: () => () => undefined,
     // No run here was asked for from chat.
     chatFence: () => undefined,
     // No chat bot in these tests: nothing is kept, so nothing can be searched.

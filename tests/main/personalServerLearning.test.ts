@@ -179,3 +179,62 @@ describe("a finished conversation about a personal server", () => {
     expect(queued()).toHaveLength(1);
   }, 60_000);
 });
+
+describe("activity on a personal server", () => {
+  // What was done on a server a person keeps to themselves stays in this computer's own log.
+  const at = Date.now() - 7 * 3_600_000;
+  const activity = [
+    { id: "a1", profileId: "p1", targetLabel: "a tab somebody renamed", summary: "personal by its server" },
+    { id: "a2", targetLabel: "ME@192.168.1.7", summary: "personal by its address" },
+    { id: "a3", targetLabel: "my-homelab", summary: "personal by its name" },
+    { id: "a4", profileId: "s1", targetLabel: "pg-01", summary: "shared server" },
+    // A known server's id decides: a team server that shares a personal one's name is not taken for it.
+    { id: "a5", profileId: "s1", targetLabel: "my-homelab", summary: "shared by its id" },
+    { id: "a6", targetLabel: "Rules for everyone", summary: "no server" },
+  ].map((e, i) => ({ ...e, actor: "Anna", kind: "command" as const, at: at + i * 1000 }));
+  const teamIds = ["a4", "a5", "a6"];
+
+  it("is not in what the team bucket is sent", async () => {
+    const { hub, inner } = await makeHub();
+    hub.store.data.activityLog = activity;
+    const sync = inner.s3Workspace as unknown as { callbacks: { getLocalState: () => Promise<{ activityLog: Array<{ id: string }> }> } };
+    const state = await sync.callbacks.getLocalState();
+    expect(state.activityLog.map((e) => e.id)).toEqual(teamIds);
+    // This computer's own log keeps it.
+    expect(hub.store.data.activityLog).toHaveLength(activity.length);
+  }, 60_000);
+
+  it("is not handed over to the team's learning queue", async () => {
+    const { hub, inner, queued } = await makeHub();
+    hub.store.data.activityLog = activity;
+    await (inner as unknown as { queueTeamActivity: (now?: number) => Promise<void> }).queueTeamActivity(Date.now());
+    const records = queued();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toContain("shared server");
+    expect(records[0]).toContain("shared by its id");
+    expect(records[0]).not.toContain("personal by");
+    expect(records[0]).not.toContain("192.168.1.7");
+  }, 60_000);
+
+  it("is not written to the shared workspace file", async () => {
+    const { hub } = await makeHub(false);
+    hub.store.data.activityLog = activity;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-shared-file-"));
+    disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, "team.json");
+    await hub.store.syncSharedFile(file, servers);
+    const written = JSON.parse(await fs.readFile(file, "utf8")) as { activityLog: Array<{ id: string }> };
+    expect(written.activityLog.map((e) => e.id)).toEqual(teamIds);
+  }, 60_000);
+
+  it("is not put in the team's vault, and a shared server's is", async () => {
+    const { hub } = await makeHub(false);
+    const vault = vi.fn(async (_event: { targetLabel: string }) => undefined);
+    (hub.host as { recordWorkspaceActivity?: unknown }).recordWorkspaceActivity = vault;
+    const record = (hub as unknown as { recordTerminalCommandActivity: (s: unknown, line: string, c: unknown) => Promise<void> }).recordTerminalCommandActivity.bind(hub);
+    await record({ id: "t1", profileId: "p1", label: "a tab somebody renamed" }, "systemctl restart backup", { kind: "service-action", summary: "Restarted backup" });
+    await record({ id: "t2", profileId: "s1", label: "pg-01" }, "systemctl restart nginx", { kind: "service-action", summary: "Restarted nginx" });
+    expect(vault.mock.calls.map(([e]) => e.targetLabel)).toEqual(["pg-01"]);
+    expect(hub.store.data.activityLog.map((e) => e.targetLabel)).toEqual(["a tab somebody renamed", "pg-01"]);
+  }, 60_000);
+});

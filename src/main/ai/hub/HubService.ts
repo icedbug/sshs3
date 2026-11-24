@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { app, powerMonitor } from "electron";
 import type {
+  AgentChange,
   AgentUsage,
   KbPageUse,
   AgentTask,
@@ -45,6 +46,7 @@ import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
 import { safeError } from "./privacy";
+import { teamActivity } from "./personalServers";
 import { LearningQueue } from "./LearningQueue";
 import { WorkSync, type ConditionalQueueStore } from "./WorkSync";
 import { withComment, live, templateSummaries } from "./WorkBoard";
@@ -294,19 +296,7 @@ export class HubService {
           approvedBy: change.decidedBy?.name, detail: change.adminException?.reason, userId: change.adminException?.actorId,
         }, Date.now(), true);
       },
-      // A plain command that has been running for a moment: in the log as started, in case its end never comes.
-      recordStarted: (task, change) => {
-        void this.audit()
-          .append({
-            kind: task.fromOutside ? "mcp" : "command",
-            actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
-            target: change.target, taskId: task.id, changeId: change.id,
-            what: change.command || change.description,
-            outcome: "started",
-            detail: "Still running. How it ended is written when it ends.",
-          }, Date.now(), true)
-          .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
-      },
+      recordStarted: (task, change) => this.recordStarted(task, change),
       approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
       // Nobody sits at a ticket's or a schedule's run: what it waits for is told at once, not on the next look.
       asking: (task, change) => {
@@ -383,7 +373,8 @@ export class HubService {
             memories: this.store.data.memories.filter(
               (m) => m.scope !== "personal",
             ),
-            activityLog: this.store.data.activityLog ?? [],
+            // What was done on a server a person keeps to themselves stays on this computer.
+            activityLog: teamActivity(this.store.data.activityLog ?? [], [...this.getKnownServers(), ...hostServers]),
             deletedServerIds,
             deletedMemoryIds: { ...(this.store.data.deletedMemoryIds ?? {}) },
             deletedServerBy: { ...(this.store.data.deletedServerBy ?? {}) },
@@ -1281,6 +1272,20 @@ export class HubService {
     }
   }
 
+  /** A plain command that has been running for a moment: in the log as started, in case its end never comes. */
+  recordStarted(task: AgentTask, change: AgentChange): void {
+    void this.audit()
+      .append({
+        kind: task.fromOutside ? "mcp" : "command",
+        actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
+        target: change.target, taskId: task.id, changeId: change.id,
+        what: change.command || change.description,
+        outcome: "started",
+        detail: "Still running. How it ended is written when it ends.",
+      }, Date.now(), true)
+      .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+  }
+
   /**
    * What the agent tool handlers in AppActions.ts may use of the hub: the one
    * place that says which hub internals a tool call can reach.
@@ -1308,6 +1313,14 @@ export class HubService {
       changed: this.changed.bind(this),
       recheckChange: this.broker.checkCurrentPolicy.bind(this.broker),
       closeWhenRunEnds: this.closeWhenRunEnds.bind(this),
+      /**
+       * A command that is still running after a moment (the broker's `startedNoteMs`) is written in the
+       * audit log as started, as a terminal command is. Returns what to call once it has ended.
+       */
+      noteStartedAfterAWhile: (task: AgentTask, change: AgentChange): (() => void) => {
+        const timer = setTimeout(() => this.recordStarted(task, change), this.broker.startedNoteMs);
+        return () => clearTimeout(timer);
+      },
       chatFence: this.chatFence.bind(this),
       getMcpServersList: this.getMcpServersList.bind(this),
       getKbDocumentsList: this.getKbDocumentsList.bind(this),

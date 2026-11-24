@@ -424,7 +424,9 @@ export class ChatBridge {
           try {
             await this.readChannel(service, auth, connection, channel, now);
             Object.assign(channel, { lastReadAt: now, error: undefined, failures: undefined, notBefore: undefined });
-            connection.lastError = undefined;
+            // A failed read of the channel list is said until the list is read again: a channel that
+            // answers does not show the list is fine.
+            if (!this.listRetry[service]) connection.lastError = undefined;
           } catch (error) {
             const failures = (channel.failures ?? 0) + 1;
             const pause = error instanceof ChatError && error.retryAfterMs ? error.retryAfterMs : Math.min(60, 2 ** failures) * 60_000;

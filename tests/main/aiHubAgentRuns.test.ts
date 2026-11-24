@@ -98,16 +98,13 @@ const inner = (hub: Hub) =>
   };
 
 /** A terminal that answers the handshake and every command, as a shell at its prompt would. */
-function shell(hub: Hub, id: string, label: string, profileId?: string): string[] {
-  const ran: string[] = [];
+function shell(hub: Hub, id: string, label: string, profileId?: string): void {
   hub.terminals.register({ id, label, kind: "ssh", profileId }, (data: string) => {
     const n = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
     if (!n) return;
-    ran.push(/\(eval '([^']*)'\)/.exec(data)?.[1] ?? "");
     queueMicrotask(() => hub.terminals.feed(id, `\x1b]777;SSHS3;${n};BEGIN\x07ok\n\x1b]777;SSHS3;${n};END;0;/root\x07ops@${label}:~$ `));
   });
   hub.terminals.feed(id, `ops@${label}:~$ `);
-  return ran;
 }
 
 const userText = (body: string): string => {

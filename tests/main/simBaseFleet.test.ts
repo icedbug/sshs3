@@ -6,11 +6,13 @@ import { DemoStorageProvider, demoServerFiles } from "../../src/main/demo/DemoSt
 import { demoClusterState, DemoVirtualPty, executeDemoServerCommand, scriptedDemoText } from "../../src/main/demo/DemoVirtualPty";
 import { setDemoModeForTesting } from "../../src/main/demo/demoMode";
 import { HubService, type HubHost } from "../../src/main/ai/hub/HubService";
-import { getDemoSchedules, getDemoServers, getDemoTasks, getDemoWorkforceRuns } from "../../src/main/ai/hub/demoWorkspace";
+import { getDemoActivityLog, getDemoSchedules, getDemoServers, getDemoTasks, getDemoWorkforceRuns } from "../../src/main/ai/hub/demoWorkspace";
 import { simulateDemoMcpTool } from "../../src/main/ai/hub/hubHelpers";
 import { buildBaseFleet, ensureBaseFleet } from "../../src/main/sim/baseFleet";
 import { stopScenario } from "../../src/main/sim/lab";
 import { SimStorageProvider } from "../../src/main/sim/SimStorageProvider";
+import { SCRIPTED_ANSWER_NOTE, SCRIPTED_DEMO_NOTE, scriptedDemoNote } from "../../src/main/sim/scripted";
+import { commandEnvelope } from "../../src/main/ai/hub/shellAdapters";
 import { baseWorld, setBaseFleetForTesting, setBaseWorld, simWorld, type SimWorld } from "../../src/main/sim/SimWorld";
 import { StorageRegistry } from "../../src/main/storage/StorageRegistry";
 import type { AgentTask } from "../../src/shared/types/aiHub";
@@ -242,6 +244,57 @@ describe("the demo's base fleet", () => {
     expect(on("k8s-storage-cp-01", "tridentctl get backend -n trident")).toContain("tbc-ontap-nas-flexgroup-ai");
   });
 
+  it("starts as the seeded conversation and activity say: the QoS fix they propose is not on yet", () => {
+    const world = buildBaseFleet();
+    const on = (server: string, line: string): string => world.shell(world.host(server)!).run(line).output;
+    expect(on("netapp-aff-a800-01a", "volume show -vserver svm-prod-nfs -volume vol_ai_scratch_03 -fields qos-policy-group")).toContain("vol_ai_scratch_03 none");
+    for (const task of getDemoTasks()) {
+      // A change the conversation shows as made holds in the lab at the start; one that was not made does not.
+      for (const change of task.changes.filter((c) => c.check)) {
+        const holds = on("netapp-aff-a800-01a", change.check!.command).includes(change.check!.expected);
+        expect({ change: change.id, status: change.status, holds }).toEqual({ change: change.id, status: change.status, holds: change.status === "completed" });
+      }
+      const said = task.messages.map((m) => m.text).join("\n");
+      expect(said).not.toMatch(/fix applied|applied and verified|fell at once/i);
+      expect(task.verification).not.toBe("verified");
+    }
+    const qos = getDemoActivityLog().find((e) => e.id === "demo-act-ontap-qos-ai")!;
+    expect(qos.summary).not.toMatch(/\bset the QoS policy|fell from/);
+    expect(qos.summary).toContain("still 1.88 ms");
+    expect(on("netapp-aff-a800-01a", "qos statistics volume latency show -iterations 1")).toMatch(/vol_pg_prod_db01\s+4109\s+1\.88ms/);
+  });
+
+  it("says with an answer that came from the showcase's script that it is invented, in a terminal too", async () => {
+    setDemoModeForTesting(true);
+    ensureBaseFleet();
+    const refs = ["demo-netapp-aff-a800-01a", "netapp-aff-a800-01a"];
+    // As the agent's command reaches the node's terminal: framed, and read out of the frame there.
+    const pty = new DemoVirtualPty({ id: "session-1", name: "netapp-aff-a800-01a", host: "10.30.10.11", port: 22, username: "admin", authType: "password" } as never);
+    let shown = "";
+    pty.onData((data) => (shown += data));
+    await new Promise((r) => setTimeout(r, 60));
+    const run = (command: string): void => {
+      shown = "";
+      pty.write(`${commandEnvelope("bash", command, "0123456789abcdef0123456789abcdef")}\r`);
+      expect(shown, command).toContain("END;0");
+    };
+    run("storage aggregate show");
+    expect(scriptedDemoNote("storage aggregate show", ...refs)).toBe(SCRIPTED_ANSWER_NOTE);
+    // Its own state: no note.
+    run("qos policy-group show");
+    expect(scriptedDemoNote("qos policy-group show", ...refs)).toBeUndefined();
+    // The latest run of a line decides: a line answered from state after a scripted one is not marked.
+    expect(scriptedDemoNote("storage aggregate show", ...refs)).toBe(SCRIPTED_ANSWER_NOTE);
+    pty.kill();
+    // A scripted example server is marked whatever it is asked; a Linux server of the fleet only where the script answered.
+    expect(scriptedDemoNote("anything", "demo-netapp-aff-a800-01b", "netapp-aff-a800-01b")).toBe(SCRIPTED_DEMO_NOTE);
+    const worker = simWorld().shell(simWorld().host("k8s-gpu-io-worker-01")!);
+    worker.run("simulate-error");
+    worker.run("uptime");
+    expect(scriptedDemoNote("simulate-error", "demo-k8s-gpu-io-worker-01", "k8s-gpu-io-worker-01")).toBe(SCRIPTED_ANSWER_NOTE);
+    expect(scriptedDemoNote("uptime", "demo-k8s-gpu-io-worker-01", "k8s-gpu-io-worker-01")).toBeUndefined();
+  });
+
   it("holds the files the showcase's file manager showed, on every server", async () => {
     setDemoModeForTesting(true);
     ensureBaseFleet();
@@ -321,8 +374,13 @@ describe("the demo's base fleet", () => {
     const simulated = ran.results.find((r) => r.node === "netapp-aff-a800-01a")!;
     const scriptedNode = ran.results.find((r) => r.node === "netapp-aff-a800-01b")!;
     expect(simulated).toMatchObject({ source: "demo-cluster:demo-netapp-aff-a800-01a", exitCode: 0 });
-    expect(simulated.note).toBeUndefined();
+    // The simulated node's appliance answered this from the showcase's script: said so, as for the scripted node.
+    expect(simulated.note).toBe(SCRIPTED_ANSWER_NOTE);
     expect(scriptedNode.note).toMatch(/scripted examples/);
+    // What it answers from its own state carries no note.
+    const own = (await hub.broker.invoke(cap.key, { action: "sshs3_cluster_exec", payload: { cluster: "NetApp-ONTAP-Prod-SE", command: "qos policy-group show" } })) as { results: Array<{ node: string; note?: string; exitCode: number }> };
+    expect(own.results.find((r) => r.node === "netapp-aff-a800-01a")).toMatchObject({ exitCode: 0 });
+    expect(own.results.find((r) => r.node === "netapp-aff-a800-01a")!.note).toBeUndefined();
     expect(simulated.output).toContain("aggr1_nvme_prod    220TB     61.6TB     72%");
     expect(scriptedNode.output).toContain("aggr1_nvme_prod    220TB     61.6TB     72%");
 

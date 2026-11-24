@@ -662,8 +662,13 @@ export class SimShell {
   private vars = new Map<string, string>();
   /** Commands asked for that the simulation has no answer to: what to build next. */
   readonly unsupported: string[] = [];
-  /** Every line that was run, with how it ended: what a scenario is judged on. */
-  readonly history: { at: number; line: string; code: number; root: boolean }[] = [];
+  /**
+   * Every line that was run, with how it ended: what a scenario is judged on. `scripted`: some of its
+   * answer came from the demo's script, not from this server's state (programs/showcase.ts).
+   */
+  readonly history: { at: number; line: string; code: number; root: boolean; scripted?: true }[] = [];
+  /** Whether the line being run was answered, in part, from the demo's script. */
+  private fromScript = false;
 
   constructor(
     readonly host: SimHost,
@@ -688,16 +693,26 @@ export class SimShell {
     return this.commands.has(name);
   }
 
-  /** Runs one line and returns what a terminal would show, errors and output together, with the exit code. */
-  run(line: string): { output: string; code: number } {
+  /**
+   * Runs one line and returns what a terminal would show, errors and output together, with the exit code.
+   * `scripted`: some of it came from the demo's script, which a model is told (sim/scripted.ts).
+   */
+  run(line: string): { output: string; code: number; scripted?: true } {
+    this.fromScript = false;
     const result = this.exec(line, { root: false, stdin: "" });
+    const scripted = this.fromScript ? ({ scripted: true } as const) : {};
     this.lastCode = result.code;
     // What follows from the new state follows now, before the next command looks.
     this.host.settle();
     this.world?.runLaws();
-    this.history.push({ at: this.host.now(), line, code: result.code, root: /(^|[;&|({\n]\s*)sudo\b/.test(line) });
+    this.history.push({ at: this.host.now(), line, code: result.code, root: /(^|[;&|({\n]\s*)sudo\b/.test(line), ...scripted });
     this.world?.onRan?.();
-    return { output: `${result.out}${result.err}`, code: result.code };
+    return { output: `${result.out}${result.err}`, code: result.code, ...scripted };
+  }
+
+  /** Said by a command that answers from the demo's script rather than from this server's state. */
+  answeredFromScript(): void {
+    this.fromScript = true;
   }
 
   /**

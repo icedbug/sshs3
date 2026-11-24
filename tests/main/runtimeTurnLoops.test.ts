@@ -367,6 +367,29 @@ describe.each(PROTOCOLS)("a message the person sends while the agent works (%s)"
     expect(end?.output).toBe("nginx is slow because the upstream pool is exhausted.\n\napp-02 answers in 12 ms: it is not the cause.");
   });
 
+  it("brings the pictures attached to it to the model, in the same message", async () => {
+    const picture = { label: "graph.png", dataUrl: "data:image/png;base64,UElDVFVSRS1PRi1USEUtR1JBUEg=", mimeType: "image/png" };
+    const { end, model } = await run(protocol, async (request, runtime) => {
+      if (request.n === 1) {
+        expect(await runtime.steer("STEERED: this graph shows the latency", [picture])).toBe(true);
+        return { text: "Looking at it." };
+      }
+      return { text: "The graph shows the spike at 14:02." };
+    });
+    expect(end?.type).toBe("run.completed");
+    const sent = model.requests[1].items.at(-1)!;
+    // The words and the picture travel together, as the protocol carries a picture in a user message.
+    expect(sent.role).toBe("user");
+    expect(JSON.stringify(sent)).toContain("STEERED: this graph shows the latency");
+    const expected = {
+      responses: { type: "input_image", image_url: picture.dataUrl },
+      chat: { type: "image_url", image_url: { url: picture.dataUrl } },
+      anthropic: { type: "image", source: { type: "base64", media_type: "image/png", data: "UElDVFVSRS1PRi1USEUtR1JBUEg=" } },
+    } as Record<string, unknown>;
+    expect(sent.content).toEqual(expect.arrayContaining([expected[protocol] ?? expect.anything()]));
+    expect(Object.keys(expected)).toContain(protocol);
+  });
+
   it("puts the answer where it belongs in the conversation when the message comes in the middle of a turn", async () => {
     // The conversation as the hub keeps it: pieces go to the last answer, or begin one after the person's message.
     const conversation: Array<{ role: "assistant" | "user"; text: string }> = [];

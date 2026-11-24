@@ -141,6 +141,28 @@ describe("the list of the bot's channels", () => {
     await bridge.tick(at + 9 * MIN + 31 * MIN);
     expect(slack.lists()).toBe(base + 3);
   });
+
+  it("is said to have failed until it is read again, also while the channels themselves answer", async () => {
+    const { bridge, slack } = await connected();
+    await bridge.tick(NOW);
+    const error = (): string | undefined => bridge.view().find((c) => c.service === "slack")?.lastError;
+    slack.state.listFails = true;
+    // The list fails and the channel is read in the same round: the list's failure stays.
+    let at = NOW + 31 * MIN;
+    slack.say(at - MIN, "disk is full on db-1");
+    await bridge.tick(at);
+    expect(slack.asked.some((r) => r.url.includes("conversations.history"))).toBe(true);
+    expect(error()).toBeTruthy();
+    // And in the rounds after it, while the list waits to be asked again.
+    at += 6 * MIN;
+    await bridge.tick(at);
+    expect(error()).toBeTruthy();
+    // The list answers again: the failure is gone.
+    slack.state.listFails = false;
+    at += 60 * MIN;
+    await bridge.tick(at);
+    expect(error()).toBeUndefined();
+  });
 });
 
 const HOUR = 60 * MIN;

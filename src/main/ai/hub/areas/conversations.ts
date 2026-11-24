@@ -18,6 +18,7 @@ import { getBuiltinSkillsAndMemories, getDemoTasks, getDemoWorkforceRuns, isDemo
 import { type DetectedCommandActivity } from "../TerminalRegistry";
 import { scopedMemory } from "../ContextService";
 import { boundedContext, boundedPrompt, clip, maskContext, maskProviderText, safeError, workspaceHostNames } from "../privacy";
+import { personalServers } from "../personalServers";
 import { comparedWithBaseline, showsExpected } from "../ToolBroker";
 import {
   requiredText,
@@ -96,6 +97,18 @@ export class ConversationsPart {
     ].slice(-500);
   }
 
+  /**
+   * Hands an activity event to the team's vault. What was done on a server a person keeps to themselves
+   * stays in this computer's own log: the vault is the team's.
+   */
+  async shareActivity(this: HubService, event: WorkspaceActivityEvent): Promise<void> {
+    if (!this.host.recordWorkspaceActivity) return;
+    // Which servers are personal is asked of the app: at a start they may not have been read yet.
+    if (!this.getKnownServers().length) await this.collectExtraContext().catch(() => undefined);
+    if (personalServers(this.getKnownServers()).activity(event)) return;
+    await this.host.recordWorkspaceActivity(event);
+  }
+
   async recordTerminalCommandActivity(this: HubService,
     session: TerminalSession,
     commandLine: string,
@@ -133,7 +146,7 @@ export class ConversationsPart {
         }
       }
 
-      await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+      await this.shareActivity(event).catch(() => {});
       await this.syncAutoMemoryForTarget(session.profileId, session.label);
       this.s3Workspace.schedulePush();
       this.changed();
@@ -221,7 +234,7 @@ export class ConversationsPart {
         }
       }
 
-      await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+      await this.shareActivity(event).catch(() => {});
       await this.syncAutoMemoryForTarget(session?.profileId, targetLabel);
       this.s3Workspace.schedulePush();
     } catch {
@@ -594,7 +607,7 @@ export class ConversationsPart {
         // A message is read from its start: what a person says first (or an approval's instruction) is kept.
         const text = again ? "" : clip(requiredText(rawText), 16_000);
         if (active(task)) {
-          await this.runtimes.get(task.id)?.steer(text);
+          const picturesTaken = await this.runtimes.get(task.id)?.steer(text, replyImages);
           task.messages.push({
             id: crypto.randomUUID(),
             role: "user",
@@ -602,6 +615,14 @@ export class ConversationsPart {
             ...(replyImages.length > 0 ? { images: replyImages } : {}),
             at: Date.now(),
           });
+          // This agent takes words only while it works: said at once, not found out from its answer.
+          if (replyImages.length > 0 && picturesTaken === false)
+            task.messages.push({
+              id: crypto.randomUUID(),
+              role: "system",
+              text: "The pictures were not passed on to the agent while it works. Send them again when it has finished.",
+              at: Date.now(),
+            });
         } else {
           // The run has ended but may still be releasing its runtime: a reply
           // sent in that instant must not fail with "Task already running".
@@ -797,7 +818,8 @@ export class ConversationsPart {
           await this.audit().append({...event, outcome:change.rollback?.restored === true ? "rolled-back":"rollback-unverified"});
           task.updatedAt = Date.now();
         } catch (error) {
-          if (attempted) {
+          // A file the server refused to write was not written (FileTools.restoreCheckpoint): not run.
+          if (attempted && !(error as { notWritten?: boolean }).notWritten) {
             if (!change.rollback?.ran) change.rollback = { command: command || "Restore file checkpoint", ran: true, output: safeError(error) };
             await this.audit().append({ ...event, outcome: "rollback-unverified", detail: safeError(error) });
           } else {

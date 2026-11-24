@@ -3,7 +3,7 @@ import {
   type HermesEndpoint,
   type HermesModelConfig,
 } from "../HermesManager";
-import type { AgentTask } from "../../../shared/types/aiHub";
+import type { AgentMessage, AgentTask } from "../../../shared/types/aiHub";
 import { boundedContext, boundedPrompt, HUB_PROMPT_MAX } from "./privacy";
 import {
   DirectAgentRuntime,
@@ -33,7 +33,11 @@ export interface AgentRuntime {
     model: HermesModelConfig,
     onEvent: (event: RunEvent) => void,
   ): Promise<void>;
-  steer(text: string): Promise<void>;
+  /**
+   * A message the person sent while the run works. Whether the pictures went with it: a runtime that
+   * cannot take them says false, and the person is told to send them again when the run has ended.
+   */
+  steer(text: string, images?: NonNullable<AgentMessage["images"]>): Promise<boolean>;
   stop(): Promise<void>;
 }
 
@@ -162,16 +166,18 @@ export class HermesRuntime implements AgentRuntime {
     }
   }
 
-  async steer(text: string): Promise<void> {
+  async steer(text: string, images?: NonNullable<AgentMessage["images"]>): Promise<boolean> {
     if (this.direct) {
-      return this.direct.steer(text);
+      return this.direct.steer(text, images);
     }
     if (!this.runId || this.cancelled)
       throw new Error("Run is not ready for steering");
+    // The service's steer takes words only.
     await this.request(`/runs/${encodeURIComponent(this.runId)}/steer`, {
       method: "POST",
       body: JSON.stringify({ input: boundedContext(text) }),
     });
+    return !images?.length;
   }
 
   async stop(): Promise<void> {

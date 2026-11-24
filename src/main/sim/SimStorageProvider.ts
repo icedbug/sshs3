@@ -2,7 +2,20 @@ import { Readable, Writable } from "node:stream";
 import crypto from "node:crypto";
 import type { FileEntry, IStorageProvider, SpaceInfo, StorageType, WriteStreamOptions } from "../../shared/types/storage";
 import { basename, normalizePath, type SimHost } from "./SimHost";
+import type { SimShell } from "./SimShell";
 import { simWorld } from "./SimWorld";
+
+/**
+ * The shell whose rules (who may read and write what, where home is) the file manager follows on a
+ * server. One per server, made once: a new one at every call was kept by the lab for its history, so
+ * the lab's list of shells grew with every file looked at. This one never runs a line.
+ */
+const fileShells = new WeakMap<SimHost, SimShell>();
+function fileShell(host: SimHost): SimShell {
+  let shell = fileShells.get(host);
+  if (!shell) fileShells.set(host, (shell = simWorld().shell(host)));
+  return shell;
+}
 
 /**
  * The files of a simulated server, as the file manager sees them: the same
@@ -60,7 +73,7 @@ export class SimStorageProvider implements IStorageProvider {
   async createFolder(remotePath: string): Promise<void> {
     const host = this.host();
     const path = normalizePath(remotePath);
-    if (!simWorld().shell(host).mayWrite(`${path}/x`, false)) throw new Error(`EACCES: permission denied, mkdir '${path}'`);
+    if (!fileShell(host).mayWrite(`${path}/x`, false)) throw new Error(`EACCES: permission denied, mkdir '${path}'`);
     host.mkdir(path);
     host.settle();
     simWorld().worldOf(host).runLaws();
@@ -69,7 +82,7 @@ export class SimStorageProvider implements IStorageProvider {
   async delete(remotePath: string): Promise<void> {
     const host = this.host();
     const path = normalizePath(remotePath);
-    const shell = simWorld().shell(host);
+    const shell = fileShell(host);
     const all = host.read(path) ? [path] : host.under(path);
     for (const p of all) if (!shell.mayWrite(p, false)) throw new Error(`EACCES: permission denied, unlink '${p}'`);
     if (!host.read(path) && !shell.mayWrite(`${path}/x`, false)) throw new Error(`EACCES: permission denied, rmdir '${path}'`);
@@ -84,7 +97,7 @@ export class SimStorageProvider implements IStorageProvider {
     const to = normalizePath(newPath);
     const file = host.read(from);
     if (!file) throw new Error(host.isDir(from) ? "Folders of a simulated server are renamed in its terminal (mv)." : `ENOENT: '${from}'`);
-    const shell = simWorld().shell(host);
+    const shell = fileShell(host);
     if (!shell.mayWrite(from, false) || !shell.mayWrite(to, false)) throw new Error(`EACCES: permission denied, rename '${from}'`);
     host.write(to, file.content, { pad: file.pad, mode: file.mode, owner: file.owner });
     host.remove(from);
@@ -97,14 +110,14 @@ export class SimStorageProvider implements IStorageProvider {
     const path = normalizePath(remotePath);
     const file = host.read(path);
     if (!file) throw new Error(`ENOENT: no such file '${path}'`);
-    if (!simWorld().shell(host).mayRead(path, false)) throw new Error(`EACCES: permission denied, open '${path}'`);
+    if (!fileShell(host).mayRead(path, false)) throw new Error(`EACCES: permission denied, open '${path}'`);
     return Buffer.from(file.content, "utf8");
   }
 
   async writeFile(remotePath: string, data: Buffer | Uint8Array, _options?: WriteStreamOptions): Promise<void> {
     const host = this.host();
     const path = normalizePath(remotePath);
-    const wrong = simWorld().shell(host).writeFile(path, Buffer.from(data).toString("utf8"), false, false);
+    const wrong = fileShell(host).writeFile(path, Buffer.from(data).toString("utf8"), false, false);
     if (wrong) throw new Error(`${wrong === "Permission denied" ? "EACCES" : wrong === "No space left on device" ? "ENOSPC" : "ENOENT"}: ${wrong.toLowerCase()}, open '${path}'`);
     host.settle();
     simWorld().worldOf(host).runLaws();
@@ -133,7 +146,7 @@ export class SimStorageProvider implements IStorageProvider {
   }
 
   async getHomeDir(): Promise<string> {
-    return simWorld().shell(this.host()).home();
+    return fileShell(this.host()).home();
   }
 
   async getSpace(): Promise<SpaceInfo | undefined> {

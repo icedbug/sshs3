@@ -150,7 +150,8 @@ describe("the team bucket's secret key", () => {
       const approving = (async () => {
         for (let i = 0; i < 400; i++) {
           const waiting = task.changes.find((c) => c.status === "pending");
-          if (waiting) await hub.request({ action: "approve", taskId: task.id, changeId: waiting.id, approved: true }).catch(() => undefined);
+          // A card that takes keys is answered with what was typed on it: here nothing, so the saved ones stay.
+          if (waiting) await hub.request({ action: "approve", taskId: task.id, changeId: waiting.id, approved: true, ...(waiting.secretFields?.length ? { secrets: {} } : {}) }).catch(() => undefined);
           if (await Promise.race([asked.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), 10))])) return;
         }
       })();
@@ -166,7 +167,7 @@ describe("the team bucket's secret key", () => {
     const sync = "sshs3_manage_s3_and_sync";
     await call(sync, { operation: "status" });
     await call(sync, { operation: "sync_now" });
-    await call(sync, { operation: "configure_s3_workspace", bucket: "team-bucket", accessKeyId: "TEAMKEYID0000000" });
+    await call(sync, { operation: "configure_s3_workspace", bucket: "team-bucket" });
     await call(sync, { operation: "disconnect_s3_workspace" });
     await call(sync, { operation: "list_dir_sync_profiles" });
     // Every operation of every management tool that only reads. The ones that start a run of their own

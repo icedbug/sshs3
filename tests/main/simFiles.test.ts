@@ -42,6 +42,22 @@ describe("the file manager on a simulated server", () => {
     await expect(files.readFile("/nope")).rejects.toThrow("ENOENT");
   });
 
+  it("keeps no new shell in the lab for every file it looks at", async () => {
+    const { world, files } = open();
+    const before = world.shells.length;
+    for (let i = 0; i < 50; i++) {
+      await files.writeFile("/tmp/note", Buffer.from(`round ${i}\n`));
+      await files.readFile("/tmp/note");
+      await files.createFolder(`/tmp/dir-${i}`);
+      await files.delete(`/tmp/dir-${i}`);
+      await files.getHomeDir();
+    }
+    // One for the server, made once: the lab's list of shells does not grow with every call.
+    expect(world.shells.length - before).toBeLessThanOrEqual(1);
+    // And what the lab says was run there is still only what its terminals ran.
+    expect(world.ran(world.host("pg-prod-db01")!)).toEqual([]);
+  });
+
   it("says so when the scenario has ended", async () => {
     const { files } = open();
     stopScenario();

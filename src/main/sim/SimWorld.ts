@@ -115,7 +115,7 @@ export class SimWorld {
   }
 
   /** Every line run on a host, in any shell, oldest first. */
-  ran(host: SimHost): { at: number; line: string; code: number; root: boolean }[] {
+  ran(host: SimHost): SimShell["history"] {
     return this.shells
       .filter((s) => s.host === host)
       .flatMap((s) => s.history)

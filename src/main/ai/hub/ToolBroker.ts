@@ -1381,7 +1381,7 @@ export class ToolBroker {
           if (request.action === "verify")
             task.verification = checkPassed ? "verified" : "incomplete";
           else task.verification = "not-verified";
-          const demoNote = scriptedDemoNote(this.terminals.get(target.sessionId)?.profileId, target.label);
+          const demoNote = scriptedDemoNote(request.command, this.terminals.get(target.sessionId)?.profileId, target.label);
           this.deps.activity?.(task, change, target.sessionId);
           this.deps.changed();
           // What the terminal printed before the command began is not its output: named as what it is.
@@ -1401,7 +1401,7 @@ export class ToolBroker {
                   personNote: `Approved with a note from the person: ${change.decisionNote}`,
                 }
               : {}),
-            // A scripted example server of the demo lab: its output is invented, and the model is told so.
+            // A scripted example server of the demo lab, or an answer from the lab's script: invented, and the model is told so.
             ...(demoNote ? { note: demoNote } : {}),
             source: `terminal:${target.sessionId}`,
             sourceLabel: target.label,

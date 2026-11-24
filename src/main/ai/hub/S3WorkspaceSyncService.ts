@@ -72,15 +72,6 @@ export interface ClientWorkspacePresenceEntry extends WorkspacePresenceEntry {
 
 export interface S3WorkspaceInviteValidationResult {
   valid: boolean;
-  version: 1 | 2;
-  expired?: boolean;
-  revoked?: boolean;
-  hasRawSecret?: boolean;
-  warning?: string;
-  tokenId?: string;
-  inviteToken?: string;
-  issuedAt?: number;
-  expiresAt?: number;
   config?: Partial<S3WorkspaceConfig>;
   error?: string;
 }
@@ -156,19 +147,17 @@ export function encodeS3WorkspaceInvite(config: S3WorkspaceConfig): string {
   return `${S3_INVITE_PREFIX}${encoded}`;
 }
 
-export function validateS3WorkspaceInvite(
-  inviteCode: string,
-  options: {
-    now?: number;
-    revokedTokenIds?: Set<string> | readonly string[];
-  } = {},
-): S3WorkspaceInviteValidationResult {
+/**
+ * Reads an invite code made by `encodeS3WorkspaceInvite`. Only that kind exists: a code of another
+ * version is refused rather than half read, which would connect the bucket without its key.
+ */
+export function validateS3WorkspaceInvite(inviteCode: string): S3WorkspaceInviteValidationResult {
   const trimmed = inviteCode.trim();
   const rawBase64 = trimmed.startsWith(S3_INVITE_PREFIX)
     ? trimmed.slice(S3_INVITE_PREFIX.length).trim()
     : trimmed;
   if (!rawBase64) {
-    return { valid: false, version: 1, error: "The S3 invite code is empty" };
+    return { valid: false, error: "The S3 invite code is empty" };
   }
   let parsed: Record<string, unknown>;
   try {
@@ -179,8 +168,11 @@ export function validateS3WorkspaceInvite(
       const json = Buffer.from(rawBase64, "base64").toString("utf8");
       parsed = JSON.parse(json) as Record<string, unknown>;
     } catch {
-      return { valid: false, version: 1, error: "The S3 invite code could not be decoded" };
+      return { valid: false, error: "The S3 invite code could not be decoded" };
     }
+  }
+  if (parsed.v !== undefined && parsed.v !== 1) {
+    return { valid: false, error: "This S3 invite code is of a kind this app does not read. Ask for a new one." };
   }
   if (
     typeof parsed.bucket !== "string" ||
@@ -188,17 +180,8 @@ export function validateS3WorkspaceInvite(
     typeof parsed.accessKeyId !== "string" ||
     !parsed.accessKeyId.trim()
   ) {
-    return {
-      valid: false,
-      version: parsed.v === 2 ? 2 : 1,
-      error: "The S3 invite code has no bucket or access key id",
-    };
+    return { valid: false, error: "The S3 invite code has no bucket or access key id" };
   }
-  const hasRawSecret =
-    typeof parsed.secretAccessKey === "string" && parsed.secretAccessKey.length > 0;
-  const rawSecretWarning = hasRawSecret
-    ? "This S3 workspace invite embeds a raw secretAccessKey; replace it with a short-lived revocable invite token."
-    : undefined;
   const config: Partial<S3WorkspaceConfig> = {
     enabled: true,
     endpoint:
@@ -223,96 +206,13 @@ export function validateS3WorkspaceInvite(
         ? parsed.forcePathStyle
         : true,
   };
-
-  const isV2 = parsed.v === 2 || typeof parsed.inviteToken === "string";
-  if (!isV2) {
-    return {
-      valid: true,
-      version: 1,
-      hasRawSecret,
-      warning: rawSecretWarning,
-      config,
-    };
-  }
-
-  const tokenId = typeof parsed.tokenId === "string" ? parsed.tokenId.trim() : "";
-  const inviteToken = typeof parsed.inviteToken === "string" ? parsed.inviteToken.trim() : "";
-  const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : Number.NaN;
-  const issuedAt = typeof parsed.issuedAt === "number" ? parsed.issuedAt : undefined;
-  if (!tokenId || !inviteToken || !Number.isFinite(expiresAt)) {
-    return {
-      valid: false,
-      version: 2,
-      hasRawSecret,
-      warning: rawSecretWarning,
-      error: "The S3 invite token is missing required token metadata",
-    };
-  }
-  const now = options.now ?? Date.now();
-  const expired = now >= expiresAt;
-  const revokedSet =
-    options.revokedTokenIds instanceof Set
-      ? options.revokedTokenIds
-      : new Set(options.revokedTokenIds ?? []);
-  const revoked = revokedSet.has(tokenId);
-  if (revoked) {
-    return {
-      valid: false,
-      version: 2,
-      expired,
-      revoked: true,
-      hasRawSecret,
-      warning: rawSecretWarning,
-      tokenId,
-      inviteToken,
-      issuedAt,
-      expiresAt,
-      error: "This S3 invite token has been revoked",
-    };
-  }
-  if (expired) {
-    return {
-      valid: false,
-      version: 2,
-      expired: true,
-      revoked: false,
-      hasRawSecret,
-      warning: rawSecretWarning,
-      tokenId,
-      inviteToken,
-      issuedAt,
-      expiresAt,
-      error: "This S3 invite token has expired",
-    };
-  }
-  return {
-    valid: true,
-    version: 2,
-    expired: false,
-    revoked: false,
-    hasRawSecret,
-    warning: rawSecretWarning,
-    tokenId,
-    inviteToken,
-    issuedAt,
-    expiresAt,
-    config,
-  };
+  return { valid: true, config };
 }
 
-export function decodeS3WorkspaceInvite(
-  inviteCode: string,
-  options?: {
-    now?: number;
-    revokedTokenIds?: Set<string> | readonly string[];
-  },
-): Partial<S3WorkspaceConfig> {
-  const validation = validateS3WorkspaceInvite(inviteCode, options);
+export function decodeS3WorkspaceInvite(inviteCode: string): Partial<S3WorkspaceConfig> {
+  const validation = validateS3WorkspaceInvite(inviteCode);
   if (!validation.valid || !validation.config) {
     throw new Error(validation.error ?? "The S3 invite code could not be decoded");
-  }
-  if (validation.hasRawSecret && validation.warning) {
-    log.warn(validation.warning);
   }
   return validation.config;
 }

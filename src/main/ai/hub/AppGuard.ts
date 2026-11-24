@@ -431,11 +431,27 @@ export function guardAsk(
     return undefined;
   }
 
-  if (tool === "sshs3_manage_s3_and_sync" && (op === "configure_s3_workspace" || op === "disconnect_s3_workspace"))
-    return {
-      title: op === "configure_s3_workspace" ? "Change where the team's workspace is synced to" : "Disconnect the team's shared workspace",
-      detail: show(payload, ["endpoint", "region", "bucket", "prefix", "accessKeyId", "inviteCode"]).replace(/^(inviteCode): .*$/m, "$1: (given)") || op,
-    };
+  if (tool === "sshs3_manage_s3_and_sync" && op === "disconnect_s3_workspace")
+    return { title: "Disconnect the team's shared workspace", detail: op };
+  // The keys and the invite code (which holds them) are typed on the card: a call that carries one is refused
+  // before anybody is asked (AppActions.ts, refuseCarriedSecrets).
+  if (tool === "sshs3_manage_s3_and_sync" && op === "configure_s3_workspace") {
+    const where = show(payload, ["endpoint", "region", "bucket", "prefix", "enabled"]);
+    return has(payload, "bucket")
+      ? {
+          title: "Change where the team's workspace is synced to",
+          detail: lines(where, "Type the bucket's keys below."),
+          secrets: askFor([
+            { key: "accessKeyId", label: "the access key ID", optional: true },
+            { key: "secretAccessKey", label: "the secret access key", optional: true },
+          ]),
+        }
+      : {
+          title: "Connect the team's shared workspace with an invite code",
+          detail: lines(where, "Type the invite code below. It names the bucket and holds its keys."),
+          secrets: askFor([{ key: "inviteCode", label: "the invite code" }]),
+        };
+  }
 
   if (tool === "sshs3_manage_s3_and_sync" && op === "save_dir_sync_profile")
     return {

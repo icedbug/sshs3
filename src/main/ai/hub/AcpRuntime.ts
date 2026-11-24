@@ -908,7 +908,7 @@ export class AcpRuntime implements AgentRuntime {
     });
   }
 
-  async steer(): Promise<void> {
+  async steer(): Promise<boolean> {
     throw new Error("An external agent cannot be given a message mid-run. Stop it, then reply.");
   }
 

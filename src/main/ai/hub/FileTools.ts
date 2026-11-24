@@ -535,12 +535,30 @@ export class FileTools {
     }
 
     options?.recheck?.();
-    await this.bridge.fileEditorService.saveFile(
-      this.bridge.storageRegistry,
-      providerId,
-      filePath,
-      change.before,
-    );
+    try {
+      await this.bridge.fileEditorService.saveFile(
+        this.bridge.storageRegistry,
+        providerId,
+        filePath,
+        change.before,
+      );
+    } catch (error) {
+      // A write the server refused to begin (no permission, a read-only file system, a folder that is
+      // gone) wrote nothing, as does one after which the file reads as it did: the rollback did not
+      // run and can be tried again. The caller is told so (`notWritten`) and does not record it as run.
+      const refused = refusedBeforeWriting(error);
+      let now: string | undefined;
+      try {
+        now = await this.readUtf8(providerId, filePath);
+      } catch {
+        now = undefined;
+      }
+      if (now === current || (refused && now === undefined)) {
+        const local = this.bridge.storageRegistry.get?.(providerId)?.type === "local";
+        throw Object.assign(new Error(notWritten(error, refused, filePath, local).shown, { cause: error }), { notWritten: true });
+      }
+      throw error;
+    }
     const verify = await this.readUtf8(providerId, filePath);
     const verifyHash = sha256(verify);
     if (verifyHash !== expectedBeforeHash) {

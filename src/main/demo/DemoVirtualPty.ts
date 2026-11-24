@@ -70,6 +70,18 @@ export function scriptedDemoText(hostOrName: string, rawCmd: string): { text: st
   return answer && { text: answer.output.replace(/\u001b\[[0-9;]*m/g, "").replace(/\r\n/g, "\n"), exitCode: answer.exitCode };
 }
 
+/** The programs the script answers with the node's diagnostics (uptime, disks, memory). */
+const NODE_DIAGNOSTICS = new Set(['uptime', 'df', 'free', 'iostat', 'uname', 'systemctl', 'ls']);
+
+/** The program each command of a line runs: the first word of each part between `;`, `&&`, `||` and `|`, after `sudo`. */
+function commandWords(line: string): string[] {
+  return line
+    .split(/&&|\|\||[;|]/)
+    .map((part) => part.trim().split(/\s+/))
+    .map((words) => (words[0] === 'sudo' ? words[1] : words[0]) ?? '')
+    .filter(Boolean);
+}
+
 /**
  * What the showcase's script says to a command, or nothing when it has no answer of its own for it.
  * The base fleet's simulated servers answer the appliances' own commands from here, so they say what
@@ -480,16 +492,9 @@ export function scriptedDemoAnswer(
     };
   }
 
-  // Generic Linux / Storage Node diagnostics
-  if (
-    lower.includes('uptime') ||
-    lower.includes('df -h') ||
-    lower.includes('free -h') ||
-    lower.includes('iostat') ||
-    lower.includes('uname') ||
-    lower.includes('systemctl') ||
-    lower.includes('ls')
-  ) {
+  // Generic Linux / Storage Node diagnostics. By the command a line runs, not by what it contains:
+  // `false`, `echo tools` or `helm ls` are none of these.
+  if (commandWords(lower).some((word) => NODE_DIAGNOSTICS.has(word))) {
     if (isOntap) {
       return {
         exitCode: 0,

@@ -908,4 +908,37 @@ describe("FileTools overhaul", () => {
       beforeHash: initialHash,
     });
   });
+
+  it("says a checkpoint restore the server refused wrote nothing, and one that wrote in part did not", async () => {
+    const files = new Map<string, string>([["/etc/app.conf", "port=8080\n"]]);
+    const terminals = new TerminalRegistry();
+    disposals.push(() => terminals.dispose());
+    const session = await setupArmedTerminal(terminals, "ssh-1", "App");
+    const { bridge } = makeMockBridge(files);
+    const ft = new FileTools(bridge as never, terminals, () => {});
+    const task = makeTask({ target: { sessionId: "ssh-1", generation: session.generation, label: "App" } });
+    const seen: AgentChange[] = [];
+    await ft.invoke(task, { action: "file-patch", path: "/etc/app.conf", expectedHash: sha256("port=8080\n"), edits: [{ oldText: "8080", newText: "9090" }] }, async (c) => {
+      c.status = "approved";
+      seen.push(c);
+    });
+    const change = seen[0]!;
+    expect(files.get("/etc/app.conf")).toBe("port=9090\n");
+
+    // The server refuses to begin the write: nothing was written, and the caller is told so.
+    bridge.fileEditorService.saveFile.mockRejectedValueOnce(Object.assign(new Error("EACCES: permission denied, open '/etc/app.conf'"), { code: "EACCES" }));
+    const refused = await ft.restoreCheckpoint(change, { task }).catch((e: Error & { notWritten?: boolean }) => e);
+    expect(refused).toMatchObject({ notWritten: true, message: expect.stringMatching(/^Not written: .*may not write this file.*The file is as it was\.$/) });
+    expect(files.get("/etc/app.conf")).toBe("port=9090\n");
+    expect(change.rollback).toBeUndefined();
+
+    // A write that changed the file before it failed is not "not written".
+    bridge.fileEditorService.saveFile.mockImplementationOnce(async (_r: unknown, _p: string, path: string) => {
+      files.set(path, "port=");
+      throw new Error("Disk full during write");
+    });
+    const partial = await ft.restoreCheckpoint(change, { task, force: true }).catch((e: Error & { notWritten?: boolean }) => e);
+    expect(partial).toMatchObject({ message: "Disk full during write" });
+    expect((partial as { notWritten?: boolean }).notWritten).toBeUndefined();
+  });
 });

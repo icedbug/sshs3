@@ -909,7 +909,7 @@ export class SafetyPart {
           // Who changed the rules is the team's business as well as the log's.
           const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor: await this.resolveActorName(), targetLabel: "Safety rules", kind: "note", summary: clip(`Changed the safety rules: ${moved.join("; ")}`, 400) };
           this.appendActivityEvent(event);
-          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+          await this.shareActivity(event).catch(() => {});
         }
         if (moved.length) {
           this.store.data.safetyPolicyChanged = { by: await this.resolveActorName(), at: Date.now() };
@@ -969,7 +969,7 @@ export class SafetyPart {
         // Who changed the rules for everyone is the team's business as well as the log's.
         const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: now, actor, targetLabel: "Rules for everyone", kind: "note", summary: clip(`Changed the rules for everyone on this server: ${moved.join("; ")}`, 400) };
         this.appendActivityEvent(event);
-        await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        await this.shareActivity(event).catch(() => {});
         void this.audit()
           .append({ kind: "setting", actor, target: "everyone on this server", what: `Rules for everyone: ${moved.join("; ")}`, outcome: "completed" })
           .catch((e) => log.warn("Could not write to the audit log", safeError(e)));

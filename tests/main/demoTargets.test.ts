@@ -10,7 +10,7 @@ import { SFTPStorageProvider } from "../../src/main/storage/SFTPStorageProvider"
 import { S3StorageProvider } from "../../src/main/storage/S3StorageProvider";
 import { SSHPtyManager } from "../../src/main/ssh/SSHPtyManager";
 import { McpClientManager } from "../../src/main/ai/hub/McpClientManager";
-import { setBaseFleetForTesting } from "../../src/main/sim/SimWorld";
+import { setBaseFleetForTesting, simWorld } from "../../src/main/sim/SimWorld";
 import type { HubHost } from "../../src/main/ai/hub/HubService";
 import type { AgentTask, WorkspaceServerSummary } from "../../src/shared/types/aiHub";
 import type { SSHConnectionConfig } from "../../src/shared/types/ssh";
@@ -307,6 +307,8 @@ describe("AI tools on demo targets", () => {
 
   it("scripts storage results only when a demo target is involved; real targets take the real path", async () => {
     setDemoModeForTesting(true);
+    // This is about the scripted example servers. The base fleet simulates this one: see the next test.
+    setBaseFleetForTesting(false);
     const storageOps = vi.fn(async (_input: { targetA: string }) => ({ ok: true, real: true }));
     const hub = await createHub({ storageOps });
     const cap = await hub.broker.issue(autonomousTask("task-demo-storage"));
@@ -317,6 +319,8 @@ describe("AI tools on demo targets", () => {
       payload: { operation: "list_files", targetA: "netapp-aff-a800-01a", path: "/etc" },
     });
     expect(demoRes).toMatchObject({ ok: true, operation: "list_files", target: "netapp-aff-a800-01a" });
+    // What it lists is invented, and the model is told so with it.
+    expect((demoRes as { note?: string }).note).toMatch(/scripted examples: what it prints is invented and never changes/);
     expect(storageOps).not.toHaveBeenCalled();
 
     const realRes = await hub.broker.invoke(cap.key, {
@@ -326,6 +330,31 @@ describe("AI tools on demo targets", () => {
     expect(realRes).toEqual({ ok: true, real: true });
     expect(storageOps).toHaveBeenCalledTimes(1);
     expect(storageOps).toHaveBeenCalledWith(expect.objectContaining({ targetA: "srv-lab-ontap" }));
+  });
+
+  it("reads a simulated server's own files, not a script, when the base fleet simulates it", async () => {
+    setDemoModeForTesting(true);
+    // As the app does it (createHub): the storage registry gives a demo server the base fleet holds its lab files.
+    const registry = new StorageRegistry();
+    disposals.push(() => registry.disconnectAll());
+    const storageOps = vi.fn(async (input: { operation: string; targetA: string; pathA: string }) => {
+      const server = servers.find((s) => s.name === input.targetA || s.id === input.targetA)!;
+      const provider = await registry.getOrCreate({ id: `sftp-${server.id}`, name: server.name, type: "sftp", sftpConfig: { id: server.id, name: server.name, host: server.host, port: 22, username: server.username, authType: "agent" } });
+      return input.operation === "list_files"
+        ? { ok: true, entries: (await provider.list(input.pathA)).map((e) => e.name) }
+        : { ok: true, content: (await provider.readFile!(input.pathA)).toString("utf8") };
+    });
+    const hub = await createHub({ storageOps });
+    const cap = await hub.broker.issue(autonomousTask("task-demo-storage-sim"));
+    const ask = (payload: Record<string, unknown>) => hub.broker.invoke(cap.key, { action: "sshs3_storage_ops", payload }) as Promise<{ entries?: string[]; content?: string; note?: string }>;
+
+    // A file put on the simulated server is there at the next look: the server's state, not a script.
+    simWorld().host("netapp-aff-a800-01a")!.write("/tmp/lab-note.conf", "written-in-the-lab\n", { owner: "admin" });
+    const listed = await ask({ operation: "list_files", targetA: "netapp-aff-a800-01a", path: "/tmp" });
+    expect(listed.entries).toContain("lab-note.conf");
+    expect(listed.note).toBeUndefined();
+    expect((await ask({ operation: "read_remote_file", targetA: "netapp-aff-a800-01a", path: "/tmp/lab-note.conf" })).content).toBe("written-in-the-lab\n");
+    expect(storageOps).toHaveBeenCalledTimes(2);
   });
 
   it("answers demo MCP fixtures from their script without starting or contacting them", async () => {

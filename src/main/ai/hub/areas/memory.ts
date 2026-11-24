@@ -21,6 +21,7 @@ import { boundedContext, clip, safeError } from "../privacy";
 import { LearningQueue } from "../LearningQueue";
 import { removedMessage } from "../WorkBoard";
 import { firstActivityCursor, nextActivityBatch } from "../ActivityBatcher";
+import { personalServers, teamActivity } from "../personalServers";
 import {
   MAX_STORED_PROPOSALS,
   activityTranscript,
@@ -61,7 +62,7 @@ export class MemoryPart {
     if (activity) {
       const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor, targetLabel: clip(title, 120), kind: "note", summary: what };
       this.appendActivityEvent(event);
-      await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+      await this.shareActivity(event).catch(() => {});
     }
     if (isDemoMode()) return;
     await this.audit()
@@ -151,20 +152,11 @@ export class MemoryPart {
    * the server's name or address afterwards.
    */
   onPersonalServer(this: HubService, task: AgentTask): boolean {
-    const personal = this.getKnownServers().filter((s) => s.shared === false);
-    if (!personal.length) return false;
-    const ids = new Set(personal.map((s) => s.id));
-    const names = new Set(
-      personal
-        .flatMap((s) => [s.name, s.host, s.username && s.host ? `${s.username}@${s.host}` : ""])
-        .filter(Boolean)
-        .map((v) => v.trim().toLowerCase()),
-    );
-    const named = (label: string | undefined): boolean => Boolean(label && names.has(label.trim().toLowerCase()));
-    const open = (sessionId: string | undefined): boolean => {
-      const profileId = sessionId ? this.terminals.get(sessionId)?.profileId : undefined;
-      return Boolean(profileId && ids.has(profileId));
-    };
+    const personal = personalServers(this.getKnownServers());
+    if (!personal.any) return false;
+    const named = personal.named;
+    const open = (sessionId: string | undefined): boolean =>
+      personal.id(sessionId ? this.terminals.get(sessionId)?.profileId : undefined);
     if (open(task.target?.sessionId) || named(task.target?.label)) return true;
     // A command or a file change on a personal server, whatever the conversation's own terminal was.
     if (task.changes.some((c) => c.kind !== "setting" && named(c.target))) return true;
@@ -282,7 +274,10 @@ export class MemoryPart {
     } catch {
       // An unreadable cursor is treated as none: the first one is written below.
     }
-    const batch = nextActivityBatch(this.store.data.activityLog ?? [], cursor, now);
+    // What was done on a personal server is not the team's. Which servers are personal is asked of the
+    // app: at a start they may not have been read yet.
+    if (!this.getKnownServers().length) await this.collectExtraContext().catch(() => undefined);
+    const batch = nextActivityBatch(teamActivity(this.store.data.activityLog ?? [], this.getKnownServers()), cursor, now);
     if (!batch) return;
     if (batch.events.length > 0) {
       const clock = (at: number): string =>
@@ -714,7 +709,7 @@ export class MemoryPart {
             summary: `Changed ${savedMemory.author}'s memory "${clip(savedMemory.title, 120)}"`,
           };
           this.appendActivityEvent(event);
-          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+          await this.shareActivity(event).catch(() => {});
         }
         break;
       }
@@ -928,7 +923,7 @@ export class MemoryPart {
             : undefined,
         };
         this.appendActivityEvent(event);
-        await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        await this.shareActivity(event).catch(() => {});
         this.s3Workspace.schedulePush(400);
         break;
       }

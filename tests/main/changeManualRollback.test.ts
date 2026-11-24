@@ -18,7 +18,7 @@ afterEach(async () => {
   for (const dispose of disposals.splice(0)) await dispose();
 });
 
-async function hubWithChange() {
+async function hubWithChange(host: Record<string, unknown> = {}) {
   const { HubService } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
@@ -34,6 +34,7 @@ async function hubWithChange() {
       workspaceServers: async () => [],
       closeSession: () => {},
       manageAppSettings: async () => ({}),
+      ...host,
     } as never,
     dir,
   );
@@ -76,6 +77,18 @@ async function hubWithChange() {
         check: { command: "systemctl is-active nginx", expected: "active", before: true, baselineHash: observationHash("chg-1", { exitCode: 0, output: "active" }) },
         rollback: { command: "cp /etc/nginx/nginx.conf.bak /etc/nginx/nginx.conf" },
       },
+      {
+        id: "chg-file",
+        targetKey: JSON.stringify([session.id, session.generation]),
+        kind: "file",
+        target: "web-1",
+        description: "Edit /etc/app.conf",
+        before: "port=8080\n",
+        after: "port=9090\n",
+        status: "completed",
+        audited: true,
+        at: Date.now(),
+      },
     ],
     sources: [],
     createdAt: Date.now(),
@@ -91,6 +104,28 @@ async function hubWithChange() {
 }
 
 describe("a rollback started by a person", () => {
+  it("of a file is not recorded as run when the server refused to write it, and can be tried again", async () => {
+    let refuse = true;
+    const restoreCheckpoint = async (_change: unknown, opts: { recheck?: () => void }) => {
+      opts.recheck?.();
+      // What FileTools.restoreCheckpoint throws when the write was refused before anything was written.
+      if (refuse) throw Object.assign(new Error("Not written: the account sshs3 logs in with may not write this file (EACCES). The file is as it was."), { notWritten: true });
+      return { restored: true, path: "/etc/app.conf", hash: "h", beforeHash: "h" };
+    };
+    const { hub, task } = await hubWithChange({ restoreCheckpoint });
+    const fileOutcomes = async () => (await hub.audit().recent(20)).filter((e) => e.changeId === "chg-file").map((e) => e.outcome).reverse();
+    await expect(hub.request({ action: "restore-checkpoint", taskId: "task-1", changeId: "chg-file" })).rejects.toThrow(/^Not written: /);
+    const change = task.changes.find((c) => c.id === "chg-file")!;
+    expect(change.rollback).toBeUndefined();
+    expect(await fileOutcomes()).toEqual(["manual-rollback-intent", "rollback-not-run"]);
+
+    // The person fixes what was in the way and tries again.
+    refuse = false;
+    await hub.request({ action: "restore-checkpoint", taskId: "task-1", changeId: "chg-file" });
+    expect(change.rollback).toMatchObject({ ran: true, restored: true });
+    expect(await fileOutcomes()).toEqual(["manual-rollback-intent", "rollback-not-run", "manual-rollback-intent", "rolled-back"]);
+  });
+
   it("is not recorded as run when nothing was typed, says so in the log, and can be tried again", async () => {
     const { hub, task, typed, outcomes } = await hubWithChange();
     // The person has half a line at the prompt of that terminal.

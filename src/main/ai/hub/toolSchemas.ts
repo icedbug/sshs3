@@ -1,5 +1,6 @@
 import { RUNNER_ENV_NOTE } from "./AcpRuntime";
 import { PLAN_TOOL } from "./PlanMode";
+import { CONTEXT_WINDOW_LEAST, CONTEXT_WINDOW_MOST } from "../../../shared/contextWindow";
 
 /** One tool as it is offered to a model: its name, what it does, and the JSON schema of its arguments. */
 export interface FunctionToolDef {
@@ -381,7 +382,7 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_manage_s3_and_sync",
     description:
-      "Check S3 Team Workspace sync status, saved S3 bucket profiles, and Directory Sync profiles; configure or disconnect the S3 Team Workspace bucket; trigger an immediate S3 Team Workspace sync; create/update/delete an S3 bucket profile; or create/update/delete a saved Directory Sync profile in sshs3.",
+      "Check S3 Team Workspace sync status, saved S3 bucket profiles, and Directory Sync profiles; configure or disconnect the S3 Team Workspace bucket; trigger an immediate S3 Team Workspace sync; create/update/delete an S3 bucket profile; or create/update/delete a saved Directory Sync profile in sshs3. configure_s3_workspace never takes the bucket's keys or an invite code: the person types them on the approval card. Give the bucket, or leave it out to connect with an invite code.",
     parameters: {
       type: "object",
       properties: {
@@ -406,8 +407,8 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
         region: { type: "string", description: "S3 region (e.g. 'eu-north-1', 'us-east-1', 'auto')." },
         bucket: { type: "string", description: "Bucket name." },
         prefix: { type: "string", description: "S3 Team Workspace key prefix (e.g. 'sshs3-workspace' or 'team-prod')." },
-        accessKeyId: { type: "string", description: "Access Key ID." },
-        secretAccessKey: { type: "string", description: "Secret Access Key." },
+        accessKeyId: { type: "string", description: "Access Key ID, for upsert_s3_profile. Not for configure_s3_workspace." },
+        secretAccessKey: { type: "string", description: "Secret Access Key, for upsert_s3_profile. Not for configure_s3_workspace." },
         forcePathStyle: { type: "boolean", description: "Whether to use path-style S3 URLs (true for StorageGRID / MinIO / Ceph RGW)." },
         group: { type: "string", description: "Optional folder/group name for the S3 profile." },
         authMethod: {
@@ -418,7 +419,6 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
         awsProfile: { type: "string", description: "AWS CLI profile name when authMethod is 'awsProfile' or 'awsSso'." },
         actorName: { type: "string", description: "Actor / team handle when configuring S3 Team Workspace." },
         enabled: { type: "boolean", description: "Whether S3 Team Workspace sync is enabled." },
-        inviteCode: { type: "string", description: "Optional base64 S3 Team Workspace invite code to import." },
         sourceProviderId: {
           type: "string",
           description: "Source server/S3 profile ID or name (or 'local') for Directory Sync profile.",
@@ -569,7 +569,7 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
         aiProvider: { type: "string", enum: ["openai-codex", "anthropic", "openai-compatible"], description: "Active AI model provider." },
         aiModel: { type: "string", description: "Active AI model name (e.g. 'gpt-6.1-sol', 'gpt-6.1-sol-900k', 'claude-sonnet-4-5')." },
         aiBaseUrl: { type: "string", description: "Custom API base URL for openai-compatible or custom endpoints." },
-        contextWindowTokens: { type: "number", description: "AI context window budget in tokens (16000 to 900000)." },
+        contextWindowTokens: { type: "number", description: `AI context window in tokens, a whole number from ${CONTEXT_WINDOW_LEAST} to ${CONTEXT_WINDOW_MOST}. An agent cannot work in less.` },
         terminalContextChars: { type: "number", description: "Max characters of terminal scrollback per session included in AI context (1000 to 64000)." },
         maxOutputTokens: { type: "number", description: "Max output tokens per AI model turn (512 to 32768)." },
         reasoningEffort: { type: "string", enum: ["low", "medium", "high"], description: "AI reasoning effort level." },

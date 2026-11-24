@@ -270,6 +270,21 @@ export const SECRET_PARAMS: Partial<Record<SettingsTool, Record<string, string[]
   sshs3_manage_alerts_and_integrations: { save_notify_channel: ["url", "secret"], atlassian_connect: ["token"] },
 };
 
+/**
+ * The team bucket's keys and its invite code (which holds the keys) are typed on the approval card of
+ * `sshs3_manage_s3_and_sync` `configure_s3_workspace`, like a setting's secrets.
+ */
+export const BUCKET_SECRET_PARAMS = ["inviteCode", "accessKeyId", "secretAccessKey"];
+
+/** A call that carries a secret itself is refused before anybody is asked: it would have passed through the model. */
+export function refuseCarriedSecrets(p: P, secrets: readonly string[]): void {
+  const carried = secrets.filter((key) => given(p, key));
+  if (carried.length)
+    throw new Error(
+      `Leave ${carried.map((k) => `"${k}"`).join(" and ")} out of the call. The person types it on the approval card, where it is not sent to the model. If they wrote it in this conversation, tell them it was sent to the model's provider and should be replaced.`,
+    );
+}
+
 /** What each operation reads, by the kind of value it must be. Everything else it reads is text. */
 const KINDS: Record<SettingsTool, { numbers: string[]; booleans: string[]; lists: string[] }> = {
   sshs3_manage_app_and_settings: {
@@ -324,12 +339,7 @@ export async function precheckSettingsOp(hub: AppActionHost, tool: SettingsTool,
   if (task && (task.ticketId || task.scheduleId || task.chat))
     throw new Error("sshs3's settings are changed from a conversation in the app, with the person there. This run works on its own.");
 
-  const secrets = SECRET_PARAMS[tool]?.[op] ?? [];
-  const carried = secrets.filter((key) => given(p, key));
-  if (carried.length)
-    throw new Error(
-      `Leave ${carried.map((k) => `"${k}"`).join(" and ")} out of the call. The person types it on the approval card, where it is not sent to the model. If they wrote it in this conversation, tell them it was sent to the model's provider and should be replaced.`,
-    );
+  refuseCarriedSecrets(p, SECRET_PARAMS[tool]?.[op] ?? []);
 
   const kinds = KINDS[tool];
   for (const key of kinds.numbers) num(p, key);

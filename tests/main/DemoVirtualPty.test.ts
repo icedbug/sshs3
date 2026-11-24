@@ -314,6 +314,17 @@ describe('executeDemoServerCommand', () => {
     },
   );
 
+  it('answers with the diagnostics by the command a line runs, not by a word it contains', () => {
+    const diagnostics = run(K8S_WORKER.name, 'uptime && df -h && free -h');
+    // `ls` is in each of these, and none of them runs ls.
+    for (const cmd of ['false', 'echo tools', 'helm ls', 'cat /etc/calls.conf']) {
+      expect(run(K8S_WORKER.name, cmd).output, cmd).toContain(`Executed: ${cmd}`);
+      expect(run(K8S_WORKER.name, cmd).output, cmd).not.toContain('load average');
+    }
+    // The command a part of the line runs counts, after sudo and after a pipe or a ;.
+    for (const cmd of ['sudo systemctl status kubelet', 'cd /var/log; ls -la', 'dmesg | tail -5 && uptime']) expect(run(K8S_WORKER.name, cmd), cmd).toEqual(diagnostics);
+  });
+
   it('acknowledges any other command, as it was typed', () => {
     const whoami = run(K8S_WORKER.name, '  whoami  ');
     expect(whoami.exitCode).toBe(0);

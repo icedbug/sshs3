@@ -297,6 +297,58 @@ describe("a secret a setting needs", () => {
   });
 });
 
+describe("the team bucket's keys and invite code", () => {
+  const SYNC = "sshs3_manage_s3_and_sync";
+  const SECRET = "bucket-secret-typed-on-the-card"; // pragma: allowlist secret
+
+  async function bucketRun() {
+    const { hub } = await makeHub();
+    // What the bucket is then asked is not looked at here: only what it is given.
+    const configure = vi.spyOn((hub as unknown as { s3Workspace: { configure: (...a: unknown[]) => Promise<void> } }).s3Workspace, "configure").mockResolvedValue(undefined);
+    return { hub, configure, run: await startRun(hub) };
+  }
+
+  it("are refused when the call itself carries one, before anybody is asked", async () => {
+    const { run, configure } = await bucketRun();
+    for (const [payload, key] of [
+      [{ operation: "configure_s3_workspace", inviteCode: "sshs3-s3://abc" }, "inviteCode"],
+      [{ operation: "configure_s3_workspace", bucket: "team", secretAccessKey: SECRET }, "secretAccessKey"],
+      [{ operation: "configure_s3_workspace", bucket: "team", accessKeyId: "AKIAEXAMPLE" }, "accessKeyId"],
+    ] as const)
+      await expect(run.call(SYNC, payload), JSON.stringify(payload)).rejects.toThrow(`Leave "${key}" out of the call. The person types it on the approval card`);
+    expect(run.task.changes).toEqual([]);
+    expect(configure).not.toHaveBeenCalled();
+  });
+
+  it("are typed on the card with the bucket, and a key left empty keeps the saved one", async () => {
+    const { run, configure } = await bucketRun();
+    const asked = run.call(SYNC, { operation: "configure_s3_workspace", bucket: "team", endpoint: "https://s3.example.test" });
+    const change = await run.pending();
+    expect(change).toMatchObject({ guard: true, description: "Change where the team's workspace is synced to", secretFields: [{ key: "accessKeyId", optional: true }, { key: "secretAccessKey", optional: true }] });
+    expect(change.command).toContain("bucket: team");
+    await run.approve(change.id, { secretAccessKey: SECRET });
+    await asked;
+    const [config, invite] = configure.mock.calls[0] as [Record<string, unknown>, string | undefined];
+    expect(config).toMatchObject({ bucket: "team", secretAccessKey: SECRET });
+    // Not given: the saved access key ID stays, so it is not in what is changed at all.
+    expect(config).not.toHaveProperty("accessKeyId");
+    expect(invite).toBeUndefined();
+    expect(JSON.stringify(run.task)).not.toContain(SECRET);
+  });
+
+  it("take the invite code on the card when no bucket is named, and need it there", async () => {
+    const { run, configure } = await bucketRun();
+    const first = run.call(SYNC, { operation: "configure_s3_workspace" });
+    const change = await run.pending();
+    expect(change).toMatchObject({ description: "Connect the team's shared workspace with an invite code", secretFields: [{ key: "inviteCode", label: "the invite code" }] });
+    await expect(run.approve(change.id, {})).rejects.toThrow("This one needs the invite code. Type it on the approval card");
+    await run.approve(change.id, { inviteCode: "sshs3-s3://typed-invite" });
+    await first;
+    expect(configure.mock.calls[0][1]).toBe("sshs3-s3://typed-invite");
+    expect(JSON.stringify(run.task)).not.toContain("typed-invite");
+  });
+});
+
 describe("what the person approves is what is done", () => {
   it("refuses a value of the wrong kind instead of passing it over", async () => {
     const { hub } = await makeHub();
@@ -313,6 +365,30 @@ describe("what the person approves is what is done", () => {
     ] as const)
       await expect(run.call(tool, payload), JSON.stringify(payload)).rejects.toThrow(said);
     expect(run.task.changes).toEqual([]);
+  });
+
+  it("refuses a context window an agent cannot work in, as the settings form does, before anybody is asked", async () => {
+    const { hub } = await makeHub();
+    const run = await startRun(hub);
+    const before = (await hub.snapshot()).config.contextWindowTokens;
+    for (const payload of [
+      { operation: "configure_ai", contextWindowTokens: 16000 },
+      { operation: "configure_ai", contextWindowTokens: 4000 },
+      { operation: "save_model_profile", name: "Small", provider: "openai-compatible", model: "m", contextWindowTokens: 16000 },
+    ])
+      await expect(run.call("sshs3_manage_app_and_settings", payload), JSON.stringify(payload)).rejects.toThrow(
+        `A context window of ${payload.contextWindowTokens} tokens is too small: an agent cannot work in less than 32768. Nothing was changed. Choose 32768 or more, up to 900000.`,
+      );
+    await expect(run.call("sshs3_manage_app_and_settings", { operation: "configure_ai", contextWindowTokens: 2_000_000 })).rejects.toThrow("A context window can be at most 900000 tokens.");
+    expect(run.task.changes).toEqual([]);
+    expect((await hub.snapshot()).config.contextWindowTokens).toBe(before);
+    // The smallest choice of the form is taken.
+    await run.call("sshs3_manage_app_and_settings", { operation: "configure_ai", contextWindowTokens: 32768 });
+    expect((await hub.snapshot()).config.contextWindowTokens).toBe(32768);
+    // And the tool says what it takes.
+    const settings = toolsForTask(aTask()).find((t) => t.name === "sshs3_manage_app_and_settings")!;
+    expect(JSON.stringify(settings)).toContain("a whole number from 32768 to 900000. An agent cannot work in less.");
+    expect(JSON.stringify(settings)).not.toContain("16000");
   });
 
   it("names servers whole, and keeps them out of collection when it says so", async () => {

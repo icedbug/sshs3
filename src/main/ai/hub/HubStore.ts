@@ -2,6 +2,7 @@ import { expireTerminalSources } from "../../../shared/answerSources";
 import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { dropCommandRating } from "./olderStores";
 import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
+import { teamActivity } from "./personalServers";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { writeFileAtomic } from "../../storage/atomicFile";
@@ -607,7 +608,8 @@ export class HubStore {
         // a jump host, extra ssh options or tunnels (those are each person's own), nor a vault's servers.
         servers: mergedServers.filter((s) => s.shared !== false && !s.fromVault).map(sanitizeServerForS3),
         memories: this.data.memories.filter((m) => m.scope !== "personal"),
-        activityLog: this.data.activityLog,
+        // What was done on a server a person keeps to themselves stays on this computer.
+        activityLog: teamActivity(this.data.activityLog ?? [], localServers),
         deletedServerIds,
         deletedMemoryIds,
       };

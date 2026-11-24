@@ -366,9 +366,8 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "sara@acme.se (AI)",
     kind: "ai-action",
     summary:
-      "AI diagnostics found a noisy neighbor, 'vol_ai_scratch_03' (48 200 IOPS read peak), and set the QoS policy 'pg-batch-ceiling' (max 15 000 IOPS); latency on vol_pg_prod_db01 in aggr2_nvme_db fell from 1.88 ms to 0.32 ms",
-    detail:
-      "qos statistics volume latency show -iterations 3 && volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+      "AI diagnostics found a noisy neighbor, 'vol_ai_scratch_03' (48 200 IOPS read peak), and proposed the QoS policy 'pg-batch-ceiling' (max 15 000 IOPS) for it. It waits for tonight's change window: latency on vol_pg_prod_db01 in aggr2_nvme_db is still 1.88 ms",
+    detail: "qos statistics volume latency show -iterations 3",
     at: now - 19 * min,
   },
   {
@@ -1884,7 +1883,9 @@ const initialDemoTasks: AgentTask[] = [
     agentName: "NetApp ONTAP Storage Architect",
     mode: "assisted",
     status: "completed",
-    verification: "verified",
+    // The fix it proposed was held for a change window, so the showcase lab starts without it
+    // (sim/programs/showcase.ts): nothing here says it was applied.
+    verification: "not-verified",
     maxCommands: 15,
     maxMinutes: 15,
     createdAt: now - 19 * min,
@@ -1918,10 +1919,11 @@ const initialDemoTasks: AgentTask[] = [
           "| `vol_pg_prod_db01` | `svm-prod-iscsi` (`aggr2_nvme_db`) | `28 400 IOPS` | `1.88 ms` | Affected by the scratch volume's read peaks |",
           "| `/etc/multipath.conf` | `k8s-gpu-io-worker-01` | — | — | Uses `multibus` instead of ALUA `group_by_prio` |",
           "",
-          "> **Fix applied and verified:** I applied the QoS policy `pg-batch-ceiling` (`max 15 000 IOPS, 600 MB/s`) to `vol_ai_scratch_03`. Latency on `vol_pg_prod_db01` fell at once from **1.88 ms to 0.32 ms**.",
+          "> **Proposed fix, not applied yet:** put the QoS policy `pg-batch-ceiling` (`max 15 000 IOPS, 600 MB/s`) on `vol_ai_scratch_03`. Sara held it for tonight's change window, so the latency is still as measured above. Once the policy is on, latency on `vol_pg_prod_db01` should fall well under 1 ms.",
           "",
           "```bash",
-          "# Check the current QoS latency on ONTAP:",
+          "# Put the QoS ceiling on the scratch volume, then look at the latency again:",
+          "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
           "qos statistics volume latency show -iterations 3",
           "# After group_by_prio is set in /etc/multipath.conf on the K8s GPU worker, reload the maps and list them:",
           "sudo multipath -r && sudo multipath -ll",
@@ -1951,27 +1953,21 @@ const initialDemoTasks: AgentTask[] = [
         description: "Apply the QoS ceiling 'pg-batch-ceiling' (15 000 IOPS) to vol_ai_scratch_03",
         command:
           "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
-        status: "completed",
-        // A seeded example of what an approved change looks like: who said yes,
-        // the check that shows it held, and the command that takes it back.
+        // A seeded example of a change a person answered: who decided and why, the check it carries
+        // and the command that would take it back. It was held, so the showcase lab starts without it.
+        status: "denied",
         decidedHow: "person",
-        decidedBy: { name: "Sara", at: now - 17 * min - 20_000, allowed: true },
+        decidedBy: { name: "Sara", at: now - 17 * min - 20_000, allowed: false },
+        decisionNote: "Not during the day. We put it on in tonight's change window.",
         check: {
           command:
             "volume show -vserver svm-prod-nfs -volume vol_ai_scratch_03 -fields qos-policy-group",
           expected: "pg-batch-ceiling",
-          before: false,
-          after: true,
-          output:
-            "vserver      volume            qos-policy-group\nsvm-prod-nfs vol_ai_scratch_03 pg-batch-ceiling",
         },
         rollback: {
           command:
             "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group none",
         },
-        exitCode: 0,
-        output:
-          'Volume modify successful on volume "vol_ai_scratch_03" in Vserver "svm-prod-nfs": QoS policy group set to "pg-batch-ceiling".',
         at: now - 17 * min,
       },
     ],

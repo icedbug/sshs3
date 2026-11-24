@@ -2054,6 +2054,18 @@ export class UpstreamHttpError extends Error {
   }
 }
 
+type MessageImage = NonNullable<AgentMessage["images"]>[number];
+/** A message the person sent while the run worked, with the pictures attached to it. */
+interface Steering {
+  text: string;
+  images?: MessageImage[];
+}
+/** A picture as an Anthropic message block, or nothing when it is not a base64 image. */
+function anthropicImage(img: MessageImage): Array<Record<string, unknown>> {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(img.dataUrl || "");
+  return match ? [{ type: "image", source: { type: "base64", media_type: img.mimeType || match[1], data: match[2] } }] : [];
+}
+
 export class DirectAgentRuntime implements AgentRuntime {
   private abort = new AbortController();
   private cancelled = false;
@@ -2109,15 +2121,18 @@ export class DirectAgentRuntime implements AgentRuntime {
       ...(resolvedContext ? { context_tokens: resolvedContext } : {}),
     };
   }
-  private steeringQueue: string[] = [];
-  /** Every message the person sent while this run worked, in order: a compaction keeps them as written. */
+  private steeringQueue: Steering[] = [];
+  /**
+   * Every message the person sent while this run worked, in order: a compaction keeps them as written.
+   * Their words only: a picture is in the turn it came with, not in a handover note.
+   */
   private steered: string[] = [];
   /** How much of the answer of the turn in progress was shown before the person's last message. */
   private steerCut = 0;
   /** The messages that came in since the last turn, taken into the conversation. */
-  private takeSteering(): string[] {
+  private takeSteering(): Steering[] {
     const taken = this.steeringQueue.splice(0);
-    this.steered.push(...taken);
+    this.steered.push(...taken.map((s) => s.text));
     return taken;
   }
   /** Names of the tools this run offered the model; anything else is refused. */
@@ -2457,15 +2472,18 @@ export class DirectAgentRuntime implements AgentRuntime {
     }
   }
 
-  async steer(text: string): Promise<void> {
+  /** A message the person sent while the run works, with the pictures they attached. They go to the model with it. */
+  async steer(text: string, images?: MessageImage[]): Promise<boolean> {
     if (this.cancelled) throw new Error("Run is not active");
-    this.steeringQueue.push(boundedContext(text));
+    const pictures = (images ?? []).filter((img) => img.dataUrl?.startsWith("data:image/"));
+    this.steeringQueue.push({ text: boundedContext(text), ...(pictures.length ? { images: pictures } : {}) });
     // In the conversation the person's message now follows what was shown so far. The answer the
     // run ends with is what comes after it: what was said before stays where it stands.
     this.kept = "";
     this.keptLast = "";
     this.steerCut += this.shown.length;
     this.shown = "";
+    return true;
   }
 
   async stop(): Promise<void> {
@@ -3801,7 +3819,10 @@ export class DirectAgentRuntime implements AgentRuntime {
         inputItems.push({
           type: "message",
           role: "user",
-          content: [{ type: "input_text", text: steered }],
+          content: [
+            { type: "input_text", text: steered.text },
+            ...(steered.images ?? []).map((img) => ({ type: "input_image", image_url: img.dataUrl })),
+          ],
         });
       }
 
@@ -4102,7 +4123,13 @@ export class DirectAgentRuntime implements AgentRuntime {
     // The loop goes round until the model answers (the run then ends inside it) or the run is stopped.
     for (let turn = 0; !this.cancelled; turn++) {
       microcompactToolResults(messages, turn, turnByItem, { capture: this.capture, batchChars: microcompactBatchChars(tuning.compactAtChars) });
-      for (const steered of this.takeSteering()) messages.push({ role: "user", content: steered });
+      for (const steered of this.takeSteering())
+        messages.push({
+          role: "user",
+          content: steered.images?.length
+            ? [{ type: "text", text: steered.text }, ...steered.images.map((img) => ({ type: "image_url", image_url: { url: img.dataUrl } }))]
+            : steered.text,
+        });
 
       if (this.handoverDue(messages, baseLength, JSON.stringify(tools).length, tuning))
         messages.push({ role: "user", content: HANDOVER_REQUEST });
@@ -4453,7 +4480,8 @@ export class DirectAgentRuntime implements AgentRuntime {
     for (let turn = 0; !this.cancelled; turn++) {
       if (microcompactToolResults(messages, turn, turnByItem, { capture: this.capture, batchChars: microcompactBatchChars(tuning.compactAtChars) }) > 0)
         dropThinkingBlocks(messages);
-      for (const steered of this.takeSteering()) messages.push({ role: "user", content: steered });
+      for (const steered of this.takeSteering())
+        messages.push({ role: "user", content: steered.images?.length ? [{ type: "text", text: steered.text }, ...steered.images.flatMap(anthropicImage)] : steered.text });
 
       if (
         this.handoverDue(

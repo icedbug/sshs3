@@ -34,7 +34,7 @@ import {
   mcpCatalog,
 } from "./demoWorkspace";
 import { simWorld } from "../../sim/SimWorld";
-import { SCRIPTED_DEMO_NOTE } from "../../sim/scripted";
+import { SCRIPTED_ANSWER_NOTE, SCRIPTED_DEMO_NOTE } from "../../sim/scripted";
 import { DEMO_MCP_REFUSAL, isDemoTarget } from "../../demo/demoMode";
 import { nextRef, sensitiveForChat } from "./ToolBroker";
 import { allowedServerNamed, chatChannelReadable, sensitiveFile } from "./chatFence";
@@ -48,7 +48,8 @@ import {
 import type { AppActionHost } from "./HubService";
 import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan } from "./PlanMode";
 import { guardAsk } from "./AppGuard";
-import { SETTINGS_OPS, handleSettingsOp, isSettingsOp, precheckSettingsOp, type SettingsCtx } from "./AppSettingsActions";
+import { CONTEXT_WINDOW_LEAST, CONTEXT_WINDOW_MOST, contextWindowRefusal } from "../../../shared/contextWindow";
+import { BUCKET_SECRET_PARAMS, SETTINGS_OPS, handleSettingsOp, isSettingsOp, precheckSettingsOp, refuseCarriedSecrets, type SettingsCtx } from "./AppSettingsActions";
 
 /**
  * The agent's sshs3 tools and MCP calls: what each `sshs3_*` tool does when a
@@ -712,6 +713,10 @@ export async function handleAppAction(
       const wholly = request.action === "sshs3_manage_team_chat" || request.action === "sshs3_manage_alerts_and_integrations";
       const settingsOp = typeof p.operation === "string" ? p.operation.trim() : wholly ? "status" : "";
       if (settingsOp && isSettingsOp(request.action, settingsOp)) await precheckSettingsOp(hub, request.action, settingsOp, p, task);
+      if (request.action === "sshs3_manage_s3_and_sync" && settingsOp === "configure_s3_workspace") refuseCarriedSecrets(p, BUCKET_SECRET_PARAMS);
+      // A window an agent cannot work in is refused before anybody is asked (configure_ai, save_model_profile).
+      const windowRefused = request.action === "sshs3_manage_app_and_settings" ? contextWindowRefusal(p.contextWindowTokens) : undefined;
+      if (windowRefused) throw new Error(windowRefused);
     }
     // What moves the fence agents run inside waits for a person, in every mode (see AppGuard.ts).
     const ask = guardAsk(request.action, p, task, { agents: hub.getAgentsList(), schedules: hub.store.data.schedules });
@@ -1346,10 +1351,13 @@ export async function handleAppAction(
           };
         }
         if (op === "configure_s3_workspace") {
-          const inviteCode = optStr(p, "inviteCode");
+          // The invite code and the keys were typed on the approval card (AppGuard.ts). A call that
+          // carried one itself was refused before anybody was asked.
+          const inviteCode = settingsCtx.secret("inviteCode");
+          const accessKeyId = settingsCtx.secret("accessKeyId");
           const bucket = optStr(p, "bucket");
           if (!inviteCode && !bucket) {
-            throw new Error('configure_s3_workspace requires "bucket" or "inviteCode".');
+            throw new Error('configure_s3_workspace requires "bucket", or the invite code typed on the approval card.');
           }
           await hub.request({
             action: "workspace-s3-configure",
@@ -1359,8 +1367,9 @@ export async function handleAppAction(
               region: optStr(p, "region") || "eu-north-1",
               bucket: bucket || "",
               prefix: optStr(p, "prefix") || "sshs3-workspace",
-              accessKeyId: optStr(p, "accessKeyId") || "",
-              secretAccessKey: optStr(p, "secretAccessKey"),
+              // Left empty on the card: the key already saved is kept.
+              ...(accessKeyId ? { accessKeyId } : {}),
+              secretAccessKey: settingsCtx.secret("secretAccessKey"),
               forcePathStyle: optBool(p, "forcePathStyle") ?? true,
               actorName: optStr(p, "actorName"),
             },
@@ -1493,8 +1502,8 @@ export async function handleAppAction(
           const actorName = optStr(p, "actorName");
           if (actorName) aiConfigPatch.actorName = actorName;
           const contextWindowTokens = optInt(p, "contextWindowTokens", {
-            min: 4000,
-            max: 1_000_000,
+            min: CONTEXT_WINDOW_LEAST,
+            max: CONTEXT_WINDOW_MOST,
           });
           if (contextWindowTokens !== undefined) {
             aiConfigPatch.contextWindowTokens = contextWindowTokens;
@@ -2107,6 +2116,8 @@ export async function handleAppAction(
         }
         change.status = "running";
         hub.changed();
+        // On many nodes it can take long: written in the log as started after a moment, as a terminal command is.
+        const startedNoted = hub.noteStartedAfterAWhile(task, change);
 
         const executeClusterNode = async (srv: WorkspaceServerSummary) => {
           const openSession = hub.terminals
@@ -2155,7 +2166,8 @@ export async function handleAppAction(
             // A server of a running scenario: the command runs on its state, as in its terminal.
             hub.recheckChange?.(task, change);
             const ran = simWorld().shell(simNode).run(command);
-            return { node: srv.name, host: srv.host, nodeRole: srv.nodeRole, exitCode: ran.code, output: ran.output, source: `demo-cluster:${srv.id}` };
+            // An appliance of the base fleet that answered from the showcase's script: invented, and said so.
+            return { node: srv.name, host: srv.host, nodeRole: srv.nodeRole, exitCode: ran.code, output: ran.output, ...(ran.scripted ? { note: SCRIPTED_ANSWER_NOTE } : {}), source: `demo-cluster:${srv.id}` };
           }
           if (isDemoTarget(srv.id)) {
             return {
@@ -2260,6 +2272,7 @@ export async function handleAppAction(
             abortReason = `Stopped after stage ${stagesCompleted} failure on "${failed.node}" (exitCode ${failed.exitCode}).`;
           }
         }
+        startedNoted();
 
         const allOk = !aborted && perNodeResults.every((r) => r.exitCode === 0);
         const unknown = perNodeResults.some((r) => r.exitCode === -1);
@@ -2411,10 +2424,18 @@ export async function handleAppAction(
           return await hub.host.storageOps({ operation: op, targetA: a.id, pathA, targetB: b?.id, pathB });
         }
 
-        // Scripted results only for the demo workspace's own fixtures (by identity, isDemoTargetRef):
-        // in demo mode a real target still takes the real path.
-        if ((await hub.isDemoTargetRef(targetA)) || (await hub.isDemoTargetRef(targetB))) {
-          return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
+        // Scripted results only for the demo workspace's own scripted examples (by identity, isDemoTargetRef):
+        // in demo mode a real target still takes the real path, and so does a simulated server (the base
+        // fleet's, a scenario's). That one has files of its own, read as the file manager reads them: the
+        // storage registry gives it a SimStorageProvider.
+        const scriptedTarget = async (ref: string | undefined): Promise<boolean> => {
+          if (!ref || !(await hub.isDemoTargetRef(ref))) return false;
+          const server = await hub.resolveServerTarget(ref);
+          return !simWorld().host(ref, server?.id, server?.name, server?.host);
+        };
+        if ((await scriptedTarget(targetA)) || (await scriptedTarget(targetB))) {
+          // What it lists is invented: the model is told so with it, as with a scripted server's command.
+          return { ...(simulateDemoStorageOps(op, targetA, pathA, targetB, pathB) as Record<string, unknown>), note: SCRIPTED_DEMO_NOTE };
         }
 
         if (!hub.host.storageOps)

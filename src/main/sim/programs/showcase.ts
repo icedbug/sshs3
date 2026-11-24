@@ -1,6 +1,6 @@
 import { demoClusterState, scriptedDemoText } from "../../demo/DemoVirtualPty";
 import type { SimHost } from "../SimHost";
-import { fail, lines, NotSimulated, ok, type SimCommand, type SimResult } from "../SimShell";
+import { fail, lines, NotSimulated, ok, type SimCommand, type SimContext, type SimResult } from "../SimShell";
 import type { OntapClusterState, OntapVolumeInfo } from "./storage";
 
 /**
@@ -17,10 +17,14 @@ import type { OntapClusterState, OntapVolumeInfo } from "./storage";
  * state, as on any simulated server.
  */
 
-/** The script's answer to a line on this server, as a command's result. A line it has no answer for is not simulated. */
-function scripted(host: SimHost, line: string): SimResult {
-  const answer = scriptedDemoText(host.name, line);
+/**
+ * The script's answer to a line on this server, as a command's result. A line it has no answer for is
+ * not simulated. The shell is told, so a model is told the answer is the script's (sim/scripted.ts).
+ */
+function scripted(ctx: SimContext, line: string): SimResult {
+  const answer = scriptedDemoText(ctx.host.name, line);
   if (!answer) throw new NotSimulated(line);
+  ctx.shell.answeredFromScript();
   return answer.exitCode === 0 ? ok(`${answer.text}\n`) : fail(`${answer.text}\n`, answer.exitCode);
 }
 
@@ -105,7 +109,7 @@ const volume: SimCommand = (ctx, args) => {
   if (args[0] === "show") {
     const fields = flagValue(args, "-fields");
     // The whole list, as the script prints it on every node of the cluster.
-    if (!vserver && !name && !fields) return scripted(ctx.host, "volume show");
+    if (!vserver && !name && !fields) return scripted(ctx, "volume show");
     const found = VOLUMES.filter((v) => (!vserver || v.vserver === vserver) && (!name || v.name === name));
     if (!found.length) return ok("There are no entries matching your query.\n");
     const wanted = fields ? ["vserver", "volume", ...fields.split(",").map((f) => f.trim()).filter((f) => f && f !== "vserver" && f !== "volume")] : ["vserver", "volume", "aggregate", "state", "size", "percent-used", "qos-policy-group"];
@@ -119,7 +123,7 @@ const volume: SimCommand = (ctx, args) => {
     if (!target) return fail(`Error: command failed: Volume "${name ?? ""}" in Vserver "${vserver ?? ""}" does not exist.\n`, 1);
     // The one change the showcase is about: the scratch volume's QoS limit, put on and taken off again.
     if (target.name !== SCRATCH || (qos !== QOS_CEILING && qos !== "none")) throw new NotSimulated(line);
-    if (qos === QOS_CEILING) return scripted(ctx.host, line);
+    if (qos === QOS_CEILING) return scripted(ctx, line);
     demoClusterState.ontapQosFixed = false;
     return ok(`Volume modify successful on volume "${SCRATCH}" in Vserver "svm-prod-nfs": QoS policy group set to "none".\n`);
   }
@@ -128,7 +132,7 @@ const volume: SimCommand = (ctx, args) => {
 
 const qos: SimCommand = (ctx, args) => {
   const line = `qos ${args.join(" ")}`;
-  if (args[0] === "statistics" && args[1] === "volume" && (args[2] === "latency" || args[2] === "performance") && args[3] === "show") return scripted(ctx.host, line);
+  if (args[0] === "statistics" && args[1] === "volume" && (args[2] === "latency" || args[2] === "performance") && args[3] === "show") return scripted(ctx, line);
   if (args[0] === "policy-group" && args[1] === "show") {
     return ok(
       lines([
@@ -147,13 +151,13 @@ const qos: SimCommand = (ctx, args) => {
 
 const storage: SimCommand = (ctx, args) => {
   const line = `storage ${args.join(" ")}`;
-  if ((args[0] === "aggregate" || args[0] === "failover") && args[1] === "show") return scripted(ctx.host, line);
+  if ((args[0] === "aggregate" || args[0] === "failover") && args[1] === "show") return scripted(ctx, line);
   throw new NotSimulated(line);
 };
 
 const snapmirror: SimCommand = (ctx, args) => {
   const line = `snapmirror ${args.join(" ")}`;
-  if (args[0] === "show" || args[0] === "resync" || args[0] === "update") return scripted(ctx.host, line);
+  if (args[0] === "show" || args[0] === "resync" || args[0] === "update") return scripted(ctx, line);
   throw new NotSimulated(line);
 };
 
@@ -161,7 +165,7 @@ const snapmirror: SimCommand = (ctx, args) => {
 const asScripted =
   (name: string): SimCommand =>
   (ctx, args) =>
-    scripted(ctx.host, [name, ...args].join(" "));
+    scripted(ctx, [name, ...args].join(" "));
 
 /** A program that is on some of the fleet's servers only: elsewhere the shell does not find it. */
 const where =
@@ -193,9 +197,9 @@ export const SHOWCASE_ONTAP_COMMANDS = ["vserver", "cluster", ...Object.keys(ont
 const ceph: SimCommand = (ctx, args) => {
   const line = `ceph ${args.join(" ")}`;
   const sub = args[0];
-  if (sub === "status" || sub === "-s" || (sub === "osd" && args[1] === "df")) return scripted(ctx.host, line);
+  if (sub === "status" || sub === "-s" || (sub === "osd" && args[1] === "df")) return scripted(ctx, line);
   // What the showcase lets be fixed: a deep scrub of the late placement group, or more backfills.
-  if ((sub === "pg" && args[1] === "deep-scrub") || line.includes("osd_max_backfills")) return scripted(ctx.host, line);
+  if ((sub === "pg" && args[1] === "deep-scrub") || line.includes("osd_max_backfills")) return scripted(ctx, line);
   if (sub === "health") {
     if (demoClusterState.cephScrubFixed) return ok("HEALTH_OK\n");
     const head = "HEALTH_WARN 2 pgs not deep-scrubbed in time; 1 slow ops on osd.4";
@@ -236,7 +240,7 @@ const ceph: SimCommand = (ctx, args) => {
 const aws: SimCommand = (ctx, args) => {
   const line = `aws ${args.join(" ")}`;
   // The bucket list is all the showcase has of S3 on the command line.
-  if (args.includes("s3") && args[args.indexOf("s3") + 1] === "ls" && !args.some((a) => a.startsWith("s3://"))) return scripted(ctx.host, line);
+  if (args.includes("s3") && args[args.indexOf("s3") + 1] === "ls" && !args.some((a) => a.startsWith("s3://"))) return scripted(ctx, line);
   throw new NotSimulated(line);
 };
 
@@ -284,7 +288,7 @@ const vmstat: SimCommand = (ctx) => {
 export const showcaseCommands: Record<string, SimCommand> = {
   ...Object.fromEntries(Object.entries(ontapCommands).map(([name, command]) => [name, where(seesOntap, name, command)])),
   // The release and the system, as the script gives them on an ONTAP node.
-  version: where((host) => host.kind === "ontap", "version", (ctx) => scripted(ctx.host, "uptime")),
+  version: where((host) => host.kind === "ontap", "version", (ctx) => scripted(ctx, "uptime")),
   ceph: where(hasCeph, "ceph", ceph),
   // The script prints the backup pool for `zpool` and `zfs` on every server of the Ceph and ZFS cluster.
   zpool: where(hasCeph, "zpool", asScripted("zpool")),

@@ -380,7 +380,7 @@ export class ServersPart {
         // The activity log is the team's. A server a person keeps to themselves is not written into it.
         if ((request.shared ?? matchedServer?.shared) !== false) {
           this.appendActivityEvent(event);
-          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+          await this.shareActivity(event).catch(() => {});
         }
         await this.syncAutoMemoryForTarget(pid, humanLabel);
         this.s3Workspace.schedulePush(400);
@@ -526,7 +526,7 @@ export class ServersPart {
         // The activity log is the team's. A server a person keeps to themselves is not written into it.
         if (summary.shared) {
           this.appendActivityEvent(event);
-          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+          await this.shareActivity(event).catch(() => {});
         }
         await this.syncAutoMemoryForTarget(targetId, name);
         this.s3Workspace.schedulePush(400);
@@ -576,7 +576,7 @@ export class ServersPart {
           summary: `Removed node ${existing?.name || pid} from workspace`,
         };
         this.appendActivityEvent(event);
-        await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        await this.shareActivity(event).catch(() => {});
         this.s3Workspace.schedulePush(400);
         break;
       }

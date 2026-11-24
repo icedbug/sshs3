@@ -516,7 +516,7 @@ describe('S3WorkspaceSyncService resilience, CAS, presence, and invite tokens', 
     expect(objects.has('team-bucket/team/presence/alice--laptop-1.json')).toBe(true);
   });
 
-  it('reads a tokenized v2 invite (expired, revoked), warns on raw secretAccessKey, and keeps v1 decode compatible', () => {
+  it('reads the invite code it makes, and refuses one of another version instead of half reading it', () => {
     const baseCfg: S3WorkspaceConfig = {
       enabled: true,
       region: 'eu-west-1',
@@ -525,50 +525,18 @@ describe('S3WorkspaceSyncService resilience, CAS, presence, and invite tokens', 
       accessKeyId: 'AKIAPUBLIC',
       secretAccessKey: 'super-raw-secret-value', // pragma: allowlist secret
     };
+    const v1Invite = encodeS3WorkspaceInvite(baseCfg);
+    expect(validateS3WorkspaceInvite(v1Invite)).toMatchObject({ valid: true, config: { bucket: 'team-bkt', accessKeyId: 'AKIAPUBLIC' } });
+    expect(decodeS3WorkspaceInvite(v1Invite).secretAccessKey).toBe('super-raw-secret-value');
 
-    // Nothing in the app makes a v2 invite any more; one that arrives is still read, so it is built here.
-    const tokenInvite = `sshs3-s3://${Buffer.from(
-      JSON.stringify({
-        v: 2,
-        region: baseCfg.region,
-        bucket: baseCfg.bucket,
-        prefix: baseCfg.prefix,
-        accessKeyId: baseCfg.accessKeyId,
-        tokenId: 'tid-1',
-        inviteToken: 'tok_short_lived_abc',
-        issuedAt: Date.now(),
-        expiresAt: Date.now() + 60_000,
-      }),
+    // Nothing ever made a "v2" code for people to use. One would name the bucket without its key: it is
+    // refused, so the bucket is not connected with whatever key was saved before.
+    const v2Invite = `sshs3-s3://${Buffer.from(
+      JSON.stringify({ v: 2, region: baseCfg.region, bucket: baseCfg.bucket, prefix: baseCfg.prefix, accessKeyId: baseCfg.accessKeyId, tokenId: 'tid-1', inviteToken: 'tok_short_lived_abc', expiresAt: Date.now() + 60_000 }),
       'utf8',
     ).toString('base64url')}`;
-    const parsedToken = validateS3WorkspaceInvite(tokenInvite, { now: Date.now() + 1_000 });
-    expect(parsedToken.valid).toBe(true);
-    expect(parsedToken.version).toBe(2);
-    expect(parsedToken.hasRawSecret).toBe(false);
-    expect(parsedToken.inviteToken).toBe('tok_short_lived_abc');
-    expect(parsedToken.config?.secretAccessKey).toBeUndefined();
-
-    // Expired token is rejected.
-    const expiredCheck = validateS3WorkspaceInvite(tokenInvite, { now: Date.now() + 120_000 });
-    expect(expiredCheck.valid).toBe(false);
-    expect(expiredCheck.expired).toBe(true);
-
-    // Revoked token is rejected cleanly.
-    const revokedCheck = validateS3WorkspaceInvite(tokenInvite, {
-      revokedTokenIds: new Set(['tid-1']),
-    });
-    expect(revokedCheck.valid).toBe(false);
-    expect(revokedCheck.revoked).toBe(true);
-    expect(() => decodeS3WorkspaceInvite(tokenInvite, { revokedTokenIds: new Set(['tid-1']) })).toThrow(/revoked/i);
-
-    // Legacy v1 invite carries raw secret warning in validation while remaining backward-compatible.
-    const v1Invite = encodeS3WorkspaceInvite(baseCfg);
-    const validatedV1 = validateS3WorkspaceInvite(v1Invite);
-    expect(validatedV1.valid).toBe(true);
-    expect(validatedV1.hasRawSecret).toBe(true);
-    expect(validatedV1.warning).toMatch(/raw secretAccessKey/i);
-    const decodedV1 = decodeS3WorkspaceInvite(v1Invite);
-    expect(decodedV1.secretAccessKey).toBe('super-raw-secret-value');
+    expect(validateS3WorkspaceInvite(v2Invite)).toEqual({ valid: false, error: 'This S3 invite code is of a kind this app does not read. Ask for a new one.' });
+    expect(() => decodeS3WorkspaceInvite(v2Invite)).toThrow('of a kind this app does not read');
   });
 });
 

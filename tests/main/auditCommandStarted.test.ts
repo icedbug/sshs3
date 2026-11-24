@@ -33,7 +33,8 @@ async function hubWithTerminal() {
       openSchedule: async () => "s1",
       show: () => {},
       aiConfigFilePath: path.join(dir, "ai.json"),
-      workspaceServers: async () => [],
+      // The server of the terminal, in a cluster: what sshs3_cluster_exec runs on.
+      workspaceServers: async () => [{ id: "srv-web-1", name: "web-1", host: "10.0.0.11", port: 22, username: "ops", cluster: "web", shared: true }],
       closeSession: () => {},
       manageAppSettings: async () => ({}),
     } as never,
@@ -114,6 +115,24 @@ describe("a command in the audit log", () => {
     expect(started).toMatchObject({ kind: "command", target: "web-1", what: "pg_dump app > /backup/app.sql", taskId: "run-1", detail: "Still running. How it ended is written when it ends." });
     await running;
     await vi.waitFor(async () => expect((await rows()).map((e) => e.outcome)).toEqual(["started", "completed"]));
+  });
+
+  it("that runs across a cluster and is still running after a moment is written down as started too", async () => {
+    const { invoke, rows, shell, task } = await hubWithTerminal();
+    shell.answerAfter = 250;
+    const running = invoke({ action: "sshs3_cluster_exec", payload: { cluster: "web", command: "apt-get -y upgrade" } });
+    await vi.waitFor(async () => expect((await rows()).map((e) => e.outcome)).toEqual(["started"]));
+    expect(task.changes[0].status).toBe("running");
+    expect((await rows())[0]).toMatchObject({ kind: "command", what: "apt-get -y upgrade", taskId: "run-1", detail: "Still running. How it ended is written when it ends." });
+    expect(await running).toMatchObject({ ok: true, executedCount: 1 });
+  });
+
+  it("that runs across a cluster and ends at once is not written down as started", async () => {
+    const { invoke, rows, task } = await hubWithTerminal();
+    await invoke({ action: "sshs3_cluster_exec", payload: { cluster: "web", command: "uptime" } });
+    expect(task.changes[0].status).toBe("completed");
+    await sleep(80);
+    expect((await rows()).map((e) => e.outcome)).not.toContain("started");
   });
 
   it("that never ends is in the log as started, and then as uncertain with what was done about it", async () => {
