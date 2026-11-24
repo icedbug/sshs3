@@ -170,6 +170,8 @@ export async function runCampaign(opts: {
   deps?: CampaignDeps;
   /** Makes the campaign: without it, only one that exists goes on. */
   create?: boolean;
+  /** Only these tasks (the traps, say), in the library's order; all of them when left out. */
+  scenarios?: string[];
   /** Told a line when a run starts or ends, for a log to follow. */
   onProgress?: (line: string) => void;
 }): Promise<void> {
@@ -213,7 +215,12 @@ async function campaign(opts: Parameters<typeof runCampaign>[0], tell: (line: st
         }
       delete q.stoppedBecause;
       delete q.brokenLabs;
-    } else q = freshQueue(opts.name, opts.models, opts.times, deps.scenarios, productCommit);
+    } else {
+      const unknown = (opts.scenarios ?? []).filter((id) => !deps.scenarios.some((s) => s.id === id));
+      if (unknown.length) throw new Error(`No task is named ${unknown.join(', ')}.`);
+      const chosen = opts.scenarios ? deps.scenarios.filter((s) => opts.scenarios!.includes(s.id)) : deps.scenarios;
+      q = freshQueue(opts.name, opts.models, opts.times, chosen, productCommit);
+    }
   } catch (error) {
     await deps.close?.();
     throw error;

@@ -45,6 +45,7 @@ through its own page connection, then grades each run by the state of the server
 | One graded run | `npm run lab -- run --scenario nginx-bad-config --model gpt-6.2-sol [--mode assisted] [--lab 1]` |
 | A new campaign | `npm run lab -- campaign --name pass1 --models gpt-6.2-sol,gpt-6-luna --times 1 --labs 1,2,3 --new` |
 | Go on with one that stopped | the same command without `--new` |
+| Some tasks only, many times | `npm run lab -- campaign --name traps --models gpt-6.2-sol --times 20 --labs 1,2,3 --group trap --new` (or `--scenarios <id>,<id>`) |
 | Its report | `npm run lab -- report --name pass1` |
 | The lab's own tests | `npm run lab:test` and `npm run lab:typecheck` |
 

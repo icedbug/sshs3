@@ -268,4 +268,14 @@ describe('a campaign', () => {
     expect(report.queued).toBe(1);
     expect(report.brokenLabs).toEqual([3]);
   });
+
+  it('a campaign of some tasks only: the traps, say, many times', async () => {
+    const { deps, ran } = fakeDeps([{}]);
+    await runCampaign({ name: 'c12', models: ['sol'], times: 3, labs: [1], deps, create: true, scenarios: ['task-b'] });
+    const q = await loadQueue('c12');
+    expect(q.entries.map((e) => e.id)).toEqual(['task-b/sol/1', 'task-b/sol/2', 'task-b/sol/3']);
+    expect(ran).toHaveLength(3);
+    // A task name that is not in the library is refused, not left out quietly.
+    await expect(runCampaign({ name: 'c13', models: ['sol'], times: 1, labs: [1], deps, create: true, scenarios: ['task-x'] })).rejects.toThrow(/task-x/);
+  });
 });

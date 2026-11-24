@@ -2,7 +2,7 @@
  * The lab from the command line: `npm run lab:up -- <n>`, `lab:reset`, `lab:down`, `lab:status`, and
  * `npm run lab -- validate [--scenario <id>[,<id>]] [--times 3] [--lab <n>]` and
  * `npm run lab -- run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]`,
- * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2] [--new]` and
+ * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group trap] [--new]` and
  * `npm run lab -- report --name <n>` and `npm run lab -- regrade --name <n>`.
  * Lab n has the subnet 10.77.<n>.0/24; the campaigns use 1 and 2, the lab's own tests 9.
  */
@@ -104,7 +104,11 @@ async function campaign(): Promise<void> {
   if (!Number.isInteger(times) || times < 1) throw new Error(`--times is a whole number of at least 1, not "${flag('times')}".`);
   for (const lab of labs) if (!Number.isInteger(lab) || lab < 1 || lab > 250) throw new Error(`A lab number is 1 to 250, not "${lab}".`);
   console.log(`${new Date().toISOString()} campaign ${name}: ${models.join(', ')}, ${times} time(s), labs ${labs.join(', ')}.`);
-  await runCampaign({ name, models, times, labs, create: rest.includes('--new'), onProgress: (line) => console.log(line) });
+  // Some tasks only: named, or a whole group (the traps, say).
+  const group = flag('group');
+  const scenarios = flag('scenarios')?.split(',').filter(Boolean) ?? (group ? SCENARIOS.filter((s) => s.group === group).map((s) => s.id) : undefined);
+  if (group && !scenarios?.length) throw new Error(`No task is in the group "${group}".`);
+  await runCampaign({ name, models, times, labs, create: rest.includes('--new'), ...(scenarios ? { scenarios } : {}), onProgress: (line) => console.log(line) });
   const report = await buildReport(name);
   console.log(`${new Date().toISOString()} campaign ${name} ${report.stoppedBecause ? `stopped: ${report.stoppedBecause}` : 'done'}. ${report.runs} runs. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
   if (report.stoppedBecause) process.exitCode = 1;
@@ -183,7 +187,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--new]; report --name <n>; regrade --name <n>.',
+        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [--new]; report --name <n>; regrade --name <n>.',
       );
   }
 }
