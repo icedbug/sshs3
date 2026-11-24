@@ -18,6 +18,9 @@ export interface LabState {
   k8s?: { kubeconfigPath: string; server: string };
 }
 
+/** This machine's own address on a lab's network (Docker gives a network's gateway the first address). */
+export const labGateway = (lab: Pick<LabState, 'index'>): string => `10.77.${lab.index}.1`;
+
 const LAB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const IMAGES = path.join(LAB_DIR, 'images');
 // S3 storage: SeaweedFS, pinned. MinIO no longer publishes images to pull.

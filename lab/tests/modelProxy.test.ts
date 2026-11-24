@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startModelProxy, type ModelProxy } from '../src/modelProxy';
+import { labTls } from '../src/tls';
 
 /** A stand-in for OpenAI: a streamed Responses answer in three events, the last with its usage. */
 async function fakeUpstream(opts: { holdLast?: () => Promise<void> } = {}) {
@@ -39,10 +41,10 @@ afterEach(async () => {
   for (const close of closers.splice(0)) await close();
 });
 
-async function setup(upstreamOpts?: Parameters<typeof fakeUpstream>[0]) {
+async function setup(upstreamOpts?: Parameters<typeof fakeUpstream>[0], tls?: { key: string; cert: string }) {
   const upstream = await fakeUpstream(upstreamOpts);
   const logDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lab-proxy-'));
-  const proxy = await startModelProxy({ port: 0, upstream: upstream.url, logDir });
+  const proxy = await startModelProxy({ port: 0, upstream: upstream.url, logDir, tls });
   closers.push(() => proxy.stop(), () => upstream.close(), () => fs.rm(logDir, { recursive: true, force: true }));
   return { upstream, proxy, logDir };
 }
@@ -80,6 +82,29 @@ describe('the model proxy', () => {
     const logged = await fs.readFile(path.join(logDir, 'run-a.jsonl'), 'utf8');
     expect(logged).not.toContain('Bearer');
     expect(logged).not.toContain('lab-run-a');
+  });
+
+  it('answers over https with a certificate the lab\'s own CA signed, for this machine and every lab gateway', async () => {
+    const tls = await labTls();
+    const { proxy } = await setup(undefined, tls);
+    expect(proxy.url).toMatch(/^https:\/\/127\.0\.0\.1:/);
+    const ca = await fs.readFile(tls.caPath, 'utf8');
+    const answer = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = https.request(`${proxy.url}/v1/responses`, { method: 'POST', ca, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer lab-tls' } }, (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      });
+      req.on('error', reject);
+      req.end(JSON.stringify({ model: 'gpt-6.2-sol', input: 'hi', stream: true }));
+    });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toContain('response.completed');
+    // The same certificate holds for the gateway address of each lab network, where the web server reaches it.
+    const { X509Certificate } = await import('node:crypto');
+    const cert = new X509Certificate(tls.cert);
+    for (const ip of ['127.0.0.1', '10.77.1.1', '10.77.2.1', '10.77.9.1']) expect(cert.checkIP(ip)).toBe(ip);
+    expect(cert.verify(new X509Certificate(ca).publicKey)).toBe(true);
   });
 
   it('answers 429 or 500, or cuts the stream, as a fault rule says, then passes calls on again', async () => {

@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import https from 'node:https';
+import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 
@@ -37,7 +39,9 @@ export interface ModelCall {
 }
 
 export interface ModelProxy {
+  /** The address on this machine's loopback. The shared web server reaches it at a private address of this machine instead. */
   url: string;
+  port: number;
   stop(): Promise<void>;
   setFaults(runId: string, rules: FaultRule[]): void;
   calls(runId: string): Promise<ModelCall[]>;
@@ -73,7 +77,21 @@ export function usageOf(text: string): { inputTokens: number; cachedTokens: numb
   };
 }
 
-export async function startModelProxy(opts: { port: number; upstream: string; logDir: string }): Promise<ModelProxy> {
+/** Whether a connection comes from this machine itself: from one of its own addresses. */
+function fromThisMachine(socket: { remoteAddress?: string; localAddress?: string }): boolean {
+  const bare = (a?: string): string => (a ?? '').replace(/^::ffff:/, '');
+  const remote = bare(socket.remoteAddress);
+  if (!remote) return false;
+  if (remote === bare(socket.localAddress) || remote.startsWith('127.') || remote === '::1') return true;
+  return Object.values(os.networkInterfaces()).some((list) => list?.some((i) => bare(i.address) === remote));
+}
+
+/**
+ * `host` is where it listens: this machine's loopback unless told otherwise. Wherever it listens it
+ * answers only calls made from this machine itself (from one of its own addresses): a lab server,
+ * where an agent runs commands, never gets to spend the real key.
+ */
+export async function startModelProxy(opts: { port: number; upstream: string; logDir: string; host?: string; tls?: { key: string; cert: string } }): Promise<ModelProxy> {
   await fs.mkdir(opts.logDir, { recursive: true });
   const faults = new Map<string, Array<FaultRule & { used: number }>>();
   const counts = new Map<string, number>();
@@ -86,7 +104,12 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
     return next;
   };
 
-  const server = http.createServer((req, res) => {
+  const answer = (req: http.IncomingMessage, res: http.ServerResponse): void => {
+    if (!fromThisMachine(req.socket)) {
+      res.writeHead(403, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify({ error: { message: 'lab model proxy: only this machine may call it.' } }));
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
@@ -95,7 +118,8 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
         res.end(JSON.stringify({ error: { message: `lab model proxy: ${error instanceof Error ? error.message : String(error)}` } }));
       });
     });
-  });
+  };
+  const server = opts.tls ? https.createServer({ key: opts.tls.key, cert: opts.tls.cert }, answer) : http.createServer(answer);
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse, body: Buffer): Promise<void> {
     const started = Date.now();
@@ -159,10 +183,14 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
     await log({ ...base, status: upstream.status, ms: Date.now() - started, ...usageOf(kept), response: kept.slice(0, RESPONSE_KEPT) });
   }
 
-  await new Promise<void>((resolve) => server.listen(opts.port, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(opts.port, opts.host ?? '127.0.0.1', resolve);
+  });
   const port = (server.address() as AddressInfo).port;
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `${opts.tls ? 'https' : 'http'}://127.0.0.1:${port}`,
+    port,
     stop: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
