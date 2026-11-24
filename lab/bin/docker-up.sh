@@ -11,8 +11,17 @@ if ! command -v dockerd >/dev/null 2>&1 || ! docker compose version >/dev/null 2
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io docker-compose-v2 >/dev/null
 fi
 
+# A dockerd that is still starting, or still stopping its containers after it was told to end: wait for
+# it to finish one way or the other. A second one started meanwhile refuses to run.
+for _ in $(seq 60); do
+  docker info >/dev/null 2>&1 && break
+  pgrep -x dockerd >/dev/null 2>&1 || break
+  sleep 1
+done
+
 if ! docker info >/dev/null 2>&1; then
-  nohup dockerd >"$STATE/dockerd.log" 2>&1 &
+  rm -f /var/run/docker.pid
+  nohup dockerd >>"$STATE/dockerd.log" 2>&1 &
   for _ in $(seq 60); do
     docker info >/dev/null 2>&1 && break
     sleep 1

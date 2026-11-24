@@ -51,7 +51,11 @@
     "deploy": "./scripts/deploy.sh",
     "copr": "./scripts/copr-build.sh",
     "lab:test": "vitest run --config lab/vitest.config.ts",
-    "lab:typecheck": "tsc -p lab/tsconfig.json"
+    "lab:typecheck": "tsc -p lab/tsconfig.json",
+    "lab:up": "tsx lab/cli.ts up",
+    "lab:reset": "tsx lab/cli.ts reset",
+    "lab:down": "tsx lab/cli.ts down",
+    "lab:status": "tsx lab/cli.ts status"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^2.6.0",
