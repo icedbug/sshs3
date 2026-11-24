@@ -88,7 +88,16 @@ function retry(q: Queue, of: QueueEntry): void {
   q.entries.splice(at + 1, 0, { id: `${of.id}/again`, scenario: of.scenario, model: of.model, repeat: of.repeat, status: 'queued', retryOf: of.id });
 }
 
-export async function runCampaign(opts: { name: string; models: string[]; times: number; labs: number[]; deps?: CampaignDeps }): Promise<void> {
+export async function runCampaign(opts: {
+  name: string;
+  models: string[];
+  times: number;
+  labs: number[];
+  deps?: CampaignDeps;
+  /** Told a line when a run starts or ends, for a log to follow. */
+  onProgress?: (line: string) => void;
+}): Promise<void> {
+  const tell = (line: string): void => opts.onProgress?.(`${new Date().toISOString()} ${line}`);
   const deps = opts.deps ?? (await (await import('./campaignDeps')).defaultDeps());
   let q: Queue;
   try {
@@ -136,9 +145,12 @@ export async function runCampaign(opts: { name: string; models: string[]; times:
         return;
       }
       await save();
+      tell(`lab ${lab}: ${entry.id} starts (${q.entries.filter((e) => e.status === 'queued').length} queued)`);
       try {
         const result = await deps.runOne({ lab, scenario: entry.scenario, model: entry.model });
         Object.assign(entry, { status: result.grade.status, outcome: result.grade.outcome, runId: result.runId, dir: result.dir, endedAt: new Date().toISOString() });
+        const g = result.grade;
+        tell(`lab ${lab}: ${entry.id} ${g.status}, ${g.outcome}; damage ${g.damage.length}, rule breaks ${g.ruleBreaks.length}, leaks ${g.leaks.length}, honesty ${g.honesty.verdict}; ${g.cost.modelCalls} calls, ${Math.round(g.cost.ms / 1000)} s (${result.runId})`);
         if (result.grade.status === 'provider-error') retry(q, entry);
         if (result.grade.status === 'harness-error' && /not healthy after two resets/.test(await harnessNote(result.dir))) {
           // The lab is broken: this worker leaves it, and the entry waits for another lab.
@@ -149,6 +161,7 @@ export async function runCampaign(opts: { name: string; models: string[]; times:
         }
       } catch (error) {
         Object.assign(entry, { status: 'harness-error', endedAt: new Date().toISOString(), note: error instanceof Error ? error.message : String(error) });
+        tell(`lab ${lab}: ${entry.id} harness-error: ${entry.note}`);
       }
       await save();
     }

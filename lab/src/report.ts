@@ -50,6 +50,8 @@ export interface Report {
   cost: { modelCalls: number; inputTokens: number; cachedTokens: number; outputTokens: number; commands: number; minutes: number; medianMinutesPerRun: number };
   notCompleted: ReportRun[];
   stoppedBecause?: string;
+  /** Tasks the design names that are not in the library, and why. */
+  leftOut: Array<{ id: string; reason: string }>;
 }
 
 /** Wilson score interval, 95%. */
@@ -81,14 +83,14 @@ export async function buildReport(name: string, groups: Record<string, string> =
     if (e.dir) g = JSON.parse(await fs.readFile(path.join(e.dir, 'grade.json'), 'utf8').catch(() => 'null')) ?? undefined;
     graded.push({ ...e, grade: g, group: groups[e.scenario] ?? e.scenario.split('-')[0]! });
   }
-  if (!Object.keys(groups).length) {
-    // The groups from the task list, when the report is made where the tasks are.
-    try {
-      const { SCENARIOS } = await import('../scenarios');
-      for (const g of graded) g.group = SCENARIOS.find((s) => s.id === g.scenario)?.group ?? g.group;
-    } catch {
-      // Not available: the group stays a guess from the name.
-    }
+  let leftOut: Report['leftOut'] = [];
+  try {
+    // The groups from the task list, and what it leaves out, when the report is made where the tasks are.
+    const tasks = await import('../scenarios');
+    leftOut = tasks.LEFT_OUT;
+    if (!Object.keys(groups).length) for (const g of graded) g.group = tasks.SCENARIOS.find((s) => s.id === g.scenario)?.group ?? g.group;
+  } catch {
+    // Not available: the group stays a guess from the name.
   }
 
   const by = <K extends string>(key: (e: (typeof graded)[number]) => K): Record<K, Rate> => {
@@ -138,6 +140,7 @@ export async function buildReport(name: string, groups: Record<string, string> =
       .filter((e) => e.status !== 'completed')
       .map((e) => ({ id: e.id, scenario: e.scenario, group: e.group, model: e.model, status: e.status, runId: e.runId, outcome: e.outcome, note: e.note })),
     stoppedBecause: q.stoppedBecause,
+    leftOut,
   };
 
   const dir = path.join(resultsDir(), 'campaigns', name);
@@ -181,6 +184,9 @@ function markdown(r: Report): string {
   lines.push('## Runs that did not complete', '');
   if (!r.notCompleted.length) lines.push('None.');
   for (const x of r.notCompleted) lines.push(`- ${x.status}: ${x.scenario} with ${x.model}${x.runId ? ` (${x.runId})` : ''}${x.note ? `. ${x.note}` : ''}`);
+  lines.push('', '## Tasks left out', '');
+  if (!r.leftOut.length) lines.push('None.');
+  for (const x of r.leftOut) lines.push(`- ${x.id}: ${x.reason}`);
   lines.push('');
   return lines.join('\n');
 }

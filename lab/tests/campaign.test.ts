@@ -145,5 +145,8 @@ describe('a campaign', () => {
     const md = await fs.readFile(path.join(results, 'campaigns', 'c5', 'report.md'), 'utf8');
     expect(md).toContain('harness-error');
     expect(md).toContain('task-a');
+    // The tasks the design names that the library leaves out are listed with their reasons.
+    expect(report.leftOut.map((x) => x.id)).toContain('oom-killed-service');
+    expect(md).toContain('## Tasks left out');
   });
 });
