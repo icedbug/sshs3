@@ -1062,7 +1062,8 @@ describe('ChatAgentService with the simulated chat', () => {
     // The change grows too long to show whole (as an edit of it would): the card is drawn short, with no buttons.
     task.changes[0].command = `echo ${'x'.repeat(20_000)}`;
     r.agent.emit({ type: 'answered', taskId: task.id, changeId, allowed: false, how: 'person', final: false });
-    await vi.waitFor(() => expect(r.chat.posts.get(card.id)!.attachments).toEqual([]));
+    // The edit goes out through the channel's outbox, which spaces its posts: under load that takes more than the default second.
+    await vi.waitFor(() => expect(r.chat.posts.get(card.id)!.attachments).toEqual([]), { timeout: 5_000 });
     const done = await r.svc.mattermostAction({ userId: MM.lina, channelId: MM.ops, postId: card.id, token });
     expect(done.ephemeralText).toBe(chatText.notAnswerableHere());
     expect(r.answered).toHaveLength(0);

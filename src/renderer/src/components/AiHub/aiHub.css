@@ -68,6 +68,8 @@
 
 .ai-hub-panel {
   flex: none;
+  /* A width saved on a wide screen must not push the panel off a narrow one (a phone): it is cut on the left. */
+  max-width: 100vw;
 }
 
 .ai-hub-hub {
