@@ -19,6 +19,7 @@ import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
 import { verifyStandardWebhook, WEBHOOK_TOLERANCE_SECONDS } from '../ai/hub/Notifier';
 import { createLogger } from '../log';
 import { createWsSender } from './wsSender';
+import { callerAddress, isSecureRequest, plainAddress } from './trustedProxies';
 
 const log = createLogger('web');
 
@@ -55,16 +56,6 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
     }
   }
   return out;
-}
-
-function isSecureRequest(req: http.IncomingMessage): boolean {
-  const sock = req.socket as { encrypted?: boolean } | undefined;
-  if (sock?.encrypted === true) return true;
-  const proto = req.headers['x-forwarded-proto'];
-  if (typeof proto === 'string') {
-    return proto.split(',')[0]!.trim().toLowerCase() === 'https';
-  }
-  return false;
 }
 
 function buildSessionCookie(
@@ -197,12 +188,6 @@ function publicUrlFromEnv(): string | undefined {
     // Not an address: as if it were not set.
   }
   return undefined;
-}
-
-/** An address as the socket gives it, without the IPv4-in-IPv6 prefix, so "::ffff:10.0.0.5" is "10.0.0.5". */
-function plainAddress(address: string | undefined): string {
-  const a = (address ?? '').trim().toLowerCase();
-  return a.startsWith('::ffff:') && a.includes('.') ? a.slice('::ffff:'.length) : a;
 }
 
 /** The addresses Mattermost's server posts button presses from (SSHS3_MATTERMOST_ACTION_FROM, comma separated). */
@@ -430,7 +415,14 @@ interface WsConnectionEntry {
   pongTimer?: NodeJS.Timeout;
   backpressureEvents: number;
   droppedStreamFrames: number;
+  /** Set once the connection is being closed: it is not served any more, whatever still arrives on it. */
+  closing?: boolean;
+  /** Takes the connection off the account's clients and forgets what waits to be sent. Called when it is closed. */
+  release?: () => void;
 }
+
+/** How long a connection that was told to close may take to go before it is cut. */
+const WS_CLOSE_GRACE_MS = 2000;
 
 export interface Sshs3WebServerOptions {
   port?: number;
@@ -453,6 +445,8 @@ export interface Sshs3WebServerOptions {
   chatAgent?: { api?: AgentBotApi; transport?: ChatTransportFactory; tryWaitMs?: number; outboxGaps?: ChatAnsweringOptions['outboxGaps'] };
   /** Max time to wait for a WS pong before reaping zombie socket (default: 10000). */
   wsHeartbeatTimeoutMs?: number;
+  /** How long a connection that was told to close may take to go before it is cut, in milliseconds (default: 2000). */
+  wsCloseGraceMs?: number;
   /** High-water threshold on socket.writableLength before queueing frames (default: 262144). */
   wsHighWaterBytes?: number;
   /** Hard cap on writableLength + queued bytes before dropping stream chunks or closing slow sockets (default: 16777216). */
@@ -636,24 +630,44 @@ export class Sshs3WebServer {
     return { userId: entry.userId, ...(entry.session ? { session: entry.session } : {}) };
   }
 
-  /** Closes a connection. With `policy`, the client is told why (1008): its sign-in ended, it is not a fault. */
+  /**
+   * Closes a connection. With `policy`, the client is told why (1008): its sign-in ended, it is not a fault.
+   *
+   * The close frame is the last thing written and the socket is ended, not cut: cut at once, a frame
+   * that still waits behind earlier output never leaves, and the client sees a dropped connection
+   * instead of the reason. A client that does not go by itself is cut after a short while.
+   */
   private reapWsEntry(entry: WsConnectionEntry, policy?: string): void {
     if (entry.pongTimer) {
       clearTimeout(entry.pongTimer);
       entry.pongTimer = undefined;
     }
-    try {
-      if (!entry.socket.destroyed && entry.socket.writable) {
-        entry.socket.write(policy ? encodeWsControlFrame(0x8, wsClosePayload(1008, policy)) : encodeWsControlFrame(0x8));
+    if (entry.closing) return;
+    entry.closing = true;
+    // From here on it is not a client of the account: nothing more is sent to it or done for it.
+    entry.release?.();
+    this.activeWsEntries.delete(entry.socket);
+    const socket = entry.socket;
+    const cut = (): void => {
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
+    };
+    if (socket.destroyed || !socket.writable) {
+      cut();
+      return;
     }
     try {
-      entry.socket.destroy();
+      socket.end(policy ? encodeWsControlFrame(0x8, wsClosePayload(1008, policy)) : encodeWsControlFrame(0x8));
     } catch {
-      // ignore
+      cut();
+      return;
     }
+    const timer = setTimeout(cut, Math.max(0, this.options.wsCloseGraceMs ?? WS_CLOSE_GRACE_MS));
+    timer.unref?.();
+    socket.once('close', () => clearTimeout(timer));
   }
 
   private startWsHeartbeat(): void {
@@ -778,7 +792,8 @@ export class Sshs3WebServer {
     const now = Date.now();
     // Two limits, neither of which a stranger can use against a real sender: wrong addresses are
     // limited per caller, and accepted alerts per hook. Old entries age out; nothing is cleared wholesale.
-    const caller = `ip:${req.socket.remoteAddress ?? '?'}`;
+    // Behind a trusted proxy (SSHS3_TRUSTED_PROXIES) the caller is whom the proxy took the request from.
+    const caller = `ip:${callerAddress(req) || '?'}`;
     const recent = (key: string): number[] => (this.hookHits.get(key) ?? []).filter((t) => now - t < 60_000);
     if (recent(caller).length >= 20) {
       sendJson(res, 429, { error: 'Too many wrong hook addresses from here; try again in a minute.' });
@@ -1151,7 +1166,9 @@ export class Sshs3WebServer {
     // Login
     if (pathname === '/api/auth/login' && method === 'POST') {
       const body = await readJsonBody(req);
-      const clientIp = req.socket.remoteAddress || 'local';
+      // The address the limit per caller counts: the socket's, or behind a trusted proxy
+      // (SSHS3_TRUSTED_PROXIES) the one the proxy took the request from.
+      const clientIp = callerAddress(req) || 'local';
       try {
         const { user, sessionToken } = await this.auth.login(
           String(body.username || ''),
@@ -1581,6 +1598,10 @@ export class Sshs3WebServer {
 
     const clientId = tenant.registerClient(socket, (payload) => sendFrame(payload));
     entry.clientId = clientId;
+    entry.release = () => {
+      sender.clear();
+      tenant.unregisterClient(clientId);
+    };
     this.activeSockets.add(socket);
     this.activeWsEntries.set(socket, entry);
 
@@ -1596,6 +1617,8 @@ export class Sshs3WebServer {
     attachWsFrameParser(
       socket,
       (rawText) => {
+        // A connection that was told to close is not served while it goes.
+        if (entry.closing) return;
         markAlive();
         void (async () => {
           let parsed: {

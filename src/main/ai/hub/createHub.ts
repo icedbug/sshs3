@@ -22,7 +22,7 @@ import type {
 } from "../../../shared/types/storage";
 import type { TeamVaultPayload } from "../../../shared/types/teamVault";
 import type { InventoryTarget } from "./ContextService";
-import { sshClientFileArgs } from "../../web/tenantBoundary";
+import { accountChildEnv, sshClientFileArgs } from "../../web/tenantBoundary";
 import { boundedContext, clip, maskContext, safeError } from "./privacy";
 import {
   appendDemoActivity,
@@ -1069,7 +1069,7 @@ export function createHub(
     execOnServer: async (profileId, script, timeoutMs = 60_000) => {
       // On a shared server "local" is the server itself, as its own account: a server named "local" is not read there.
       if (profileId === "local" && bridge.tenantHomeDir) throw new Error("This is a shared sshs3 server: the server itself is not read as one of your servers.");
-      if (profileId === "local") return { ...(await runWithStdin("sh", ["-s"], script, process.env, timeoutMs)), via: "local" as const };
+      if (profileId === "local") return { ...(await runWithStdin("sh", ["-s"], script, accountChildEnv(), timeoutMs)), via: "local" as const };
       const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
       // An open tab to this server already has a connection: the script goes over it, beside the terminal, not into it.
       const open = hub.terminals.list().find((t) => t.kind === "ssh" && t.profileId === profileId && t.state !== "disconnected");
@@ -1079,7 +1079,7 @@ export function createHub(
           sshBinary,
           [...sshClientFileArgs(live.config), "-S", live.controlPath, "-T", "-o", "ControlMaster=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none", "--", live.config.host, "sh -s"],
           script,
-          process.env,
+          accountChildEnv(),
           timeoutMs,
         );
         if (viaTab.ok) return { ...viaTab, via: "open-tab" as const };
@@ -1087,7 +1087,7 @@ export function createHub(
       // Otherwise a connection of the hub's own, for as long as the script takes. BatchMode: no prompt is ever shown.
       const profile = await resolveUnattendedProfile(profileId);
       const config = await bridge.resolveProxyJumpConfig({ ...profile, id: crypto.randomUUID(), autoReconnect: false });
-      const env: NodeJS.ProcessEnv = { ...process.env, ...SmartcardDetector.buildProxyEnv(config) };
+      const env: NodeJS.ProcessEnv = { ...accountChildEnv(), ...SmartcardDetector.buildProxyEnv(config) };
       if (config.agentPath) env.SSH_AUTH_SOCK = config.agentPath;
       const own = await runWithStdin(
         sshBinary,

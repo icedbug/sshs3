@@ -105,6 +105,15 @@ export function serverEnvForAccountChild(env: NodeJS.ProcessEnv): Record<string,
 }
 
 /**
+ * What a child that is started for whoever uses the app inherits from the app's own environment. On
+ * the desktop that is all of it: the environment is the person's own. On a web server the caller is
+ * an account and the environment is the server's, so it is the filtered part.
+ */
+export function accountChildEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return webServerProcess ? serverEnvForAccountChild(env) : (env as Record<string, string>);
+}
+
+/**
  * The arguments that make an ssh child read the account's files. On the desktop: none, ssh reads the
  * person's own `~/.ssh`. On a web server a config without the account's files is refused.
  */

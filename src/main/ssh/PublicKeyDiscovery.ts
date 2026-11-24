@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { accountChildEnv } from '../web/tenantBoundary';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -71,7 +72,7 @@ export async function listAgentPublicKeys(
   label: string,
   socketPath?: string
 ): Promise<LocalPublicKey[]> {
-  const env = { ...process.env } as Record<string, string>;
+  const env = { ...accountChildEnv() };
   if (socketPath) env.SSH_AUTH_SOCK = socketPath;
   if (!env.SSH_AUTH_SOCK) return [];
   const bin = process.platform === 'win32' ? 'ssh-add.exe' : 'ssh-add';

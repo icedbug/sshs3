@@ -5,6 +5,7 @@ import { setHeadlessUserDataPath } from './electronShim';
 import { Sshs3WebServer } from './WebServer';
 import { demoWorkspaceDir, isDemoMode } from '../demo/demoMode';
 import { installProcessGuards } from './processGuards';
+import { trustedProxies } from './trustedProxies';
 
 // This is a CLI entry point: the startup banner is meant for the operator's terminal,
 // so it goes straight to stdout/stderr rather than through the levelled main-process logger.
@@ -79,6 +80,15 @@ async function main(): Promise<void> {
         : 'off (a user\'s background work starts when they log in; set SSHS3_WORKFORCE=1)'
     }`,
   );
+  const proxies = trustedProxies();
+  out(
+    `  Proxies:    ${
+      proxies.entries.length
+        ? `trusted: ${proxies.entries.join(', ')}`
+        : 'none trusted (X-Forwarded-For and X-Forwarded-Proto are not read; set SSHS3_TRUSTED_PROXIES behind a reverse proxy)'
+    }`,
+  );
+  if (proxies.ignored.length) out(`              not an address or a range, left out: ${proxies.ignored.join(', ')}`);
   out('============================================================');
 
   const shutdown = async (signal: string) => {

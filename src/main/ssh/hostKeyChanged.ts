@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { accountChildEnv } from '../web/tenantBoundary';
 import type { HostKeyPromptInfo } from './HostKeyVerifier';
 
 export interface HostKeyChangedInfo {
@@ -65,7 +66,7 @@ export function findChangedKey(known: Map<string, string>, scanned: Map<string, 
 
 function run(binary: string, args: string[], stdin?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile(binary, args, { timeout: 10_000 }, (err, stdout, stderr) => {
+    const child = execFile(binary, args, { timeout: 10_000, env: accountChildEnv() }, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr.trim() || err.message));
       else resolve(stdout);
     });

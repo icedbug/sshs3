@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Starts the built web server on a free port with an empty data folder and checks that it answers:
-// the health route, the sign-in status, and a page that loads the client's JavaScript.
+// the health route, the sign-in status, and a page that loads the client's JavaScript, its icon and
+// its manifest. Also that the server's own folder holds only what the server runs.
 // Run `npm run build:web` first.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import * as path from 'node:path';
@@ -82,6 +83,16 @@ try {
   const script = html.match(/<script[^>]+src="([^"]+\.js)"/)[1];
   const js = await fetch(new URL(script, `${base}/`));
   if (!js.ok || !String(js.headers.get('content-type')).includes('javascript')) throw new Error(`the client script ${script} was not served as JavaScript`);
+
+  // The page's icon and manifest come from the client build, as the page names them.
+  for (const [href, type] of [['icon-512.png', 'image/png'], ['manifest.webmanifest', 'manifest+json']]) {
+    if (!html.includes(`./${href}`)) throw new Error(`the start page does not name ${href}`);
+    const res = await fetch(new URL(href, `${base}/`));
+    if (!res.ok || !String(res.headers.get('content-type')).includes(type)) throw new Error(`${href} was not served as ${type} (${res.status})`);
+  }
+  // The server build is the server and what it loads: no copy of the page's files beside it.
+  const stray = readdirSync(path.dirname(SERVER)).filter((name) => !/^(server\.mjs|chunks|[A-Za-z]+\.cjs)$/.test(name));
+  if (stray.length) throw new Error(`dist-web/ holds files the server does not run: ${stray.join(', ')}`);
 
   // A route that needs a session must refuse a visitor who has none.
   const guarded = await fetch(`${base}/api/admin/users`);

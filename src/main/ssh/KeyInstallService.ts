@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { accountChildEnv } from '../web/tenantBoundary';
 import fs from 'node:fs/promises';
 import { SmartcardDetector } from '../smartcard/SmartcardDetector';
 import { AskpassServer } from '../smartcard/AskpassServer';
@@ -149,7 +150,7 @@ export async function runSshCommand(
   try {
     await askpass.start();
     const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...accountChildEnv(),
       ...askpass.getEnv(),
       ...SmartcardDetector.buildProxyEnv(config),
     };
@@ -422,7 +423,7 @@ export async function verifyKeyLogin(
     'true'
   );
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
+    ...accountChildEnv(),
     ...SmartcardDetector.buildProxyEnv(probe),
   };
   return new Promise<boolean>((resolve) => {

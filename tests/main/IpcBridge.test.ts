@@ -1550,6 +1550,26 @@ describe('IpcBridge', () => {
       expect(mockTransferQueue.addJob).not.toHaveBeenCalled();
     });
 
+    it('says at once that the source could not be looked at in transferAdd, and queues nothing', async () => {
+      const gone = {
+        ...mockStorageRegistry.providers.get('test-storage'),
+        stat: vi.fn().mockRejectedValue(new Error('Path not found: /src/gone.txt')),
+      };
+      mockStorageRegistry.providers.set('gone-storage', gone as any);
+      mockTransferQueue.addJob.mockClear();
+
+      await expect(
+        mockIpc.invoke(IPC_CHANNELS.TRANSFER_ADD, {
+          sourceProviderId: 'gone-storage',
+          sourcePath: '/src/gone.txt',
+          targetProviderId: 'test-storage',
+          targetPath: '/dst/gone.txt',
+          conflictPolicy: 'overwrite',
+        })
+      ).rejects.toThrow('Cannot copy "gone.txt": Path not found: /src/gone.txt');
+      expect(mockTransferQueue.addJob).not.toHaveBeenCalled();
+    });
+
     it('rejects overwriting a file with itself in transferAdd and queues nothing', async () => {
       mockTransferQueue.addJob.mockClear();
 

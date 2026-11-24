@@ -4,7 +4,7 @@ import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import { SmartcardDetector } from '../smartcard/SmartcardDetector';
 import type { IDotfileTransport } from './DotfileSyncService';
 import { quoteShellArg } from '../search/shellQuote';
-import { sshClientFileArgs } from '../web/tenantBoundary';
+import { accountChildEnv, sshClientFileArgs } from '../web/tenantBoundary';
 
 // chmod mode must be a plain octal permission string (e.g. "644", "0750").
 // Dotfile pool entries can arrive from remote profile sync — a compromised
@@ -74,12 +74,12 @@ export class DotfileCliTransport implements IDotfileTransport {
         target,
         remoteCmd,
       ];
-      env = { ...(process.env as Record<string, string>) };
+      env = { ...accountChildEnv() };
     } else {
       const baseArgs = SmartcardDetector.buildSSHArguments(this.config);
       args = [...baseArgs, remoteCmd];
       env = {
-        ...(process.env as Record<string, string>),
+        ...accountChildEnv(),
         ...SmartcardDetector.buildProxyEnv(this.config),
       };
       if (this.config.agentPath) {

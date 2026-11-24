@@ -46,6 +46,9 @@ async function buildServer() {
   await build({
     configFile: false,
     root: rootDir,
+    // public/ holds the page's icon and manifest. They belong to the client build (dist-web-ui/),
+    // which the server serves from. Copied here too, nothing read them.
+    publicDir: false,
     define: { __SSHS3_VERSION__: JSON.stringify(version) },
     resolve: {
       alias: {
@@ -78,6 +81,9 @@ async function buildServer() {
         output: {
           format: 'esm',
           entryFileNames: 'server.mjs',
+          // The parts the server loads when it first needs them (reading a PDF, a web page). The
+          // default folder name is "assets", which looked like files for the browser.
+          chunkFileNames: 'chunks/[name]-[hash].js',
         },
       },
     },

@@ -128,6 +128,70 @@ describe('AgentBotStore', () => {
     expect(store.view()[0]).toMatchObject({ hasToken: false, hasAppToken: false });
   });
 
+  it('keeps tokens it could not open on one start, says so, and reads them again with the right key', async () => {
+    const { dir, store } = await fresh();
+    await store.save({ service: 'slack', token: BOT, appToken: APP });
+    await store.setIdentity('slack', { userId: 'UAGENT', name: 'agent' });
+    const file = path.join(dir, 'chat-agent', 'connections.json');
+    const stored = async (): Promise<{ token: string; appToken: string; enabled: boolean }> => JSON.parse(await fs.readFile(file, 'utf8')).connections[0];
+    const sealed = await stored();
+
+    // A start with another key: the key file is not the one the tokens were saved with.
+    const key = path.join(dir, 'server-master.key');
+    await fs.rename(key, `${key}.right`);
+    setHeadlessUserDataPath(dir);
+    const wrongKey = new AgentBotStore(dir, { guard: () => LOCAL, clock: () => 2_000 });
+    await wrongKey.initialize();
+    expect(wrongKey.slack(true)).toBeUndefined();
+    const view = wrongKey.view()[0];
+    expect(view).toMatchObject({ hasToken: false, hasAppToken: false, identity: { userId: 'UAGENT', name: 'agent' } });
+    expect(view.lastError).toBe(
+      "The agent bot's Slack tokens could not be read on this start: the server's key (SSHS3_MASTER_KEY, or the key file in the data folder) did not open what is stored. It is kept as it is. Start the server with the key that was used when they were saved, or enter the tokens again.",
+    );
+    // Everything that saves the file on such a start writes the tokens back as they were stored.
+    await wrongKey.setEnabled('slack', false);
+    await wrongKey.setError('slack', 'Slack did not answer');
+    await wrongKey.setIdentity('slack', { userId: 'UAGENT', name: 'agent' });
+    expect(await stored()).toMatchObject({ token: sealed.token, appToken: sealed.appToken, enabled: false });
+    // The note about the tokens stays in front of any other error.
+    expect(wrongKey.view()[0].lastError).toContain('could not be read on this start');
+    // A form that leaves the tokens empty cannot be saved: there is nothing to keep using.
+    await expect(wrongKey.save({ service: 'slack', enabled: true })).rejects.toThrow("agent bot's token is needed");
+    expect(await stored()).toMatchObject({ token: sealed.token, appToken: sealed.appToken });
+
+    // The next start has the right key again: the tokens are there, and nothing says otherwise.
+    await fs.rm(key, { force: true });
+    await fs.rename(`${key}.right`, key);
+    setHeadlessUserDataPath(dir);
+    const rightKey = new AgentBotStore(dir, { guard: () => LOCAL });
+    await rightKey.initialize();
+    expect(rightKey.slack(true)).toEqual({ botToken: BOT, appToken: APP });
+    expect(rightKey.view()[0]).toMatchObject({ hasToken: true, hasAppToken: true, lastError: 'Slack did not answer' });
+  });
+
+  it('lets a person enter new tokens over ones that could not be opened', async () => {
+    const { dir, store } = await fresh();
+    await store.save({ service: 'mattermost', baseUrl: 'http://127.0.0.1:8065', token: 'mm-token-123456' });
+    const file = path.join(dir, 'chat-agent', 'connections.json');
+    const before = JSON.parse(await fs.readFile(file, 'utf8')).connections[0].token as string;
+    await fs.rm(path.join(dir, 'server-master.key'));
+    setHeadlessUserDataPath(dir);
+    const next = new AgentBotStore(dir, { guard: () => LOCAL });
+    await next.initialize();
+    expect(next.view()[0].lastError).toBe(
+      "The agent bot's Mattermost token could not be read on this start: the server's key (SSHS3_MASTER_KEY, or the key file in the data folder) did not open what is stored. It is kept as it is. Start the server with the key that was used when it was saved, or enter the token again.",
+    );
+    await next.save({ service: 'mattermost', token: 'mm-new-token-7890' });
+    expect(next.view()[0]).toMatchObject({ hasToken: true });
+    expect(next.view()[0].lastError).toBeUndefined();
+    expect(next.mattermost()).toEqual({ baseUrl: 'http://127.0.0.1:8065', token: 'mm-new-token-7890' });
+    const after = JSON.parse(await fs.readFile(file, 'utf8')).connections[0].token as string;
+    expect(after).not.toBe(before);
+    // Removing the connection forgets what could not be opened too.
+    await next.remove('mattermost');
+    expect(JSON.parse(await fs.readFile(file, 'utf8')).connections).toEqual([]);
+  });
+
   it('writes one at a time, so the file holds the last change', async () => {
     const { dir, store } = await fresh();
     await store.save({ service: 'slack', token: BOT, appToken: APP });

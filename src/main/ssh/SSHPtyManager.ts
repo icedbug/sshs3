@@ -66,7 +66,7 @@ import { listAgentPublicKeys } from './PublicKeyDiscovery';
 import type { AskpassPromptRetryContext } from '../smartcard/AskpassServer';
 import { createLogger } from '../log';
 import { createMuxControlPath } from './muxControlPath';
-import { clientTerminalEnv, isWebServerProcess, serverEnvForAccountChild, sshClientFileArgs } from '../web/tenantBoundary';
+import { accountChildEnv, clientTerminalEnv, isWebServerProcess, serverEnvForAccountChild, sshClientFileArgs } from '../web/tenantBoundary';
 const sshLog = createLogger('ssh');
 
 export const CONPTY_WRITE_CHUNK_BYTES = 512;
@@ -797,7 +797,7 @@ export class InternalSSHPtySession implements SSHPtySession {
           await new Promise<void>((resolve) => {
             const sshBinary = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
             // Bounded: never let a stuck/unresponsive master block session cleanup.
-            execFile(sshBinary, [...sshClientFileArgs(this.config), '-S', controlPath, '-O', 'exit', '--', host], { timeout: 3000 }, () => resolve());
+            execFile(sshBinary, [...sshClientFileArgs(this.config), '-S', controlPath, '-O', 'exit', '--', host], { timeout: 3000, env: accountChildEnv() }, () => resolve());
           });
         }
       } catch {
@@ -1229,7 +1229,7 @@ export class SSHPtyManager extends EventEmitter {
     }
 
     const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...accountChildEnv(),
       TERM: 'xterm-256color',
     };
     delete env.SSHS3_NATIVE_TOOL_KEY;

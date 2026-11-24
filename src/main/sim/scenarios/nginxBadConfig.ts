@@ -129,7 +129,8 @@ export const nginxBadConfig: SimScenario = {
         return { pass: true, why: `/api/ is limited through the zone "${used}".` };
       },
     },
-    { id: "report", kind: "report", title: "The report names the cause", test: ({ report }) => reportNames(report, [["zone", "limit_req", "rate limit"], ["config", "restart", "upgrade", "reload"]]) },
+    // The cause can be said in general words or by its names: "the zone in the config", or "shop.conf defines api_limit but refers to api".
+    { id: "report", kind: "report", title: "The report names the cause", test: ({ report }) => reportNames(report, [["zone", "limit_req", "rate limit", "api_limit"], ["config", "restart", "upgrade", "reload", "shop.conf"]]) },
   ],
   runbook: {
     title: "nginx will not start",

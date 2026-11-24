@@ -92,12 +92,11 @@ describe('web server: an account\'s local files stay in its own folder', () => {
     await expect(omar.invoke('storage:create-folder', 'local', 'esc/made-by-member')).rejects.toThrow(/outside the allowed base directory/);
     await expect(omar.invoke('storage:rename', 'local', 'esc/server-secret.txt', 'mine.txt')).rejects.toThrow(/outside the allowed base directory/);
     await expect(omar.invoke('storage:chmod', 'local', 'secret-link.txt', '777')).rejects.toThrow(/outside the allowed base directory/);
-    // A copy is queued and then fails when it reads: whatever it leaves behind is not the server's file.
-    await omar.invoke('transfer:add', { sourceProviderId: 'local', sourcePath: 'secret-link.txt', targetProviderId: 'local', targetPath: 'copy.txt' });
-    await vi.waitFor(async () => {
-      const jobs = (await omar.invoke('transfer:get-jobs')) as Array<{ status: string }>;
-      expect(jobs.every((job) => job.status === 'failed' || job.status === 'error')).toBe(true);
-    });
+    // A copy is refused at once, before anything is queued: the source cannot be looked at.
+    await expect(omar.invoke('transfer:add', { sourceProviderId: 'local', sourcePath: 'secret-link.txt', targetProviderId: 'local', targetPath: 'copy.txt' })).rejects.toThrow(
+      /Cannot copy "secret-link.txt": .*outside the allowed base directory/,
+    );
+    expect(await omar.invoke('transfer:get-jobs')).toEqual([]);
     expect(await fs.readFile(path.join(sandbox, 'copy.txt'), 'utf8').catch(() => '')).not.toContain('SERVER-ONLY-SECRET');
     expect(fssync.existsSync(path.join(kit.dataDir, 'written-by-member.txt'))).toBe(false);
     expect(fssync.existsSync(path.join(kit.dataDir, 'not-there-yet.txt'))).toBe(false);

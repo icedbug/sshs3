@@ -820,9 +820,18 @@ export class WebAuthService {
       passwordHash: hash,
       createdAt: Date.now(),
     };
+    // The account is in the list before its key is made, so nobody else can take the name meanwhile.
     this.data.users.push(record);
-    await this.ensureUserSshKey(record.id, record.username);
-    await this.save();
+    try {
+      await this.ensureUserSshKey(record.id, record.username);
+      await this.save();
+    } catch (error) {
+      // No key, or nothing written: the account does not exist. Left in memory it would hold the name,
+      // count as "an administrator is already set up", and be written by the next save.
+      this.data.users = this.data.users.filter((u) => u !== record);
+      await fsp.rm(this.getUserDataDir(record.id), { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
     return record;
   }
 

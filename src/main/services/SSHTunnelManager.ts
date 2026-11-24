@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { accountChildEnv } from '../web/tenantBoundary';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { SmartcardDetector } from '../smartcard/SmartcardDetector';
@@ -113,7 +114,7 @@ export class SSHTunnelManager extends EventEmitter {
     }
 
     const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...accountChildEnv(),
       ...askpassEnv,
       ...SmartcardDetector.buildProxyEnv(config),
     };

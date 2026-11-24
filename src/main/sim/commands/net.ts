@@ -16,13 +16,21 @@ export interface Reach {
   body?: string;
 }
 
-/** Asks `host:port` for a path, from a server of the lab. */
-export function reach(ctx: Pick<SimContext, "host" | "shell">, name: string, port: number, path: string): Reach {
+/**
+ * Asks `host:port` for a path, from a server of the lab. `site` is the name the request is for (its
+ * `Host` header) when that is not the name the connection goes to: a page or a service the server
+ * keeps under that name answers before the server's own.
+ */
+export function reach(ctx: Pick<SimContext, "host" | "shell">, name: string, port: number, path: string, site = name): Reach {
   const world = ctx.shell.world;
   const local = name === "localhost" || name === "127.0.0.1" || name === ctx.host.name || name === ctx.host.address;
   const address = local ? ctx.host.address : world?.resolve(name);
   if (!address) return { curlCode: 6 };
-  const endpoint = world?.endpoints.get(`${name.toLowerCase()}:${port}`) ?? world?.endpoints.get(`${address}:${port}`);
+  const named = site.toLowerCase();
+  const endpoint =
+    world?.endpoints.get(`${name.toLowerCase()}:${port}`) ??
+    world?.endpoints.get(`${address}:${port}`) ??
+    (named !== name.toLowerCase() && world?.resolve(named) === address ? world.endpoints.get(`${named}:${port}`) : undefined);
   if (endpoint) return { address, ...endpoint(path, ctx.host) };
   const target: SimHost | undefined = local ? ctx.host : world?.host(address);
   const listener = target?.listening().find((l) => l.port === port && l.proto === "tcp");
@@ -30,15 +38,76 @@ export function reach(ctx: Pick<SimContext, "host" | "shell">, name: string, por
   const service = target.service(listener.process);
   const sick = service?.healthy?.(target);
   if (sick) return { address, status: 503, body: `${sick}\n` };
-  const page = target.facts.get(`http:${port}${path}`) ?? target.facts.get(`http:${port}`);
+  const page = [`http:${named}:${port}${path}`, `http:${named}:${port}`, `http:${port}${path}`, `http:${port}`].map((key) => target.facts.get(key)).find((found) => typeof found === "string");
   return { address, status: 200, body: typeof page === "string" ? page : `OK ${target.name}:${port}\n` };
 }
 
 const REASON: Record<number, string> = { 200: "OK", 301: "Moved Permanently", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable" };
 
+/**
+ * The options the lab's curl reads: the ones that take a value, and the ones that are a switch. Several
+ * change nothing here (nothing in the lab waits, checks a certificate or sends a redirect), and are
+ * taken so that a usual command line runs. Any other option is unknown to it, and it says so: an
+ * option read as a host name gave "Could not resolve host: -".
+ */
+const CURL_TAKES = new Map(Object.entries({ o: "output", w: "write-out", m: "max-time", X: "request", H: "header", d: "data", D: "dump-header", u: "user", A: "user-agent", e: "referer", b: "cookie" }));
+const CURL_TAKES_LONG = new Set([...CURL_TAKES.values(), "connect-timeout", "resolve", "data-raw", "data-binary", "data-urlencode", "cacert", "capath", "retry", "retry-delay", "retry-max-time", "max-redirs"]);
+const CURL_SWITCH = new Map(Object.entries({ s: "silent", S: "show-error", k: "insecure", I: "head", L: "location", i: "include", f: "fail", v: "verbose", g: "globoff", "4": "ipv4", "6": "ipv6", N: "no-buffer", G: "get" }));
+const CURL_SWITCH_LONG = new Set([...CURL_SWITCH.values(), "compressed", "fail-with-body", "no-progress-meter", "http1.1", "http2", "tlsv1.2", "tlsv1.3"]);
+
+interface CurlAsk {
+  on: Set<string>;
+  /** Every value an option was given, in order: `-H` may come several times. */
+  values: Map<string, string[]>;
+  urls: string[];
+}
+
+/** Reads curl's command line. Gives back what is wrong with it, in curl's words, when an option is not one it knows. */
+function curlAsk(args: string[]): CurlAsk | string {
+  const ask: CurlAsk = { on: new Set(), values: new Map(), urls: [] };
+  const unknown = (option: string): string => `curl: option ${option}: is unknown\ncurl: try 'curl --help' or 'curl --manual' for more information\n`;
+  const take = (key: string, option: string, value: string | undefined): string | undefined => {
+    if (value === undefined) return `curl: option ${option}: requires parameter\ncurl: try 'curl --help' or 'curl --manual' for more information\n`;
+    ask.values.set(key, [...(ask.values.get(key) ?? []), value]);
+    return undefined;
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") continue;
+    if (a.startsWith("--")) {
+      const key = a.slice(2);
+      if (CURL_SWITCH_LONG.has(key)) ask.on.add(key);
+      else if (CURL_TAKES_LONG.has(key)) {
+        const wrong = take(key, a, args[++i]);
+        if (wrong) return wrong;
+      } else return unknown(a);
+      continue;
+    }
+    if (a.startsWith("-") && a.length > 1) {
+      // -sS is two switches; in -o/dev/null and -o /dev/null the value follows the letter.
+      for (let j = 1; j < a.length; j++) {
+        const on = CURL_SWITCH.get(a[j]);
+        if (on) {
+          ask.on.add(on);
+          continue;
+        }
+        const key = CURL_TAKES.get(a[j]);
+        if (!key) return unknown(`-${a[j]}`);
+        const wrong = take(key, `-${a[j]}`, a.slice(j + 1) || args[++i]);
+        if (wrong) return wrong;
+        break;
+      }
+      continue;
+    }
+    ask.urls.push(a);
+  }
+  return ask;
+}
+
 const curl: SimCommand = (ctx, args) => {
-  const { flags, values, rest } = parseArgs(args, ["o", "w", "m", "X", "H", "d", "max-time", "connect-timeout", "write-out", "output", "request", "header", "data", "resolve", "cacert", "u"]);
-  const raw = rest[0];
+  const ask = curlAsk(args);
+  if (typeof ask === "string") return fail(ask, 2);
+  const raw = ask.urls[0];
   if (!raw) return fail("curl: try 'curl --help' for more information\n", 2);
   let url: URL;
   try {
@@ -47,21 +116,40 @@ const curl: SimCommand = (ctx, args) => {
     return fail(`curl: (3) URL rejected: Malformed input to a URL function\n`, 3);
   }
   const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
-  const got = reach(ctx, url.hostname, port, url.pathname);
-  const silent = flags.has("s") || flags.has("silent");
-  const showErrors = !silent || flags.has("S") || flags.has("show-error");
-  if (got.curlCode === 6) return fail(showErrors ? `curl: (6) Could not resolve host: ${url.hostname}\n` : "", 6);
-  if (got.curlCode === 7) return fail(showErrors ? `curl: (7) Failed to connect to ${url.hostname} port ${port} after 0 ms: Couldn't connect to server\n` : "", 7);
+  const last = (key: string): string | undefined => ask.values.get(key)?.at(-1);
+  // --resolve name:port:address: the connection for that name and port goes to the address. The name stays the site asked for.
+  const pinned = (ask.values.get("resolve") ?? [])
+    .map((entry) => /^\+?([^:]+):(\d+):(.+)$/.exec(entry))
+    .find((m) => m && m[1].toLowerCase() === url.hostname.toLowerCase() && Number(m[2]) === port)?.[3];
+  // A Host header names the site, whatever address the request goes to.
+  const site = (ask.values.get("header") ?? []).map((header) => /^host:\s*([^\s:]+)/i.exec(header)?.[1]).find(Boolean) ?? url.hostname;
+  const got = reach(ctx, pinned ?? url.hostname, port, url.pathname, site);
+  const showErrors = !ask.on.has("silent") || ask.on.has("show-error");
+  const format = last("write-out");
+  // What -w prints. A request that got no answer has 000 for its status, as curl says it.
+  const written = (status?: number): string =>
+    format
+      ? format
+          .replace(/%\{(?:http_code|response_code)\}/g, status === undefined ? "000" : String(status))
+          .replace(/%\{remote_ip\}/g, got.address ?? "")
+          .replace(/\\n/g, "\n")
+      : "";
+  if (got.curlCode === 6) return { out: written(), err: showErrors ? `curl: (6) Could not resolve host: ${url.hostname}\n` : "", code: 6 };
+  if (got.curlCode === 7) return { out: written(), err: showErrors ? `curl: (7) Failed to connect to ${url.hostname} port ${port} after 0 ms: Couldn't connect to server\n` : "", code: 7 };
   const status = got.status ?? 200;
-  const format = values.get("w") ?? values.get("write-out");
-  const written = format ? format.replace(/%\{http_code\}/g, String(status)).replace(/%\{remote_ip\}/g, got.address ?? "").replace(/\\n/g, "\n") : "";
-  const headOnly = flags.has("I") || flags.has("head");
+  if (ask.on.has("fail") && status >= 400) return { out: written(status), err: showErrors ? `curl: (22) The requested URL returned error: ${status}\n` : "", code: 22 };
   const head = lines([`HTTP/1.1 ${status} ${REASON[status] ?? ""}`.trim(), "Server: nginx", "Content-Type: text/plain", `Content-Length: ${Buffer.byteLength(got.body ?? "")}`, ""]);
-  const target = values.get("o") ?? values.get("output");
-  const body = headOnly ? head : `${flags.has("i") || flags.has("include") ? head : ""}${got.body ?? ""}`;
-  const out = target ? written : `${body}${written}`;
-  if ((flags.has("f") || flags.has("fail")) && status >= 400) return fail(showErrors ? `curl: (22) The requested URL returned error: ${status}\n` : "", 22);
-  return ok(out);
+  const body = ask.on.has("head") ? head : `${ask.on.has("include") ? head : ""}${got.body ?? ""}`;
+  // Where the answer goes: -D names a file for the headers, -o one for the body. "-" is the terminal, /dev/null nowhere.
+  let out = "";
+  const send = (target: string | undefined, text: string): string | undefined => {
+    if (target === "-") out += text;
+    else if (target !== undefined && target !== "/dev/null") return ctx.shell.writeFile(target, text, false, ctx.root);
+    return undefined;
+  };
+  const wrong = send(last("dump-header"), head) ?? send(last("output") ?? "-", body);
+  if (wrong) return { out, err: showErrors ? "curl: (23) Failure writing output to destination\n" : "", code: 23 };
+  return ok(`${out}${written(status)}`);
 };
 
 const lookup = (ctx: SimContext, name: string): string | undefined => {

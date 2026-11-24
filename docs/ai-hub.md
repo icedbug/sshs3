@@ -2396,13 +2396,31 @@ scripted servers switches it off with `setBaseFleetForTesting(false)`, and
 runbooks, workforce runs, conversation and scripted answer name.
 
 **A command line, within limits.** `SimShell` reads pipes, `&&`, `||`, `;`,
-redirections, quotes, globs, `sudo` and `sh -c`. The commands are tables:
+several lines, redirections (also `>&2`), quotes, globs, `sudo` and `sh -c`.
+It keeps variables (`name=value`, `export`, `$name`, `${name}`, `$?`) for as
+long as the terminal is open, and fills them in when a command's turn comes,
+so `code=$(curl ...) && case "$code" in ...` works. It runs `case ... esac`
+with patterns (`[1-5][0-9][0-9]`, `*`, `a|b`), a group in parentheses as a
+shell of its own, a group in braces, `if`, a `for` loop over a list, `!` and
+`exit N`.
+
+It does not run a `while` or `until` loop, a function, a here-document
+(`<<`), a command in the background (`&`), arithmetic in `$(( ))`, a `${ }`
+form other than `${name}`, or process substitution. A line that needs one of
+these is read whole first and none of it runs. The answer is
+`sim: this lab's shell cannot run: <the construct>` on the error stream with
+exit code 2, so an agent or a person sees why. A line with a syntax error is
+refused the same way, in bash's words. `tests/main/simShellScript.test.ts`
+covers this, with the check, change and rollback lines a real model wrote for
+a change card.
+
+The commands are tables:
 
 | Module | Commands |
 |---|---|
 | `commands/files.ts` | `ls cat head tail grep wc sort uniq cut tr awk sed find` (including `-printf`) `du stat file touch mkdir rm mv cp tee chmod chown diff test jq xargs column` and the usual small ones |
 | `commands/system.ts` | `systemctl service journalctl df free uptime ps pgrep kill ss` (with filters and `host.peers`) `netstat ip hostname uname date id which dpkg apt crontab dmesg openssl x509 sysctl ufw` (including `ufw show raw`) |
-| `commands/net.ts` | `ssh` (cross-host inside `SimWorld`), `curl getent host nslookup dig ping nc iptables nft` against the lab's own names and ports |
+| `commands/net.ts` | `ssh` (cross-host inside `SimWorld`), `curl getent host nslookup dig ping nc iptables nft` against the lab's own names and ports. `curl` reads `-s -S -k -I -i -L -f`, `-o FILE`, `-D FILE` (`-` is the terminal), `-w` with `%{http_code}`, `-m`, `--connect-timeout`, `-H` (a `Host` header picks the site) and `--resolve`; an option it does not know is "unknown", with exit code 2 |
 | `programs/postgres.ts` | `psql -c` (what a server says about itself), `pg_lsclusters pg_isready pg_ctlcluster` |
 | `programs/nginx.ts` | `nginx -t`, `-T`, `-s reload` |
 | `programs/k8s.ts` | stateful `kubectl` (several kinds at once, volume attachments), `tridentctl`, `multipath` |
@@ -2412,9 +2430,10 @@ redirections, quotes, globs, `sudo` and `sh -c`. The commands are tables:
 
 A command the lab does not have answers `command not found`, and an option it
 does not have says it "is not part of this simulation". Both are written down
-(`world.unsupported()`) and shown on the card, so the list can grow where
-agents actually reach. This is the lab's main limit: an agent that tries
-something unusual gets less than a real machine would give it.
+(`world.unsupported()`), as is a construct the shell cannot run, and shown on
+the card, so the list can grow where agents actually reach. This is the lab's
+main limit: an agent that tries something unusual gets less than a real
+machine would give it.
 
 **One state, every way in.** The terminal (`DemoVirtualPty`, which understands
 the frame the agent engine wraps a command in, so `terminal_command`, approvals,

@@ -9,7 +9,7 @@ import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import { SmartcardDetector } from '../smartcard/SmartcardDetector';
 import { loadK8sClient } from './k8sClient';
 import { loadKubeConfigForContext } from './k8sKubeConfig';
-import { sshClientFileArgs } from '../web/tenantBoundary';
+import { accountChildEnv, sshClientFileArgs } from '../web/tenantBoundary';
 
 /** Host + mux socket of a live SSH session, resolved on the main side so the renderer never supplies them. */
 export interface PerfSshSessionInfo {
@@ -357,7 +357,7 @@ export class PerfMetricsService {
       } catch {
         return { ok: false, reason: 'error' };
       }
-      env = { ...process.env, ...SmartcardDetector.buildProxyEnv(info.config), ...(usePassword ? info.askpassEnv : {}) };
+      env = { ...accountChildEnv(), ...SmartcardDetector.buildProxyEnv(info.config), ...(usePassword ? info.askpassEnv : {}) };
       if (info.config.agentPath) env.SSH_AUTH_SOCK = info.config.agentPath;
     } else {
       // Fail closed: without a live mux socket ssh would open a brand-new connection and could prompt for auth.

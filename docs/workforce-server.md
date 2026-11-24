@@ -36,6 +36,7 @@ visits.
 | `SSHS3_ALLOW_PRIVATE_ADDRESSES=1` | On a server with more than one account: let the addresses accounts type (a Kubernetes cluster, a notification channel, a model, a chat server) be on the server's own network. Unset, such addresses are refused there. |
 | `SSHS3_PUBLIC_URL` | The address people reach the server at, for links in notifications and in chat. It also counts as the server's own page when a request is checked (see [Behind a reverse proxy](#behind-a-reverse-proxy)). See [Notifications](#notifications-and-answering-from-a-phone) and [The team's chat](#the-teams-chat). |
 | `SSHS3_ALLOWED_ORIGINS` | More addresses the page may be opened from, separated by commas, each with its scheme (`https://sshs3.example.com`). |
+| `SSHS3_TRUSTED_PROXIES` | The addresses of the reverse proxies in front of the server, separated by commas. Each is an IP address or a range such as `10.1.0.0/16`, as this server sees it. Host names are not matched. Only a request from one of them has its `X-Forwarded-For` and `X-Forwarded-Proto` read. Unset, neither header is read. See [Behind a reverse proxy](#behind-a-reverse-proxy). |
 | `SSHS3_MATTERMOST_ACTION_FROM` | The IP addresses Mattermost's server posts button presses from, exactly as this server sees them, separated by commas. Host names and ranges are not matched. See [The team's chat](#the-teams-chat). |
 
 Put it behind TLS and do not expose it to the internet as it is: it holds
@@ -299,7 +300,10 @@ other accounts' files are on the same disk. What a signed-in person can reach:
   process. From the server's own environment the process gets what a program
   needs to run (`PATH`, the locale, library paths) and nothing that holds a
   secret: no `SSHS3_*` variable, not the server's ssh agent, and no variable
-  whose name says token, secret, password or key.
+  whose name says token, secret, password or key. That holds for every ssh,
+  sftp and git process the server starts for an account: a terminal, the file
+  manager, a tunnel, a key installation, the graphs of a server, and the
+  commands the hub runs beside an open terminal.
 - **Their own Kubernetes sign-ins.** Each account has its own kubeconfig
   (`users/<account>/.kube/config`). The server's `KUBECONFIG` and
   `~/.kube/config` are never read, and an entry that signs in by running a
@@ -348,13 +352,34 @@ key file before, as long as the key file is still there.
   the address in the request's `Host`, the one in `SSHS3_PUBLIC_URL`, or one in
   `SSHS3_ALLOWED_ORIGINS`. A proxy that changes `Host` needs one of the two
   variables set, or signing in is refused with "Origin not allowed".
-- The server counts failed sign-ins per address and per account. Behind a
-  proxy every request has the proxy's address, so the limit per address counts
-  everybody together: 30 failed sign-ins in a minute, from anybody, and the
-  next ones wait. The limit per account (10 in a minute) still works for each
-  account. The server does not read the caller's address from a header such
-  as `X-Forwarded-For`; there is no setting for that yet. Limit sign-in
-  attempts per caller in the proxy.
+- Set `SSHS3_TRUSTED_PROXIES` to the address of the proxy, as the server sees
+  it (for example `SSHS3_TRUSTED_PROXIES=10.0.0.5`, or a range such as
+  `172.18.0.0/16` for a container network). A request that arrives from an
+  address in the list has two headers read:
+  - `X-Forwarded-For` says who the caller is. The server takes the last
+    address in it that is not itself in the list. That is the address your
+    proxy saw, so the proxy has to add it (nginx:
+    `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). An
+    address a caller writes in front of it is not believed.
+  - `X-Forwarded-Proto` says whether the person's browser used https (nginx:
+    `proxy_set_header X-Forwarded-Proto $scheme;`). When it does, the session
+    cookie is marked `Secure`, so the browser never sends it over plain http.
+- Without `SSHS3_TRUSTED_PROXIES` neither header is read, from anybody. The
+  server start prints which proxies it trusts. Two things follow for a server
+  that sits behind a proxy:
+  - The session cookie is not marked `Secure`, also when the site is https.
+    Signing in still works. Earlier versions believed `X-Forwarded-Proto` from
+    any caller, so a server that was upgraded loses the mark until the
+    variable is set. Set it.
+  - The server counts failed sign-ins per address and per account. Every
+    request has the proxy's address, so the limit per address counts
+    everybody together: 30 failed sign-ins in a minute, from anybody, and the
+    next ones wait. The limit per account (10 in a minute) still works for
+    each account. The same holds for the limit on wrong alert hook addresses.
+- With the variable set, both limits count per caller, and the sign-in log
+  shows the caller's address. The Mattermost button route is not changed by
+  it: `SSHS3_MATTERMOST_ACTION_FROM` is still held against the address on the
+  connection, which is the proxy's.
 
 ## Who signed in, and what was done
 

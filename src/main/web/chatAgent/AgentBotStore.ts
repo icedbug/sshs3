@@ -1,7 +1,7 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentBotIdentity, AgentBotInput, AgentBotView, ChatServiceName } from '../../../shared/types/aiHub';
-import { decryptSecretValue, encryptSecretValue } from '../../crypto/SecretFieldCrypto';
+import { openSecretValue, sealSecretValue } from '../../crypto/SecretFieldCrypto';
 import { guardUrl, type GuardOptions } from '../../ai/hub/Notifier';
 import { clip } from '../../ai/hub/privacy';
 import { writeFileAtomic } from '../../storage/atomicFile';
@@ -14,6 +14,10 @@ import { writeFileAtomic } from '../../storage/atomicFile';
  * gets a token that can post. Every token is encrypted before it reaches the disk, the file is the
  * server's own (0600) and is written whole through one queue, so a crash leaves the old file or the
  * new one. No view of this store ever holds a token.
+ *
+ * A token that cannot be opened on a start (the server was started with another key) is empty in
+ * memory and is written back as it was stored: read as "not saved" and saved again, one such start
+ * would wipe it for good. The connection says that its tokens could not be read.
  */
 
 interface StoredConnection {
@@ -59,6 +63,8 @@ export class AgentBotStore {
   readonly dir: string;
   private readonly file: string;
   private connections: Partial<Record<ChatServiceName, StoredConnection>> = {};
+  /** What is stored for a token that could not be opened on this start: written back unchanged. */
+  private unread: Partial<Record<ChatServiceName, { token?: string; appToken?: string }>> = {};
   private loaded?: Promise<void>;
   private writes: Promise<void> = Promise.resolve();
   private readonly guard: () => GuardOptions;
@@ -91,27 +97,52 @@ export class AgentBotStore {
     const list = (parsed as Partial<ConnectionsFile> | undefined)?.connections;
     for (const c of Array.isArray(list) ? list : []) {
       if (!c || !SERVICES.includes(c.service)) continue;
-      // A token encrypted on another machine does not decrypt here: it counts as not saved.
-      const token = typeof c.token === 'string' ? decryptSecretValue(c.token) : '';
-      const appToken = typeof c.appToken === 'string' ? decryptSecretValue(c.appToken) : '';
+      // A token sealed with another key does not open here. It is not used, and it is not thrown away.
+      const token = openSecretValue(typeof c.token === 'string' ? c.token : '');
+      const appToken = openSecretValue(c.service === 'slack' && typeof c.appToken === 'string' ? c.appToken : '');
+      if (token.kept || appToken.kept) this.unread[c.service] = { ...(token.kept ? { token: token.kept } : {}), ...(appToken.kept ? { appToken: appToken.kept } : {}) };
       this.connections[c.service] = {
         ...c,
-        token,
-        ...(c.service === 'slack' ? { appToken } : { appToken: undefined }),
+        token: token.value,
+        ...(c.service === 'slack' ? { appToken: appToken.value } : { appToken: undefined }),
         enabled: c.enabled !== false,
       };
     }
   }
 
+  /** A token of this connection is stored but could not be opened on this start. */
+  private tokensUnread(service: ChatServiceName): boolean {
+    const kept = this.unread[service];
+    const c = this.connections[service];
+    return Boolean(c && kept && ((kept.token && !c.token) || (kept.appToken && !c.appToken)));
+  }
+
+  /** What the connection says while its tokens cannot be read. */
+  private unreadNote(service: ChatServiceName): string {
+    const [what, saved] = service === 'slack' ? ['tokens', 'they were saved'] : ['token', 'it was saved'];
+    return `The agent bot's ${NAME[service]} ${what} could not be read on this start: the server's key (SSHS3_MASTER_KEY, or the key file in the data folder) did not open what is stored. It is kept as it is. Start the server with the key that was used when ${saved}, or enter the ${what} again.`;
+  }
+
   private persist(): Promise<void> {
     const write = async (): Promise<void> => {
+      // A connection that is gone, or a token a person entered, has no use for what could not be read.
+      for (const service of SERVICES) {
+        const c = this.connections[service];
+        const kept = this.unread[service];
+        if (!kept) continue;
+        if (!c) delete this.unread[service];
+        else {
+          if (c.token) delete kept.token;
+          if (c.appToken) delete kept.appToken;
+        }
+      }
       // What is in memory when this write's turn comes, so the last write always holds the latest.
       const content: ConnectionsFile = {
         version: 1,
         connections: Object.values(this.connections).map((c) => ({
           ...c,
-          token: encryptSecretValue(c.token),
-          ...(c.appToken !== undefined ? { appToken: encryptSecretValue(c.appToken) } : {}),
+          token: sealSecretValue(c.token, this.unread[c.service]?.token),
+          ...(c.appToken !== undefined ? { appToken: sealSecretValue(c.appToken, this.unread[c.service]?.appToken) } : {}),
         })),
       };
       await fsp.mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -133,7 +164,11 @@ export class AgentBotStore {
           hasToken: Boolean(c.token),
           ...(service === 'slack' ? { hasAppToken: Boolean(c.appToken) } : { baseUrl: c.baseUrl }),
           ...(c.identity ? { identity: { ...c.identity } } : {}),
-          ...(c.lastError ? { lastError: c.lastError, lastErrorAt: c.lastErrorAt } : {}),
+          ...(this.tokensUnread(service)
+            ? { lastError: this.unreadNote(service) }
+            : c.lastError
+              ? { lastError: c.lastError, lastErrorAt: c.lastErrorAt }
+              : {}),
           ...(c.savedAt ? { savedAt: c.savedAt } : {}),
         },
       ];

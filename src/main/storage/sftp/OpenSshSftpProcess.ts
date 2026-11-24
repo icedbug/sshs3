@@ -11,7 +11,7 @@ import type { HostKeyPromptInfo } from '../../ssh/HostKeyVerifier';
 import type { SFTPConfig } from '../../../shared/types/storage';
 import type { SSHConnectionConfig } from '../../../shared/types/ssh';
 import { createLogger } from '../../log';
-import { sshClientFileArgs } from '../../web/tenantBoundary';
+import { accountChildEnv, sshClientFileArgs } from '../../web/tenantBoundary';
 const sftpLog = createLogger('sftp');
 
 export interface OpenSshProcessOptions {
@@ -206,7 +206,7 @@ export class OpenSshSftpProcess {
     const sshBinary = resolveSshBinary();
 
     const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...accountChildEnv(),
       ...askpassEnv,
       ...SmartcardDetector.buildProxyEnv(toSshConfig(config)),
     };
@@ -313,6 +313,7 @@ export class OpenSshSftpProcess {
     if (useControlSocket && this.controlPath && fs.existsSync(this.controlPath)) {
       return {
         args: [...this.clientFileArgs(), '-S', this.controlPath, '-o', 'BatchMode=yes', '-o', 'ProxyCommand=false', '--', this.host, cmd],
+        env: { ...accountChildEnv() },
         viaControlSocket: true,
       };
     }
@@ -324,7 +325,7 @@ export class OpenSshSftpProcess {
     const destination = args.splice(-2);
     args.push('-o', 'BatchMode=yes', ...destination, cmd);
     const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...accountChildEnv(),
       ...SmartcardDetector.buildProxyEnv(toSshConfig(this.config)),
     };
     if (this.config.agentPath) {
@@ -337,7 +338,7 @@ export class OpenSshSftpProcess {
   private masterIsAlive(sshBinary: string): Promise<boolean> {
     if (!this.controlPath) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
-      execFile(sshBinary, [...this.clientFileArgs(), '-S', this.controlPath!, '-O', 'check', '--', this.host], { timeout: 5000 }, (err) =>
+      execFile(sshBinary, [...this.clientFileArgs(), '-S', this.controlPath!, '-O', 'check', '--', this.host], { timeout: 5000, env: accountChildEnv() }, (err) =>
         resolve(!err)
       );
     });

@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { accountChildEnv } from '../web/tenantBoundary';
 
 /**
  * Config overrides that stop a repository's own `.git/config` from running code
@@ -11,7 +12,7 @@ export function safeGitConfigArgs(hooksPath: string = os.devNull): string[] {
 /** Environment for git child processes: no prompts, no system config, no optional locks, restricted transports. */
 export function safeGitEnv(): NodeJS.ProcessEnv {
   return {
-    ...process.env,
+    ...accountChildEnv(),
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_OPTIONAL_LOCKS: '0',

@@ -45,17 +45,16 @@ export function registerTransferHandlers(bridge: TransferHost): void {
         throw new Error(`Target storage provider not found: ${options.targetProviderId}`);
       }
 
-      let isDirectory = false;
-      let totalBytes: number | undefined;
-      let isSpecial = false;
-      try {
-        const srcStat = await sourceProvider.stat(options.sourcePath);
-        isDirectory = Boolean(srcStat.isDirectory);
-        totalBytes = srcStat.size;
-        isSpecial = Boolean(srcStat.isSpecial);
-      } catch {
-        // ignore error if stat not available
-      }
+      // What cannot be looked at cannot be copied: a source that is gone, or one the connection or the
+      // permissions do not let through, is said now. Queued anyway, a folder went in as a file and the
+      // job failed later with an error about something else.
+      const srcStat = await sourceProvider.stat(options.sourcePath).catch((err: unknown) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new Error(`Cannot copy "${getBaseName(options.sourcePath) || options.sourcePath}": ${reason}`);
+      });
+      const isDirectory = Boolean(srcStat.isDirectory);
+      const totalBytes: number | undefined = srcStat.size;
+      const isSpecial = Boolean(srcStat.isSpecial);
       if (isSpecial) {
         // A FIFO, socket or device: reading it would block, and there is nothing to copy.
         throw new Error(`Not a regular file: ${getBaseName(options.sourcePath) || options.sourcePath}`);

@@ -5,16 +5,21 @@ import type { SimWorld } from "./SimWorld";
  * A command line for a simulated server.
  *
  * It reads a line the way a shell does as far as people and agents use one
- * at a prompt: pipes, `&&`, `||`, `;`, redirection, quotes, `sudo`, `~` and a
- * few variables. It does not run scripts: no loops, no `$( )`. What it cannot
- * do it refuses the way a real machine would, and writes down, so that what
- * agents reach for and do not find can be added.
+ * at a prompt: pipes, `&&`, `||`, `;`, several lines, redirection, quotes,
+ * `sudo`, `~`, variables, `$( )`, a group in `( )` or `{ }`, `case`, `if` and
+ * `for`. It is not a whole shell: no `while`, no functions, no here-documents,
+ * nothing in the background. A line that needs one of those is not run at
+ * all, not even its first half: the shell says which construct it cannot run,
+ * and writes it down, so that what agents reach for and do not find can be
+ * added.
  */
 
 export interface SimResult {
   out: string;
   err: string;
   code: number;
+  /** Set by `exit`: what follows on the line is not run. The shell takes it off before it answers. */
+  exit?: boolean;
 }
 
 export interface SimContext {
@@ -36,49 +41,488 @@ export const fail = (err: string, code = 1, out = ""): SimResult => ({ out, err,
 /** A line of text ends with a newline, as a program's output does; nothing stays nothing. */
 export const lines = (list: string[]): string => (list.length ? `${list.join("\n")}\n` : "");
 
+/**
+ * A line that was not run: one bash would refuse too (`syntax`), or one that needs something this
+ * shell does not do (`cannot`, with the construct as its message).
+ */
+class ParseStop extends Error {
+  constructor(
+    readonly kind: "syntax" | "cannot",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+const unexpected = (token: string): ParseStop => new ParseStop("syntax", `syntax error near unexpected token \`${token === "\n" ? "newline" : token}'`);
+const unclosed = (mark: string): ParseStop => new ParseStop("syntax", `unexpected EOF while looking for matching \`${mark}'`);
+const cannot = (what: string): ParseStop => new ParseStop("cannot", what);
+
+/** What the caller reads when a line needs something this shell does not do. One wording for every case. */
+export const cannotRun = (what: string): string => `sim: this lab's shell cannot run: ${what}\n`;
+
+// ---- Reading a line: where a quote, a `$( )` or a word ends --------------------------------------
+
+/** The place after the double quote that closes the one at `at`. */
+function afterDoubleQuote(src: string, at: number): number {
+  let i = at + 1;
+  while (i < src.length && src[i] !== '"') {
+    if (src[i] === "\\") i += 2;
+    else if (src[i] === "`") i = afterBackticks(src, i);
+    else if (src[i] === "$" && src[i + 1] === "(") i = afterSubstitution(src, i);
+    else if (src[i] === "$" && src[i + 1] === "{") i = afterBraces(src, i);
+    else i++;
+  }
+  if (i >= src.length) throw unclosed('"');
+  return i + 1;
+}
+
+/** `$( … )` at `at`: the place after its closing parenthesis. What is inside has to be a line this shell can run. */
+function afterSubstitution(src: string, at: number): number {
+  if (src[at + 2] === "(") throw cannot("arithmetic in $(( ))");
+  let depth = 1;
+  let i = at + 2;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      const end = src.indexOf("'", i + 1);
+      if (end < 0) throw unclosed("'");
+      i = end + 1;
+      continue;
+    }
+    if (c === '"') {
+      i = afterDoubleQuote(src, i);
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) break;
+    i++;
+  }
+  if (i >= src.length) throw unclosed(")");
+  parseScript(src.slice(at + 2, i));
+  return i + 1;
+}
+
+/** Backticks at `at`: the place after the closing one. */
+function afterBackticks(src: string, at: number): number {
+  const end = src.indexOf("`", at + 1);
+  if (end < 0) throw unclosed("`");
+  parseScript(src.slice(at + 1, end));
+  return end + 1;
+}
+
+/** `${name}` at `at`: the place after it. The plain form is the one this shell knows. */
+function afterBraces(src: string, at: number): number {
+  const end = src.indexOf("}", at + 2);
+  if (end < 0) throw unclosed("}");
+  const inner = src.slice(at + 2, end);
+  if (!/^([A-Za-z_]\w*|\?)$/.test(inner)) throw cannot(`the expansion \${${inner}}`);
+  return end + 1;
+}
+
+/** Where the word that starts at `from` ends: at a blank or an operator that is not in quotes. */
+function afterWord(src: string, from: number): number {
+  let i = from;
+  while (i < src.length) {
+    const ch = src[i];
+    if (" \t\r\n;|()".includes(ch)) break;
+    if (ch === "&") {
+      // `&>` and `2>&1` send output somewhere. Any other `&` is not part of a word.
+      if (src[i + 1] === ">" || (i > from && "<>".includes(src[i - 1]))) {
+        i++;
+        continue;
+      }
+      break;
+    }
+    if (ch === "\\") {
+      if (src[i + 1] === "\n") break;
+      i += 2;
+    } else if (ch === "'") {
+      const end = src.indexOf("'", i + 1);
+      if (end < 0) throw unclosed("'");
+      i = end + 1;
+    } else if (ch === '"') i = afterDoubleQuote(src, i);
+    else if (ch === "`") i = afterBackticks(src, i);
+    else if (ch === "$" && src[i + 1] === "(") i = afterSubstitution(src, i);
+    else if (ch === "$" && src[i + 1] === "{") i = afterBraces(src, i);
+    else if (ch === "<" && src[i + 1] === "<") throw cannot("a here-document (<<)");
+    else if ((ch === "<" || ch === ">") && src[i + 1] === "(") throw cannot("process substitution, <( ) or >( )");
+    else i++;
+  }
+  return Math.min(i, src.length);
+}
+
+/** A piece of a line as it is written: an operator between commands, or a word with its quotes still on. */
+type Piece = { op: string } | { word: string; at: number; end: number };
+const isWordPiece = (p: Piece | undefined): p is { word: string; at: number; end: number } => Boolean(p && "word" in p);
+
+function pieces(src: string): Piece[] {
+  const list: Piece[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === " " || ch === "\t" || ch === "\r") i++;
+    // A backslash at the end of a line joins it to the next one.
+    else if (ch === "\\" && src[i + 1] === "\n") i += 2;
+    else if (ch === "\n") {
+      list.push({ op: "\n" });
+      i++;
+    } else if (ch === "#") {
+      while (i < src.length && src[i] !== "\n") i++;
+    } else if (src.startsWith("&&", i) || src.startsWith("||", i) || src.startsWith(";;", i)) {
+      list.push({ op: src.slice(i, i + 2) });
+      i += 2;
+    } else if (src.startsWith("|&", i)) throw cannot("a pipe that carries errors too (|&)");
+    else if (ch === ";" || ch === "(" || ch === ")" || ch === "|") {
+      list.push({ op: ch });
+      i++;
+    } else if (ch === "&" && src[i + 1] !== ">") throw cannot("a command in the background (&)");
+    else {
+      const at = i;
+      i = afterWord(src, i);
+      list.push({ word: src.slice(at, i), at, end: i });
+    }
+  }
+  return list;
+}
+
+// ---- What a line is made of ------------------------------------------------------------------------
+
+/**
+ * A line, read. A plain command keeps its text as it was written: its variables and `$( )` are filled
+ * in when its turn comes, so `x=$(a) && echo "$x"` sees what `a` printed.
+ */
+type Node =
+  | { kind: "simple"; text: string }
+  | { kind: "pipe"; stages: Node[]; not: boolean }
+  | { kind: "list"; items: { op: ";" | "&&" | "||"; node: Node }[] }
+  | { kind: "sub" | "group"; body: Node; redirects: string }
+  | { kind: "case"; word: string; arms: { patterns: string[]; body: Node }[]; redirects: string }
+  | { kind: "for"; name: string; items: string; body: Node; redirects: string }
+  | { kind: "if"; branches: { test: Node; then: Node }[]; otherwise?: Node; redirects: string };
+
+/** How deep groups and `$( )` may sit inside each other: enough for any real line, and a stop for a runaway one. */
+const DEEPEST = 40;
+
+class Parser {
+  private i = 0;
+  private depth = 0;
+
+  constructor(
+    private readonly src: string,
+    private readonly list: Piece[],
+  ) {}
+
+  private peek(): Piece | undefined {
+    return this.list[this.i];
+  }
+  private isOp(op: string): boolean {
+    const p = this.peek();
+    return Boolean(p && "op" in p && p.op === op);
+  }
+  private isWord(word: string): boolean {
+    const p = this.peek();
+    return isWordPiece(p) && p.word === word;
+  }
+  private say(p: Piece | undefined): ParseStop {
+    return p ? unexpected("op" in p ? p.op : p.word) : new ParseStop("syntax", "syntax error: unexpected end of file");
+  }
+  private newlines(): void {
+    while (this.isOp("\n")) this.i++;
+  }
+  private expectWord(word: string): void {
+    if (!this.isWord(word)) throw this.say(this.peek());
+    this.i++;
+  }
+
+  script(): Node {
+    const body = this.commands([]);
+    if (this.peek()) throw this.say(this.peek());
+    return body;
+  }
+
+  /** Commands one after another, up to `)`, `;;`, the end, or one of the words in `until` where a command would start. */
+  private commands(until: string[]): Node & { kind: "list" } {
+    const items: { op: ";" | "&&" | "||"; node: Node }[] = [];
+    const atEnd = (): boolean => {
+      const p = this.peek();
+      return !p || ("op" in p ? p.op === ")" || p.op === ";;" : until.includes(p.word));
+    };
+    this.newlines();
+    while (!atEnd()) {
+      items.push({ op: ";", node: this.pipeline() });
+      while (this.isOp("&&") || this.isOp("||")) {
+        const op = (this.peek() as { op: "&&" | "||" }).op;
+        this.i++;
+        this.newlines();
+        // `a &&` with nothing after it: a real shell waits for the rest. Here `a` is what there is.
+        if (!this.peek()) break;
+        items.push({ op, node: this.pipeline() });
+      }
+      if (this.isOp(";")) this.i++;
+      else if (!this.isOp("\n")) break;
+      this.newlines();
+    }
+    return { kind: "list", items };
+  }
+
+  private pipeline(): Node {
+    let not = false;
+    while (this.isWord("!")) {
+      not = !not;
+      this.i++;
+    }
+    const stages = [this.command()];
+    while (this.isOp("|")) {
+      this.i++;
+      this.newlines();
+      if (!this.peek()) throw unexpected("|");
+      stages.push(this.command());
+    }
+    return stages.length === 1 && !not ? stages[0] : { kind: "pipe", stages, not };
+  }
+
+  /** What may follow a group: where its output goes. Kept as written, read when the group runs. */
+  private redirects(): string {
+    const first = this.peek();
+    if (!isWordPiece(first)) return "";
+    if (!/^(\d?[<>]|&>)/.test(first.word)) throw unexpected(first.word);
+    let end = first.end;
+    while (isWordPiece(this.peek())) end = (this.list[this.i++] as { end: number }).end;
+    return this.src.slice(first.at, end);
+  }
+
+  private body(until: string[], closer: string): Node {
+    const inner = this.commands(until);
+    if (!inner.items.length) throw this.say(this.peek() ?? { op: closer });
+    return inner;
+  }
+
+  private command(): Node {
+    if (++this.depth > DEEPEST) throw new ParseStop("syntax", "this line is nested too deep");
+    try {
+      return this.oneCommand();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private oneCommand(): Node {
+    const p = this.peek();
+    if (!p) throw this.say(p);
+    if ("op" in p) {
+      if (p.op !== "(") throw this.say(p);
+      this.i++;
+      const body = this.body([], ")");
+      if (!this.isOp(")")) throw this.say(this.peek());
+      this.i++;
+      return { kind: "sub", body, redirects: this.redirects() };
+    }
+    switch (p.word) {
+      case "{": {
+        this.i++;
+        const body = this.body(["}"], "}");
+        this.expectWord("}");
+        return { kind: "group", body, redirects: this.redirects() };
+      }
+      case "case":
+        return this.caseOf();
+      case "for":
+        return this.forLoop();
+      case "if":
+        return this.ifThen();
+      case "while":
+        throw cannot("a while loop");
+      case "until":
+        throw cannot("an until loop");
+      case "select":
+        throw cannot("a select menu");
+      case "function":
+        throw cannot("a function");
+      case "}":
+      case "esac":
+      case "do":
+      case "done":
+      case "then":
+      case "elif":
+      case "else":
+      case "fi":
+        throw this.say(p);
+    }
+    // A plain command: its words and where its output goes, up to the next operator.
+    let end = p.end;
+    while (isWordPiece(this.peek())) end = (this.list[this.i++] as { end: number }).end;
+    if (this.isOp("(")) {
+      const next = this.list[this.i + 1];
+      throw next && "op" in next && next.op === ")" ? cannot("a function") : unexpected("(");
+    }
+    return { kind: "simple", text: this.src.slice(p.at, end) };
+  }
+
+  private caseOf(): Node {
+    this.i++;
+    const word = this.peek();
+    if (!isWordPiece(word)) throw this.say(word);
+    this.i++;
+    this.newlines();
+    this.expectWord("in");
+    this.newlines();
+    const arms: { patterns: string[]; body: Node }[] = [];
+    while (!this.isWord("esac")) {
+      if (this.isOp("(")) this.i++;
+      const patterns: string[] = [];
+      for (;;) {
+        const pattern = this.peek();
+        if (!isWordPiece(pattern)) throw this.say(pattern);
+        patterns.push(pattern.word);
+        this.i++;
+        if (!this.isOp("|")) break;
+        this.i++;
+      }
+      if (!this.isOp(")")) throw this.say(this.peek());
+      this.i++;
+      arms.push({ patterns, body: this.commands(["esac"]) });
+      if (this.isOp(";;")) this.i++;
+      else if (!this.isWord("esac")) throw this.say(this.peek());
+      this.newlines();
+    }
+    this.i++;
+    return { kind: "case", word: word.word, arms, redirects: this.redirects() };
+  }
+
+  private forLoop(): Node {
+    this.i++;
+    if (this.isOp("(")) throw cannot("a counting for loop, for (( ))");
+    const name = this.peek();
+    if (!isWordPiece(name) || !/^[A-Za-z_]\w*$/.test(name.word)) throw this.say(name);
+    this.i++;
+    this.newlines();
+    if (!this.isWord("in")) throw cannot("a for loop without a list after `in`");
+    this.i++;
+    let items = "";
+    const first = this.peek();
+    if (isWordPiece(first)) {
+      let end = first.end;
+      while (isWordPiece(this.peek())) end = (this.list[this.i++] as { end: number }).end;
+      items = this.src.slice(first.at, end);
+    }
+    if (this.isOp(";")) this.i++;
+    this.newlines();
+    this.expectWord("do");
+    const body = this.body(["done"], "done");
+    this.expectWord("done");
+    return { kind: "for", name: name.word, items, body, redirects: this.redirects() };
+  }
+
+  private ifThen(): Node {
+    const branches: { test: Node; then: Node }[] = [];
+    let otherwise: Node | undefined;
+    do {
+      this.i++;
+      const test = this.body(["then"], "then");
+      this.expectWord("then");
+      branches.push({ test, then: this.body(["elif", "else", "fi"], "fi") });
+    } while (this.isWord("elif"));
+    if (this.isWord("else")) {
+      this.i++;
+      otherwise = this.body(["fi"], "fi");
+    }
+    this.expectWord("fi");
+    return { kind: "if", branches, otherwise, redirects: this.redirects() };
+  }
+}
+
+let nesting = 0;
+
+/** Reads a line. Throws a `ParseStop` for one that is not run. */
+function parseScript(src: string): Node {
+  if (++nesting > DEEPEST) {
+    nesting = 0;
+    throw new ParseStop("syntax", "command substitution: too deep");
+  }
+  try {
+    return new Parser(src, pieces(src)).script();
+  } finally {
+    nesting = Math.max(0, nesting - 1);
+  }
+}
+
+// ---- A command's words -----------------------------------------------------------------------------
+
 interface Word {
   text: string;
   /** Written in quotes: not a pattern for file names, not an operator. */
   quoted: boolean;
+  /** `name=value` with the name written plainly: by itself it sets a variable. */
+  assign?: boolean;
 }
 type Token = { op: string } | Word;
 const isOp = (t: Token | undefined): t is { op: string } => Boolean(t && "op" in t);
 
-const OPERATORS = ["2>&1", "&>>", "&>", "2>>", "2>", ">>", "&&", "||", ">", "<", "|", ";"];
+/** Where output and input go. Longest first; the ones with a digit in front count only where a word starts. */
+const REDIRECTS = ["2>&1", "1>&2", "&>>", "2>>", "1>>", ">&2", "&>", "2>", "1>", ">>", ">", "<"];
+const SAME_AS: Record<string, string> = { "1>&2": ">&2", "1>>": ">>", "1>": ">" };
 
-/** What the simulation does not do, said once so every refusal reads the same. */
-const NOT_A_SCRIPT = "this simulated shell runs commands and one-line for loops, not scripts: no while, if or functions. Run the commands one at a time";
+/** What a word's `$name` and `$( )` stand for when the command's turn comes. */
+interface Filling {
+  value(name: string): string | undefined;
+  /** Runs what is inside `$( )` and gives what it printed, the newlines at its end gone. */
+  run(script: string): string;
+}
 
-function tokenize(line: string, vars: Record<string, string>): Token[] | string {
+/** Splits one command into its words and redirections, quotes taken off and variables filled in. */
+function tokenize(line: string, fill: Filling): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   let word = "";
   let has = false;
   let quoted = false;
+  let assign = false;
   const push = (): void => {
-    if (has) tokens.push({ text: word, quoted });
+    if (has) tokens.push(assign ? { text: word, quoted, assign } : { text: word, quoted });
     word = "";
     has = false;
     quoted = false;
+    assign = false;
   };
-  const variable = (): string => {
-    // At a `$`: a name the shell knows, or the sign itself.
+  /** At a `$` or a backtick: what it stands for, with `i` left on its last character. Nothing when the sign is only itself. */
+  const filled = (): string | undefined => {
+    if (line[i] === "`") {
+      const end = line.indexOf("`", i + 1);
+      const text = fill.run(line.slice(i + 1, end));
+      i = end;
+      return text;
+    }
     const rest = line.slice(i + 1);
-    if (rest.startsWith("(") || rest.startsWith("{")) return "\u0000";
+    if (rest.startsWith("(")) {
+      const end = afterSubstitution(line, i);
+      const text = fill.run(line.slice(i + 2, end - 1));
+      i = end - 1;
+      return text;
+    }
+    if (rest.startsWith("{")) {
+      const end = afterBraces(line, i);
+      const name = line.slice(i + 2, end - 1);
+      i = end - 1;
+      return fill.value(name) ?? "";
+    }
     if (rest.startsWith("?")) {
       i += 1;
-      return vars["?"] ?? "0";
+      return fill.value("?") ?? "0";
     }
     const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest)?.[0];
-    if (!name) return "$";
+    if (!name) return undefined;
     i += name.length;
-    return vars[name] ?? "";
+    return fill.value(name) ?? "";
   };
   while (i < line.length) {
     const ch = line[i];
     if (ch === "'") {
       const end = line.indexOf("'", i + 1);
-      if (end < 0) return "unexpected EOF while looking for matching `''";
+      if (end < 0) throw unclosed("'");
       word += line.slice(i + 1, end);
       has = quoted = true;
       i = end + 1;
@@ -91,53 +535,65 @@ function tokenize(line: string, vars: Record<string, string>): Token[] | string 
         if (line[i] === "\\" && '"\\$`'.includes(line[i + 1] ?? "")) {
           word += line[i + 1];
           i += 2;
-        } else if (line[i] === "$") {
-          const value = variable();
-          if (value === "\u0000") return NOT_A_SCRIPT;
-          word += value;
+        } else if (line[i] === "$" || line[i] === "`") {
+          word += filled() ?? "$";
           i++;
-        } else if (line[i] === "`") return NOT_A_SCRIPT;
-        else word += line[i++];
+        } else word += line[i++];
       }
-      if (i >= line.length) return 'unexpected EOF while looking for matching `"\'';
+      if (i >= line.length) throw unclosed('"');
       i++;
       continue;
     }
     if (ch === "\\") {
-      word += line[i + 1] ?? "";
-      has = true;
+      if (line[i + 1] === "\n") push();
+      else {
+        word += line[i + 1] ?? "";
+        has = true;
+      }
       i += 2;
       continue;
     }
-    if (ch === "`") return NOT_A_SCRIPT;
-    if (ch === "$") {
-      const value = variable();
-      if (value === "\u0000") return NOT_A_SCRIPT;
-      word += value;
-      has = true;
+    if (ch === "$" || ch === "`") {
+      const value = filled();
+      if (value === undefined) {
+        word += "$";
+        has = true;
+      } else if (assign) {
+        // The value of `name=…` is one word, whatever is in it.
+        word += value;
+      } else {
+        // Outside quotes what it gives is split into words, as a shell does. Nothing gives no word.
+        value.split(/\s+/).forEach((part, n) => {
+          if (n) push();
+          if (part) {
+            word += part;
+            has = true;
+          }
+        });
+      }
       i++;
       continue;
     }
-    if (ch === " " || ch === "\t" || ch === "\n") {
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
       push();
       i++;
       continue;
     }
-    if (ch === "#" && !has) break;
-    const op = OPERATORS.find((o) => line.startsWith(o, i));
+    const op = REDIRECTS.find((o) => line.startsWith(o, i) && (has ? !/^\d/.test(o) : true));
     if (op) {
       push();
-      tokens.push({ op });
+      tokens.push({ op: SAME_AS[op] ?? op });
       i += op.length;
       continue;
     }
-    if (ch === "&") return "this simulated shell does not run commands in the background";
+    if (ch === "&") throw unexpected("&");
     if (ch === "~" && !has && (line[i + 1] === undefined || " /\t".includes(line[i + 1]))) {
-      word += vars.HOME ?? "/root";
+      word += fill.value("HOME") ?? "/root";
       has = true;
       i++;
       continue;
     }
+    if (ch === "=" && has && !quoted && !assign && /^[A-Za-z_]\w*$/.test(word)) assign = true;
     word += ch;
     has = true;
     i++;
@@ -146,13 +602,13 @@ function tokenize(line: string, vars: Record<string, string>): Token[] | string 
   return tokens;
 }
 
-/** A shell pattern (`*`, `?`, `[a-z]`) as a test for one name. */
-export function globToRegExp(pattern: string): RegExp {
+/** A shell pattern (`*`, `?`, `[a-z]`) as a test for one name. With `whole`, `*` and `?` also match a `/`: a `case` pattern is held against any text. */
+export function globToRegExp(pattern: string, whole = false): RegExp {
   let source = "";
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i];
-    if (c === "*") source += "[^/]*";
-    else if (c === "?") source += "[^/]";
+    if (c === "*") source += whole ? "[\\s\\S]*" : "[^/]*";
+    else if (c === "?") source += whole ? "[\\s\\S]" : "[^/]";
     else if (c === "[") {
       const end = pattern.indexOf("]", i + 1);
       if (end < 0) source += "\\[";
@@ -166,16 +622,44 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
+interface Redirect {
+  op: string;
+  target: string;
+}
 interface Stage {
   argv: Word[];
-  redirects: { op: string; target: string }[];
+  redirects: Redirect[];
+}
+interface RunOptions {
+  root: boolean;
+  stdin: string;
 }
 
-const SCRIPT_WORDS = new Set(["for", "while", "until", "if", "case", "function", "do", "done", "then", "fi"]);
+/** A command's words apart from where its input and output go. */
+function splitRedirects(tokens: Token[]): Stage {
+  const stage: Stage = { argv: [], redirects: [] };
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!isOp(t)) {
+      stage.argv.push(t);
+      continue;
+    }
+    if (t.op === "2>&1" || t.op === ">&2") {
+      stage.redirects.push({ op: t.op, target: "" });
+      continue;
+    }
+    const target = tokens[++i];
+    if (!target || isOp(target)) throw unexpected("\n");
+    stage.redirects.push({ op: t.op, target: target.text });
+  }
+  return stage;
+}
 
 export class SimShell {
   cwd: string;
   private lastCode = 0;
+  /** What was set with `name=value` or `export`: kept for as long as the shell is open, as the folder is. */
+  private vars = new Map<string, string>();
   /** Commands asked for that the simulation has no answer to: what to build next. */
   readonly unsupported: string[] = [];
   /** Every line that was run, with how it ended: what a scenario is judged on. */
@@ -211,149 +695,200 @@ export class SimShell {
     // What follows from the new state follows now, before the next command looks.
     this.host.settle();
     this.world?.runLaws();
-    this.history.push({ at: this.host.now(), line, code: result.code, root: /(^|[;&|]\s*)sudo\b/.test(line) });
+    this.history.push({ at: this.host.now(), line, code: result.code, root: /(^|[;&|({\n]\s*)sudo\b/.test(line) });
     this.world?.onRan?.();
     return { output: `${result.out}${result.err}`, code: result.code };
   }
 
-  /** A line as a command runs it: also what `sudo sh -c '…'` and `bash -c '…'` come down to. */
-  exec(line: string, opts: { root: boolean; stdin: string }): SimResult {
-    // for x in a b; do …; done, on one line: each round is the body with the name filled in.
-    const loop = /^\s*for\s+([A-Za-z_]\w*)\s+in\s+([^;]*?)\s*;\s*do\s+([\s\S]*?)\s*;?\s*done\s*$/.exec(line);
-    if (loop) {
-      const listed = this.substitute(loop[2], opts);
-      if (typeof listed !== "string") return listed;
-      const items = listed.split(/\s+/).filter(Boolean).flatMap((w) => (/[*?[]/.test(w) ? this.expand(w) : [w.replace(/^(["'])(.*)\1$/, "$2")]));
-      const rounds: SimResult[] = items.slice(0, 200).map((item) => this.exec(loop[3].replace(new RegExp(`\\$(?:\\{${loop[1]}\\}|${loop[1]}\\b)`, "g"), item), opts));
-      return { out: rounds.map((r) => r.out).join(""), err: rounds.map((r) => r.err).join(""), code: rounds.length ? rounds[rounds.length - 1].code : 0 };
+  /**
+   * A line as a command runs it: also what `sudo sh -c '…'` and `bash -c '…'` come down to. The whole
+   * line is read first. One that cannot be read, or that needs something this shell does not do, is
+   * refused before any of it runs: half a rollback is worse than none.
+   */
+  exec(line: string, opts: RunOptions): SimResult {
+    let script: Node;
+    try {
+      script = parseScript(line);
+    } catch (error) {
+      if (error instanceof ParseStop) return this.refused(error);
+      throw error;
     }
-    const filled = this.substitute(line, opts);
-    if (typeof filled !== "string") return filled;
-    line = filled;
-    const tokens = tokenize(line, {
-      "?": String(this.lastCode),
-      HOME: this.home(),
-      USER: opts.root ? "root" : this.host.user,
-      PWD: this.cwd,
-      HOSTNAME: this.host.name,
-    });
-    if (typeof tokens === "string") return fail(`bash: ${tokens}\n`, 2);
-    if (!tokens.length) return ok();
-    // Lists: a; b && c || d. Each part is a pipeline.
+    const { out, err, code } = this.runNode(script, opts);
+    return { out, err, code };
+  }
+
+  private refused(stop: ParseStop): SimResult {
+    if (stop.kind === "syntax") return fail(`bash: ${stop.message}\n`, 2);
+    this.unsupported.push(stop.message);
+    return fail(cannotRun(stop.message), 2);
+  }
+
+  private runNode(node: Node, opts: RunOptions): SimResult {
+    try {
+      return this.runKind(node, opts);
+    } catch (error) {
+      if (error instanceof ParseStop) return this.refused(error);
+      throw error;
+    }
+  }
+
+  private runKind(node: Node, opts: RunOptions): SimResult {
+    switch (node.kind) {
+      case "simple":
+        return this.simple(node.text, opts);
+      case "list":
+        return this.sequence(
+          node.items.map((item) => ({ when: item.op, run: () => this.runNode(item.node, opts) })),
+        );
+      case "pipe":
+        return this.pipe(node.stages, node.not, opts);
+      case "sub":
+        return this.redirected(node.redirects, opts, (o) => this.apart(() => this.runNode(node.body, o)));
+      case "group":
+        return this.redirected(node.redirects, opts, (o) => this.runNode(node.body, o));
+      case "case":
+        return this.redirected(node.redirects, opts, (o) => {
+          const word = this.words(node.word, o).map((w) => w.text).join(" ");
+          for (const arm of node.arms) {
+            for (const pattern of arm.patterns) {
+              const written = this.words(pattern, o);
+              const text = written.map((w) => w.text).join(" ");
+              // A pattern in quotes is the text itself; one written plainly may hold `*`, `?` and `[…]`.
+              const matches = written.length > 0 && written.every((w) => w.quoted) ? text === word : globToRegExp(text, true).test(word);
+              if (matches) return this.runNode(arm.body, o);
+            }
+          }
+          return ok();
+        });
+      case "for":
+        return this.redirected(node.redirects, opts, (o) => {
+          const items = this.words(node.items, o).flatMap((w) => {
+            if (w.quoted || !/[*?[]/.test(w.text)) return [w.text];
+            const found = this.expand(w.text);
+            return found.length ? found : [w.text];
+          });
+          // Each round is the body with the name set. 200 rounds is more than a person's loop, and an end to any other.
+          return this.sequence(
+            items.slice(0, 200).map((item) => ({
+              when: ";" as const,
+              run: () => {
+                this.vars.set(node.name, item);
+                return this.runNode(node.body, o);
+              },
+            })),
+          );
+        });
+      case "if":
+        return this.redirected(node.redirects, opts, (o) => {
+          const said: SimResult[] = [];
+          const after = (last: SimResult): SimResult => ({ ...last, out: `${said.map((r) => r.out).join("")}${last.out}`, err: `${said.map((r) => r.err).join("")}${last.err}` });
+          for (const branch of node.branches) {
+            const test = this.runNode(branch.test, o);
+            if (test.exit) return after(test);
+            said.push(test);
+            if (test.code === 0) return after(this.runNode(branch.then, o));
+          }
+          return after(node.otherwise ? this.runNode(node.otherwise, o) : ok());
+        });
+    }
+  }
+
+  /** Runs parts one after another: `;` always, `&&` after one that went well, `||` after one that did not. `exit` ends it. */
+  private sequence(parts: { when: ";" | "&&" | "||"; run: () => SimResult }[]): SimResult {
     const out: string[] = [];
     const err: string[] = [];
     let code = 0;
-    let start = 0;
-    let run = true;
-    for (let i = 0; i <= tokens.length; i++) {
-      const t = tokens[i];
-      const end = i === tokens.length || (isOp(t) && [";", "&&", "||"].includes(t.op));
-      if (!end) continue;
-      const part = tokens.slice(start, i);
-      if (run && part.length) {
-        const result = this.pipeline(part, opts);
-        out.push(result.out);
-        err.push(result.err);
-        code = result.code;
-        this.lastCode = code;
-      } else if (!part.length && i < tokens.length) return fail(`bash: syntax error near unexpected token \`${(t as { op: string }).op}'\n`, 2);
-      if (isOp(t)) run = t.op === ";" ? true : t.op === "&&" ? code === 0 : code !== 0;
-      start = i + 1;
+    for (const part of parts) {
+      if (part.when === "&&" ? code !== 0 : part.when === "||" ? code === 0 : false) continue;
+      const result = part.run();
+      out.push(result.out);
+      err.push(result.err);
+      code = result.code;
+      this.lastCode = code;
+      if (result.exit) return { out: out.join(""), err: err.join(""), code, exit: true };
     }
     return { out: out.join(""), err: err.join(""), code };
   }
 
-  /**
-   * `$(command)` and backticks: the command's output in its place, as the
-   * shell does before it reads the line. Not inside single quotes.
-   */
-  private substitute(line: string, opts: { root: boolean; stdin: string }, depth = 0): string | SimResult {
-    if (!line.includes("$(") && !line.includes("`")) return line;
-    if (depth > 8) return fail("bash: command substitution: too deep\n", 2);
-    let out = "";
-    let quote = "";
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (quote === "'") {
-        out += ch;
-        if (ch === "'") quote = "";
-        continue;
-      }
-      if (ch === "\\") {
-        out += ch + (line[i + 1] ?? "");
-        i++;
-        continue;
-      }
-      if (ch === "'" && !quote) quote = "'";
-      else if (ch === '"') quote = quote ? "" : '"';
-      let inner: string | undefined;
-      let end = -1;
-      if (ch === "$" && line[i + 1] === "(" && line[i + 2] !== "(") {
-        let level = 0;
-        for (let j = i + 1; j < line.length; j++) {
-          if (line[j] === "(") level++;
-          else if (line[j] === ")" && --level === 0) {
-            end = j;
-            break;
-          }
-        }
-        if (end < 0) return fail("bash: unexpected EOF while looking for matching `)'\n", 2);
-        inner = line.slice(i + 2, end);
-      } else if (ch === "`") {
-        end = line.indexOf("`", i + 1);
-        if (end < 0) return fail("bash: unexpected EOF while looking for matching ``'\n", 2);
-        inner = line.slice(i + 1, end);
-      }
-      if (inner === undefined) {
-        out += ch;
-        continue;
-      }
-      const ran = this.exec(inner, { root: opts.root, stdin: "" });
-      const text = ran.out.replace(/\n+$/, "");
-      // Inside double quotes it stays one word as it is; outside, its lines become words. Quotes in it are text.
-      out += (quote === '"' ? text : text.replace(/\s+/g, " ")).replace(/[\\"'$`]/g, "\\$&");
-      i = end;
-    }
-    return out;
-  }
-
-  private pipeline(tokens: Token[], opts: { root: boolean; stdin: string }): SimResult {
-    const stages: Stage[] = [{ argv: [], redirects: [] }];
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
-      const stage = stages[stages.length - 1];
-      if (!isOp(t)) {
-        stage.argv.push(t);
-        continue;
-      }
-      if (t.op === "|") {
-        if (!stage.argv.length && !stage.redirects.length) return fail("bash: syntax error near unexpected token `|'\n", 2);
-        stages.push({ argv: [], redirects: [] });
-        continue;
-      }
-      if (t.op === "2>&1") {
-        stage.redirects.push({ op: t.op, target: "" });
-        continue;
-      }
-      const target = tokens[++i];
-      if (!target || isOp(target)) return fail("bash: syntax error near unexpected token `newline'\n", 2);
-      stage.redirects.push({ op: t.op, target: target.text });
-    }
-    if (!stages[stages.length - 1].argv.length && !stages[stages.length - 1].redirects.length) return fail("bash: syntax error near unexpected token `|'\n", 2);
+  private pipe(stages: Node[], not: boolean, opts: RunOptions): SimResult {
     let stdin = opts.stdin;
     let last: SimResult = ok();
     const errors: string[] = [];
     for (const stage of stages) {
-      last = this.stage(stage, { root: opts.root, stdin });
+      const ran = this.runNode(stage, { root: opts.root, stdin });
+      // Each part of a pipe is a shell of its own: `exit` in it ends that part only.
+      last = stages.length > 1 ? { out: ran.out, err: ran.err, code: ran.code } : ran;
       stdin = last.out;
       errors.push(last.err);
     }
-    return { out: last.out, err: errors.join(""), code: last.code };
+    return { ...last, err: errors.join(""), code: not ? (last.code === 0 ? 1 : 0) : last.code };
   }
 
-  private stage(stage: Stage, opts: { root: boolean; stdin: string }): SimResult {
+  /** Runs something as a shell of its own would: the folder and the variables it changes are its own, and `exit` ends only it. */
+  private apart(run: () => SimResult): SimResult {
+    const cwd = this.cwd;
+    const vars = new Map(this.vars);
+    try {
+      const { out, err, code } = run();
+      return { out, err, code };
+    } finally {
+      this.cwd = cwd;
+      this.vars = vars;
+    }
+  }
+
+  private variable(name: string, root: boolean): string | undefined {
+    if (name === "?") return String(this.lastCode);
+    if (name === "PWD") return this.cwd;
+    const set = this.vars.get(name);
+    if (set !== undefined) return set;
+    if (name === "HOME") return this.home();
+    if (name === "USER") return root ? "root" : this.host.user;
+    if (name === "HOSTNAME") return this.host.name;
+    return undefined;
+  }
+
+  /** A piece of a line as words, filled in now. `ran` is told what its `$( )` printed as errors and how the last one ended. */
+  private words(text: string, opts: RunOptions, ran?: { err: string; code?: number }): Word[] {
+    return this.tokens(text, opts, ran).filter((t): t is Word => !isOp(t));
+  }
+
+  private tokens(text: string, opts: RunOptions, ran?: { err: string; code?: number }): Token[] {
+    return tokenize(text, {
+      value: (name) => this.variable(name, opts.root),
+      run: (script) => {
+        const result = this.apart(() => this.exec(script, { root: opts.root, stdin: "" }));
+        if (ran) {
+          // What it wrote as errors goes to the terminal, not into the word.
+          ran.err += result.err;
+          ran.code = result.code;
+        }
+        return result.out.replace(/\n+$/, "");
+      },
+    });
+  }
+
+  private simple(text: string, opts: RunOptions): SimResult {
+    const ran: { err: string; code?: number } = { err: "" };
+    const stage = splitRedirects(this.tokens(text, opts, ran));
+    const result = this.stage(stage, opts, ran.code);
+    return ran.err ? { ...result, err: `${ran.err}${result.err}` } : result;
+  }
+
+  /** Runs a group with what follows it (`> file`, `2>&1`, `< file`) applied to all of it. */
+  private redirected(written: string, opts: RunOptions, run: (opts: RunOptions) => SimResult): SimResult {
+    if (!written) return run(opts);
+    const { argv, redirects } = splitRedirects(this.tokens(written, opts));
+    if (argv.length) throw unexpected(argv[0].text);
+    const stdin = this.stdinOf(redirects, opts);
+    if (typeof stdin !== "string") return stdin;
+    return this.sendOutput(run({ root: opts.root, stdin }), redirects, opts.root);
+  }
+
+  /** What a command reads: the pipe before it, or the file after `<`. */
+  private stdinOf(redirects: Redirect[], opts: RunOptions): string | SimResult {
     let stdin = opts.stdin;
-    for (const r of stage.redirects.filter((x) => x.op === "<")) {
+    for (const r of redirects.filter((x) => x.op === "<")) {
       // `</dev/null`: nothing to read, as on any machine. (It came back "No such file or directory".)
       if (r.target === "/dev/null") {
         stdin = "";
@@ -364,33 +899,56 @@ export class SimShell {
       if (!this.mayRead(r.target, opts.root)) return fail(`bash: ${r.target}: Permission denied\n`, 1);
       stdin = file.content;
     }
-    // Names with a pattern become the files they match; one that matches nothing stays as it was typed.
-    const argv: string[] = [];
-    for (const w of stage.argv) {
-      if (w.quoted || !/[*?[]/.test(w.text)) {
-        argv.push(w.text);
-        continue;
-      }
-      const matches = this.expand(w.text);
-      argv.push(...(matches.length ? matches : [w.text]));
-    }
-    let result = this.dispatch(argv, { root: opts.root, stdin });
-    for (const r of stage.redirects) {
+    return stdin;
+  }
+
+  /** Sends what a command printed where its redirections say. */
+  private sendOutput(ran: SimResult, redirects: Redirect[], root: boolean): SimResult {
+    let result = ran;
+    for (const r of redirects) {
       if (r.op === "<") continue;
       if (r.op === "2>&1") {
-        result = { out: `${result.out}${result.err}`, err: "", code: result.code };
+        result = { ...result, out: `${result.out}${result.err}`, err: "" };
+        continue;
+      }
+      if (r.op === ">&2") {
+        result = { ...result, out: "", err: `${result.err}${result.out}` };
         continue;
       }
       const both = r.op.startsWith("&");
       const errOnly = r.op.startsWith("2");
       const text = both ? `${result.out}${result.err}` : errOnly ? result.err : result.out;
       if (r.target !== "/dev/null") {
-        const wrote = this.writeFile(r.target, text, r.op.endsWith(">>"), opts.root);
+        const wrote = this.writeFile(r.target, text, r.op.endsWith(">>"), root);
         if (wrote) return fail(`bash: ${r.target}: ${wrote}\n`, 1);
       }
-      result = { out: both || !errOnly ? "" : result.out, err: both || errOnly ? "" : result.err, code: result.code };
+      result = { ...result, out: both || !errOnly ? "" : result.out, err: both || errOnly ? "" : result.err };
     }
     return result;
+  }
+
+  private stage(stage: Stage, opts: RunOptions, substituted?: number): SimResult {
+    const stdin = this.stdinOf(stage.redirects, opts);
+    if (typeof stdin !== "string") return stdin;
+    if (stage.argv.length && stage.argv.every((w) => w.assign)) {
+      // `name=value` by itself sets a variable of this shell. It ends as the `$( )` in it did.
+      for (const w of stage.argv) {
+        const eq = w.text.indexOf("=");
+        this.vars.set(w.text.slice(0, eq), w.text.slice(eq + 1));
+      }
+      return this.sendOutput({ out: "", err: "", code: substituted ?? 0 }, stage.redirects, opts.root);
+    }
+    // Names with a pattern become the files they match; one that matches nothing stays as it was typed.
+    const argv: string[] = [];
+    for (const w of stage.argv) {
+      if (w.quoted || w.assign || !/[*?[]/.test(w.text)) {
+        argv.push(w.text);
+        continue;
+      }
+      const matches = this.expand(w.text);
+      argv.push(...(matches.length ? matches : [w.text]));
+    }
+    return this.sendOutput(this.dispatch(argv, { root: opts.root, stdin }), stage.redirects, opts.root);
   }
 
   /** The files a pattern names, from where the shell stands. */
@@ -447,7 +1005,7 @@ export class SimShell {
     return undefined;
   }
 
-  private dispatch(argv: string[], opts: { root: boolean; stdin: string }): SimResult {
+  private dispatch(argv: string[], opts: RunOptions): SimResult {
     // VAR=value in front of a command: taken, and not acted on.
     while (argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) argv = argv.slice(1);
     if (!argv.length) return ok();
@@ -455,10 +1013,6 @@ export class SimShell {
     // The shell's own no-op: what a connection is tested with.
     if (name === ":") return ok();
     const ctx: SimContext = { host: this.host, shell: this, cwd: this.cwd, root: opts.root, user: opts.root ? "root" : this.host.user, stdin: opts.stdin };
-    if (SCRIPT_WORDS.has(name)) {
-      this.unsupported.push(argv.join(" "));
-      return fail(`bash: ${NOT_A_SCRIPT}\n`, 2);
-    }
     if (name === "sudo") {
       const rest = argv.slice(1);
       // -u someone: still more than this user may do by themselves, and close enough to root for what is simulated.
@@ -492,6 +1046,22 @@ export class SimShell {
     if (this.host.only && !this.host.only.commands.has(name)) {
       this.unsupported.push(argv.join(" "));
       return fail(`${this.host.only.unknown(name)}\n`, 1);
+    }
+    // The shell's own words for its variables and for leaving. An appliance has a command line of its own.
+    if (!this.host.only) {
+      if (name === "exit") {
+        const code = argv[1] === undefined ? this.lastCode : Number(argv[1]);
+        if (!Number.isInteger(code)) return { out: "", err: `bash: exit: ${argv[1]}: numeric argument required\n`, code: 2, exit: true };
+        return { out: "", err: "", code: code & 255, exit: true };
+      }
+      if (name === "export" || name === "unset") {
+        for (const arg of argv.slice(1)) {
+          const eq = arg.indexOf("=");
+          if (name === "unset") this.vars.delete(arg);
+          else if (eq > 0 && /^[A-Za-z_]\w*$/.test(arg.slice(0, eq))) this.vars.set(arg.slice(0, eq), arg.slice(eq + 1));
+        }
+        return ok();
+      }
     }
     if (name.includes("/") || ((name === "sh" || name === "bash") && argv[1] && !argv[1].startsWith("-"))) {
       const viaShell = !name.includes("/");
