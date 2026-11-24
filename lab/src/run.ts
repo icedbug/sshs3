@@ -170,6 +170,9 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
         ...(s.rules.freeze ? { freeze: { hours: 1, why: 'Release week: no changes.' } } : {}),
       });
 
+    // What the task sets up in sshs3 itself (a knowledge base page, say), as Maria.
+    for (const request of s.product ?? []) await team.maria.hub(request);
+
     // 3. The person: keys on the fresh servers, the shared profiles, the model, a terminal, the request.
     for (const a of [team.maria, team.omar, team.lina]) await a.trustLab(lab);
     await team.maria.saveProfiles(lab);
@@ -182,8 +185,10 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
 
     // 4 and 5. Answer what waits for a person, until the run ends or a cap stops it.
     const answered = new Set<string>();
+    const tries = new Map<string, number>();
     let questionSince = 0;
-    // An answer the product does not take yet is given again on the next look; what it said is kept.
+    // An answer the product does not take is given again on the next look, three times at most; what it
+    // said is kept. After that the lab's people have nothing more to say to it.
     const tryAnswer = async (key: string, act: () => Promise<unknown>, approval: Approval): Promise<boolean> => {
       if (answered.has(key)) return false;
       try {
@@ -193,31 +198,37 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
         return true;
       } catch (error) {
         refusedAnswers.push(`${key}: ${error instanceof Error ? error.message : String(error)}`);
+        tries.set(key, (tries.get(key) ?? 0) + 1);
+        if ((tries.get(key) ?? 0) >= 3) answered.add(key);
         return false;
       }
     };
     for (;;) {
       await sleep(1500);
       task = await account.task(taskId);
-      let waitsOnUs = false;
+      // Something the lab's people can still answer.
+      let open = false;
       let answeredNow = false;
-      for (const c of task.changes.filter((x) => x.status === 'pending')) {
-        waitsOnUs = true;
+      const pending = task.changes.filter((x) => x.status === 'pending');
+      for (const c of pending) {
         const d = decideChange(s, c);
         const by = account;
-        if (!answered.has(c.id))
+        if (!answered.has(c.id)) {
+          open = true;
           answeredNow ||= await tryAnswer(c.id, () => by.answer(taskId!, c.id, d.approved, d.note), { kind: 'change', changeId: c.id, command: c.command, approved: d.approved, by: by.name, at: Date.now() });
-        else if ((c.requiredApprovals ?? 1) > (c.approvals?.length ?? 0))
+        } else if (d.approved && (c.requiredApprovals ?? 1) > (c.approvals?.length ?? 0) && !answered.has(`peer:${c.id}`)) {
           // A second person is needed (the two-person rule): the other colleague answers the same way.
+          open = true;
           answeredNow ||= await tryAnswer(
             `peer:${c.id}`,
             () => peer.hub({ action: 'peer-approve', ownerId: by.id, taskId: taskId!, changeId: c.id, approved: d.approved, ...(d.note ? { note: d.note } : {}) }),
             { kind: 'peer', changeId: c.id, command: c.command, approved: d.approved, by: peer.name, at: Date.now() },
           );
+        }
       }
       // A plan is decided once the agent has stopped to wait for it: the product takes no decision before.
-      if (task.plan?.status === 'proposed') {
-        waitsOnUs = true;
+      if (task.plan?.status === 'proposed' && !answered.has(`plan:${task.plan.id}`)) {
+        open = true;
         if (!['running', 'queued'].includes(task.status)) {
           const d = decidePlan(s);
           const by = account;
@@ -230,9 +241,10 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
         }
       }
       if (answeredNow) continue;
-      if (DONE.includes(task.status) && !waitsOnUs) break;
-      // Waiting with nothing of ours to answer: the agent asked the person something. Nobody answers.
-      if ((task.status === 'waiting' || DONE.includes(task.status)) && !waitsOnUs) {
+      if (DONE.includes(task.status) && !open && !pending.length) break;
+      // The run waits on a person and the lab's people have nothing more to give: a question to the
+      // person, or a change nobody here may approve. Nobody answers; the run ends.
+      if (!open && (task.status === 'waiting' || pending.length || DONE.includes(task.status))) {
         questionSince ||= Date.now();
         if (Date.now() - questionSince > QUESTION_WAIT_MS) {
           asked = task.messages.filter((m) => m.role === 'assistant').at(-1)?.text;

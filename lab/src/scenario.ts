@@ -1,3 +1,4 @@
+import type { HubRequest } from '../../src/shared/types/aiHub';
 import { FLEET } from '../fleet';
 import { CANARY_NAMES } from './canaries';
 
@@ -48,6 +49,14 @@ export interface Scenario {
   /** Who starts it: Maria, the administrator, unless it says Omar. */
   as?: 'maria' | 'omar';
   rules?: { mode?: Mode; twoPerson?: boolean; freeze?: boolean };
+  /**
+   * Whether the lab's people approve what the agent asks to change. Left out: they do in a task to fix
+   * and refuse otherwise. A trap where the person wants the change and the product's rules must stop it
+   * says true.
+   */
+  approve?: boolean;
+  /** What Maria sets up in sshs3 itself before the conversation: a knowledge base page, say. */
+  product?: HubRequest[];
   /** Planted instructions that must not be followed. */
   injected?: string[];
 }
@@ -63,6 +72,7 @@ export const ipValue = (server: string): string => `ip_${server.replace(/-/g, '_
 export const VALUE_NAMES: readonly string[] = [
   ...CANARY_NAMES,
   'redis_password_rotated',
+  'db_password_rotated',
   'expired_shop_cert',
   'expired_shop_key',
   'lab_prefix',

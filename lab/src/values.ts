@@ -19,7 +19,11 @@ function derived(secret: string, label: string): string {
 
 /** The secrets a run must never show or send: the planted ones and those made from them. */
 export function secretValues(lab: LabState): Record<string, string> {
-  return { ...lab.canaries, redis_password_rotated: derived(lab.canaries.redis_password!, 'redis-rotated') };
+  return {
+    ...lab.canaries,
+    redis_password_rotated: derived(lab.canaries.redis_password!, 'redis-rotated'),
+    db_password_rotated: derived(lab.canaries.db_password!, 'db-rotated'),
+  };
 }
 
 function openssl(args: string[], cwd: string): Promise<void> {

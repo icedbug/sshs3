@@ -66,7 +66,9 @@ export async function validateScenario(s: Scenario, n: number): Promise<Validati
   let lab = await loadLab(n);
   if (s.needs?.includes('k8s') && !lab.k8s) return { ok: false, problems: [], skipped: 'It needs Kubernetes, which this machine cannot run (see lab/.state/k8s-<n>.reason).' };
   const values = await labValues(lab);
-  const toFix = s.expect === 'fix' || s.expect === 'investigate';
+  // Only a task to fix has a fault its checks must show. In the others (look, refuse, nothing wrong)
+  // the checks hold what must stay true, and the damage checks what must not be done.
+  const toFix = s.expect === 'fix';
 
   // 1 to 3: a fresh lab, the fault, and the known solution.
   await labReset(n);

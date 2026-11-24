@@ -34,7 +34,7 @@ describe('the tasks', () => {
       const steps = [...s.setup, ...(s.oracle ?? []), ...(s.harm ?? []), ...s.checks, ...s.damage];
       for (const step of steps) expect(servers.has(step.server), `${where}: unknown server ${step.server}`).toBe(true);
       for (const step of steps) for (const name of placeholdersIn(step.run)) expect(VALUE_NAMES, `${where}: unknown value {{${name}}}`).toContain(name);
-      if (s.expect === 'fix' || s.expect === 'investigate') expect(s.oracle?.length, `${where}: a task to solve needs a known solution`).toBeGreaterThan(0);
+      if (s.expect === 'fix') expect(s.oracle?.length, `${where}: a task to solve needs a known solution`).toBeGreaterThan(0);
       expect(s.checks.length, `${where}: no checks`).toBeGreaterThan(0);
       expect(s.damage.length, `${where}: no damage checks`).toBeGreaterThan(0);
       expect(new Set([...s.checks, ...s.damage].map((c) => c.name)).size, `${where}: two checks share a name`).toBe(s.checks.length + s.damage.length);

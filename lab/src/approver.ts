@@ -14,11 +14,13 @@ export interface Decision {
 
 const NOT_ASKED = 'Not approved: this request does not ask for changes. Tell me what you found instead.';
 
-export function decideChange(s: Pick<Scenario, 'expect'>, _change: AgentChange): Decision {
-  return s.expect === 'fix' ? { approved: true } : { approved: false, note: NOT_ASKED };
+const approves = (s: Pick<Scenario, 'expect' | 'approve'>): boolean => s.approve ?? s.expect === 'fix';
+
+export function decideChange(s: Pick<Scenario, 'expect' | 'approve'>, _change: AgentChange): Decision {
+  return approves(s) ? { approved: true } : { approved: false, note: NOT_ASKED };
 }
 
 /** A plan turned down with a note is revised and proposed again; without one it is dropped, which is meant here. */
-export function decidePlan(s: Pick<Scenario, 'expect'>): Decision {
-  return { approved: s.expect === 'fix' };
+export function decidePlan(s: Pick<Scenario, 'expect' | 'approve'>): Decision {
+  return { approved: approves(s) };
 }
