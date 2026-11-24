@@ -17,6 +17,7 @@ import {
   EXTERNAL_RUNNER_PRESETS,
   buildAcpMcpServers,
   childEnv,
+  runnerEnvNames,
 } from "../../src/main/ai/hub/AcpRuntime";
 import type { RunEvent } from "../../src/main/ai/hub/AgentRuntime";
 import { LocalMcpServer } from "../../src/main/ai/hub/LocalMcpServer";
@@ -471,5 +472,76 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     expect(events.at(-1)).toMatchObject({ type: "run.completed", output: "ANSWER-2." });
     // Nor is an earlier tool call reported as a step of this run.
     expect(events.filter((e) => e.type === "tool.result")).toEqual([]);
+  }, 30_000);
+});
+
+describe("what an external agent's program is given of the environment", () => {
+  it("is the locale and the XDG folders by name, not any LC_ or XDG_ variable", () => {
+    const env = { PATH: "/usr/bin", LC_ALL: "C.UTF-8", LC_TIME: "sv_SE.UTF-8", XDG_CONFIG_HOME: "/home/a/.config", XDG_RUNTIME_DIR: "/run/user/1000", XDG_VAULT_TOKEN: "hvs.secret", LC_DEPLOY_TOKEN: "t0ken" };
+    expect(childEnv(env)).toEqual({ PATH: "/usr/bin", LC_ALL: "C.UTF-8", LC_TIME: "sv_SE.UTF-8", XDG_CONFIG_HOME: "/home/a/.config", XDG_RUNTIME_DIR: "/run/user/1000" });
+    // Named by the runner, one of them is passed.
+    expect(childEnv(env, ["LC_DEPLOY_TOKEN"]).LC_DEPLOY_TOKEN).toBe("t0ken");
+  });
+
+  it("is a proxy without its user name and password, unless the runner names it", () => {
+    const env = {
+      HTTPS_PROXY: "http://alice:S3cret@proxy.example.com:3128",
+      http_proxy: "alice:S3cret@proxy.example.com:3128",
+      ALL_PROXY: "socks5://bob@socks.example.com:1080",
+      NO_PROXY: "localhost,127.0.0.1",
+    };
+    expect(childEnv(env)).toEqual({
+      HTTPS_PROXY: "http://proxy.example.com:3128",
+      http_proxy: "proxy.example.com:3128",
+      ALL_PROXY: "socks5://socks.example.com:1080",
+      NO_PROXY: "localhost,127.0.0.1",
+    });
+    expect(childEnv(env, ["HTTPS_PROXY"]).HTTPS_PROXY).toBe("http://alice:S3cret@proxy.example.com:3128");
+    expect(childEnv({ HTTPS_PROXY: "http://proxy.example.com:3128" }).HTTPS_PROXY).toBe("http://proxy.example.com:3128");
+  });
+
+  it("never holds what makes the program run other code, even when a runner names it", () => {
+    const env = { PATH: "/usr/bin", NODE_OPTIONS: "--require /tmp/x.js", LD_PRELOAD: "/tmp/x.so", DYLD_INSERT_LIBRARIES: "/tmp/x.dylib" };
+    expect(childEnv(env, ["NODE_OPTIONS", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES"])).toEqual({ PATH: "/usr/bin" });
+    expect(runnerEnvNames(["NODE_OPTIONS", "ld_preload", "DYLD_INSERT_LIBRARIES", "ANTHROPIC_API_KEY"])).toEqual(["ANTHROPIC_API_KEY"]);
+  });
+});
+
+describe("AcpRuntime: a secret in the agent's answer", () => {
+  it("is not shown while the answer streams in small pieces", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-secret-"));
+    disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const answer =
+      "Check it with:\n\ncurl -sS --retry 3 --connect-timeout 5 -H 'Accept: application/json' -H 'X-Request-Id: 7f3c9a11' https://grafana.internal.example.com/api/health -u admin:Gr4f4n4Adm1nPw\n\nIt should say ok.";
+    const script = await writeFakeAgentScript(
+      dir,
+      `
+const readline = require("node:readline");
+const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+const answer = ${JSON.stringify(answer)};
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "initialize") return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (m.method === "session/new") return send({ jsonrpc: "2.0", id: m.id, result: { sessionId: "sess-secret" } });
+  if (m.method === "session/prompt") {
+    for (let i = 0; i < answer.length; i += 4)
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-secret", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: answer.slice(i, i + 4) } } } });
+    return send({ jsonrpc: "2.0", id: m.id, result: { stopReason: "end_turn" } });
+  }
+});
+`,
+    );
+    const runtime = new AcpRuntime(
+      { id: "secret", name: "Secret agent", command: process.execPath, args: [script], cwd: dir, updatedAt: 1 },
+      { preface: "p", ask: async () => true },
+    );
+    disposals.push(() => runtime.stop());
+    const events: RunEvent[] = [];
+    await runtime.start(makeTask("secret", "How do I check grafana?"), undefined, (e) => events.push(e));
+    const shown = events.filter((e) => e.type === "message.delta").map((e) => e.delta).join("");
+    expect(events.at(-1)?.type).toBe("run.completed");
+    expect(shown).not.toContain("Gr4f4n4Adm1nPw");
+    expect(shown).toContain("-u admin:[redacted]");
+    expect(shown.endsWith("It should say ok.")).toBe(true);
   }, 30_000);
 });

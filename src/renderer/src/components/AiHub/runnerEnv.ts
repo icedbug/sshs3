@@ -13,8 +13,8 @@ export const RUNNER_ENV_MAX = 20;
 
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,79}$/;
 
-/** Never handed over, whatever a runner names: the SSH agent and sshs3's own variables. */
-const WITHHELD = /^(SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_)/i;
+/** Never handed over, whatever a runner names: the SSH agent, sshs3's own variables, and the ones that make a program run other code. */
+const WITHHELD = /^(?:SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_|(?:NODE_OPTIONS|LD_PRELOAD|DYLD_INSERT_LIBRARIES)$)/i;
 
 /** A long entry that is not a name may be a key pasted by mistake: only its start is repeated. */
 const shown = (entry: string): string => (entry.length > 32 ? `${entry.slice(0, 8)}…` : entry);
@@ -42,7 +42,7 @@ export function parseRunnerEnvNames(text: string): RunnerEnvInput {
   }
   const withheld = typed.filter((name) => WITHHELD.test(name));
   if (withheld.length > 0) {
-    return { names: [], problem: `Never passed to an external agent: ${withheld.join(', ')}. The SSH agent and sshs3's own variables stay in this app.` };
+    return { names: [], problem: `Never passed to an external agent: ${withheld.join(', ')}. The SSH agent, sshs3's own variables and variables that make a program run other code stay in this app.` };
   }
   if (typed.length > RUNNER_ENV_MAX) return { names: [], problem: `At most ${RUNNER_ENV_MAX} names. There are ${typed.length}.` };
   return { names: typed };

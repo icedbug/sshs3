@@ -77,6 +77,12 @@ export interface AgentMessage {
   sourceCalls?: import("../answerSources").AnswerSourceCall[];
   /** Compact snapshot marker. The receipt itself is read only when its answer is inspected. */
   sourceCallCount?: number;
+  /**
+   * Who wrote a message in the user's place: the person, or the hub itself (its word that a plan
+   * was approved or sent back, the line a resumed run starts with). Set on the messages the hub
+   * adds to a conversation; a message stored before this was kept has none, and is read by its words.
+   */
+  by?: "person" | "hub";
   at: number;
 }
 /**
@@ -124,7 +130,7 @@ export interface AgentPlanStep {
   approvedTarget?: string;
   checkExpected?: string;
   observeSeconds?: number;
-  /** Set when an approved plan's command has run without asking again. */
+  /** Set when the step has run: its command or change card, or for a step without a command, the file write it names. */
   ranAt?: number;
 }
 /** Opaque lookup for one source included in a model call. Content stays with the owning conversation. */
@@ -198,6 +204,11 @@ export interface AgentPlan {
    * may approve there: their approval then also covers a command on production that the plan lists.
    */
   production?: boolean;
+  /**
+   * The request asked for this plan (`/plan`). Once it is approved and over (every step has run, or
+   * the person has written since), a new change is held again, as in Plan mode.
+   */
+  askedFor?: boolean;
 }
 /** One tool call an agent made, with what it got back (both masked and shortened). */
 export interface AgentToolRecord {

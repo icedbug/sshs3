@@ -46,7 +46,7 @@ import {
   simulateDemoMcpTool,
 } from "./hubHelpers";
 import type { AppActionHost } from "./HubService";
-import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan } from "./PlanMode";
+import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan, planAskedFor } from "./PlanMode";
 import { guardAsk } from "./AppGuard";
 import { CONTEXT_WINDOW_LEAST, CONTEXT_WINDOW_MOST, contextWindowRefusal } from "../../../shared/contextWindow";
 import { BUCKET_SECRET_PARAMS, SETTINGS_OPS, handleSettingsOp, isSettingsOp, precheckSettingsOp, refuseCarriedSecrets, type SettingsCtx } from "./AppSettingsActions";
@@ -1732,7 +1732,7 @@ export async function handleAppAction(
             `This is the plan's fourth version without an approval. Stop proposing: tell the user what the review keeps finding and ask how they want to proceed.`,
           );
         const review = await hub.reviewPlan(task, parsed);
-        task.plan = newPlan(parsed, task.plan, review);
+        task.plan = newPlan(parsed, task.plan, review, Date.now(), planAskedFor(task));
         hub.planProposed(task);
         hub.changed();
         return {

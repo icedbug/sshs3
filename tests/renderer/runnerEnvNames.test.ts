@@ -32,7 +32,14 @@ describe("names of environment variables for an external agent", () => {
     "SSH_AGENT_PID",
     "SSHS3_DATA_DIR",
     "sshs3_anything",
+    // They make the program load and run other code first.
+    "NODE_OPTIONS",
+    "node_options",
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
     // Close to a withheld name, and fine:
+    "NODE_OPTIONS_EXTRA",
+    "MY_LD_PRELOAD",
     "SSH_KEY_PATH",
     "MY_SSHS3_TOKEN",
   ];
@@ -62,7 +69,7 @@ describe("names of environment variables for an external agent", () => {
 
   it("says why a text cannot be saved, and never repeats a value", () => {
     expect(parseRunnerEnvNames("MY-KEY").problem).toBe('Not a variable name: MY-KEY. A name is letters, digits and "_", and does not start with a digit.');
-    expect(parseRunnerEnvNames("OK_NAME SSH_AUTH_SOCK").problem).toBe("Never passed to an external agent: SSH_AUTH_SOCK. The SSH agent and sshs3's own variables stay in this app.");
+    expect(parseRunnerEnvNames("OK_NAME SSH_AUTH_SOCK").problem).toBe("Never passed to an external agent: SSH_AUTH_SOCK. The SSH agent, sshs3's own variables and variables that make a program run other code stay in this app.");
     // A name with its value pasted in: only the name is repeated.
     const pasted = parseRunnerEnvNames("ANTHROPIC_API_KEY=sk-ant-not-a-real-key-0123456789"); // pragma: allowlist secret
     expect(pasted.names).toEqual([]);

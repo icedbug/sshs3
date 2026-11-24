@@ -24,6 +24,7 @@ import { HubStore } from "./HubStore";
 import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { S3WorkspaceSyncService, mergeMemoryCopies } from "./S3WorkspaceSyncService";
 import { McpClientManager } from "./McpClientManager";
+import { markPlanStepRan } from "./PlanMode";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
 import { SelfLearningService } from "./SelfLearningService";
 import { EXTERNAL_RUNNER_PRESETS } from "./AcpRuntime";
@@ -115,6 +116,8 @@ export class HubService {
   settleWaiters = new Map<string, Array<() => void>>();
   /** Workforce run id → the conversation task that shows it. */
   workforceLeads = new Map<string, string>();
+  /** The investigators under way, by their run id → the run that asked them. What they spend is that run's agent's. */
+  investigations = new Map<string, string>();
   /** Records being read for memory proposals right now. */
   distilling = new Set<string>();
   readonly embeddings: EmbeddingIndex;
@@ -285,6 +288,8 @@ export class HubService {
         return res.sessionId;
       },
       activity: (task, change, sessionId) => {
+        // What ran of an approved plan is marked on it, also what the plan did not let through by itself.
+        markPlanStepRan(task, change);
         void this.recordAgentChangeActivity(task, change, sessionId);
       },
       recordIntent: async (task, change, rollback) => {

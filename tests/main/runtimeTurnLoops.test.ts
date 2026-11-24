@@ -115,6 +115,22 @@ describe.each(PROTOCOLS)("an answer cut at the output limit (%s)", (protocol) =>
     expect(brokerCalls.filter((req) => req.action === "command")).toHaveLength(1);
   });
 
+  it("leaves what was said before a call cut in the middle out of the answer, as for a call that was not cut", async () => {
+    const steps: ScriptedStep[] = [
+      { text: "I will look at the load first.", ...look("uptime"), cutAtLimit: true },
+      look("uptime"),
+      { text: "REPORT: load is fine." },
+    ];
+    const { end, streamed } = await run(protocol, (request) => steps[request.n - 1]);
+    const whole = await run(protocol, (request) => [{ text: "I will look at the load first.", ...look("uptime") }, { text: "REPORT: load is fine." }][request.n - 1]);
+    expect(whole.end?.output).toBe("REPORT: load is fine.");
+    expect(end?.type).toBe("run.completed");
+    expect(end?.output).toBe("REPORT: load is fine.");
+    // Shown as a turn that calls a tool is shown: its text, then a break before what follows.
+    expect(streamed).toBe(whole.streamed);
+    expect(streamed).toBe("I will look at the load first.\n\nREPORT: load is fine.");
+  });
+
   it("stops asking when the limit is reached again and again, and says what to change", async () => {
     const { end, streamed, model } = await run(protocol, () => ({ text: "more ", cutAtLimit: true }));
     expect(model.requests).toHaveLength(MAX_CUT_TURNS + 1);
@@ -162,8 +178,8 @@ function answerAsKept(events: RunEvent[]): string {
 
 describe.each(PROTOCOLS)("a connection that breaks in the middle of an answer (%s)", (protocol) => {
   it.each(["reset", "close"] as const)("asks the turn again after a %s, and the person sees the answer once", async (how) => {
-    // Long enough that part of it reaches the person before the break (the last 128 characters are held back for masking).
-    const broken = "The pool is scrubbing, and that is what slows the upstream down for every request. ".repeat(5);
+    // Lines, so that part of it reaches the person before the break (the line being written is held back for masking).
+    const broken = "The pool is scrubbing, and that is what slows the upstream down for every request.\n".repeat(5);
     const { end, events, model } = await run(protocol, (request) =>
       request.n === 1 ? { text: broken, breakStream: how } : { text: "The pool is scrubbing." });
     expect(end?.type).toBe("run.completed");
@@ -301,14 +317,7 @@ describe.each(PROTOCOLS)("a turn that says nothing and calls nothing, with the t
       if (request.toolResults === 1) return todo("completed");
       return { text: "It was the upstream pool." };
     });
-    if (protocol === "responses") {
-      // The Responses loop takes a turn with nothing in it for a failed answer before it looks at the
-      // task list (ResponsesTurn.finish). Left as it is here; the other two go on.
-      expect(model.requests).toHaveLength(2);
-      expect(end?.type).toBe("run.failed");
-      expect(end?.error).toBe("The model finished without an answer.");
-      return;
-    }
+    // The same in all three loops: a turn with nothing in it is not taken for a failed answer before the task list is looked at.
     expect(model.requests).toHaveLength(4);
     // The third request ends with the message that sends it back to work.
     expect(model.requests[2].last).toContain("item(s) of your task list are still open");
@@ -393,7 +402,8 @@ describe.each(PROTOCOLS)("a message the person sends while the agent works (%s)"
   it("puts the answer where it belongs in the conversation when the message comes in the middle of a turn", async () => {
     // The conversation as the hub keeps it: pieces go to the last answer, or begin one after the person's message.
     const conversation: Array<{ role: "assistant" | "user"; text: string }> = [];
-    const first = "nginx is slow because the upstream pool is exhausted. ".repeat(8).trim();
+    // Lines: an answer is shown line by line, and the message comes once the first line is on screen.
+    const first = "nginx is slow because the upstream pool is exhausted.\n".repeat(8).trim();
     let steered = false;
     const { end } = await run(
       protocol,
@@ -530,11 +540,12 @@ describe("Anthropic: the model's thinking when earlier messages are edited", () 
     const before = model.requests[firstEdited - 1];
     expect(thinking(before)).toBe(firstEdited - 1);
     expect(before.raw).toContain('"signature":"sig-1"');
-    // The request that carries the first edit carries no thinking block: one bound to the conversation
-    // as it was would be refused.
-    expect(thinking(model.requests[firstEdited])).toBe(0);
+    // The request that carries the first edit carries the thinking of the last turn only, the turn
+    // whose tool call it answers: one of an earlier turn, bound to the conversation as it was, would be refused.
+    expect(thinking(model.requests[firstEdited])).toBe(1);
+    expect(model.requests[firstEdited].raw).toContain(`"signature":"sig-${firstEdited}"`);
     // After it the conversation is only added to again, and thinking goes back again.
-    expect(thinking(model.requests[firstEdited + 1])).toBe(1);
+    expect(thinking(model.requests[firstEdited + 1])).toBe(2);
   }, 30_000);
 });
 
@@ -641,33 +652,76 @@ describe("a ChatGPT sign-in that is refused in the middle of a run", () => {
 
 describe.each(PROTOCOLS)("a provider's rate limit that says when to ask again (%s)", (protocol) => {
   const limited = (ms: number): ScriptedStep => ({ status: 429, headers: { "retry-after-ms": String(ms) }, errorBody: '{"error":{"message":"Rate limit reached"}}' });
+  // A second at least in the product; shorter here, so that these tests do not take minutes.
+  beforeEach(() => {
+    retryPolicy.rateLimitMinWaitMs = 50;
+  });
   afterEach(() => {
     retryPolicy.rateLimitMaxWaitMs = 300_000;
+    retryPolicy.rateLimitMinWaitMs = 1_000;
   });
 
   it("is waited out as long as the provider asks, more times than a passing failure is retried, and shown while it lasts", async () => {
     // No retries at all for passing failures in these tests: the waits below are not among them.
     expect(retryPolicy.attempts).toBe(0);
     const started = Date.now();
-    const { end, events, model } = await run(protocol, (request) => (request.n <= 4 ? limited(40) : { text: "Load is fine." }));
+    const { end, events, model } = await run(protocol, (request) => (request.n <= 4 ? limited(80) : { text: "Load is fine." }));
     expect(end?.type).toBe("run.completed");
     expect(end?.output).toBe("Load is fine.");
     expect(model.requests).toHaveLength(5);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
     const notices = events.filter((e) => e.type === "run.retrying");
     expect(notices).toHaveLength(4);
     expect(notices[0].text).toBe("Waiting for the provider's rate limit. Asking again in 1 second.");
+    expect((notices[0] as { delayMs?: number }).delayMs).toBe(80);
   });
 
   it("gives up when the waits for one answer add up to more than a run waits, and says so", async () => {
-    // Every wait counts as a second at least: the third would take the total past 2.5 seconds.
-    retryPolicy.rateLimitMaxWaitMs = 2_500;
+    // Every wait is the shortest one at least: the third would take the total past 125 ms.
+    retryPolicy.rateLimitMaxWaitMs = 125;
     const { end, model } = await run(protocol, () => limited(30));
     expect(model.requests).toHaveLength(3);
     expect(end?.type).toBe("run.failed");
     expect(end?.error).toMatch(
-      /^The provider's rate limit asks to wait 1 second, after 2 seconds of waiting already\. A run waits 3 seconds at most for one answer\. Try again later, or choose another model in AI settings\. The provider said: .*\(429\).*Rate limit reached/,
+      /^The provider's rate limit asks to wait 1 second, after 1 second of waiting already\. A run waits 1 second at most for one answer\. Try again later, or choose another model in AI settings\. The provider said: .*\(429\).*Rate limit reached/,
     );
+  });
+
+  it("waits what it counts when the provider says to ask again at once", async () => {
+    retryPolicy.rateLimitMaxWaitMs = 250;
+    const started = Date.now();
+    const { end, events, model } = await run(protocol, () => ({ status: 429, headers: { "retry-after": "0" }, errorBody: "slow down" }));
+    // Five waits of the shortest wait, then the sixth would pass the total: not hundreds of requests at once.
+    expect(model.requests).toHaveLength(6);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(240);
+    expect(events.filter((e) => e.type === "run.retrying").map((e) => (e as { delayMs?: number }).delayMs)).toEqual([50, 50, 50, 50, 50]);
+    expect(end?.error).toMatch(/^The provider's rate limit asks to wait 1 second, after 1 second of waiting already\./);
+  });
+
+  it("counts the waits of one answer together, also over a broken stream and a cut at the output limit", async () => {
+    retryPolicy.rateLimitMaxWaitMs = 175;
+    const steps: ScriptedStep[] = [
+      limited(0),
+      { text: "The pool is\n", breakStream: "reset" },
+      limited(0),
+      { text: "The pool is\n", cutAtLimit: true },
+      limited(0),
+      limited(0),
+      { text: "never reached" },
+    ];
+    const { end, model } = await run(protocol, (request) => steps[request.n - 1] ?? { text: "never reached" });
+    // Three waits of 50 ms are 150 ms; a fourth would pass 175 ms, though no one request waited more than once in a row.
+    expect(model.requests).toHaveLength(6);
+    expect(end?.type).toBe("run.failed");
+    expect(end?.error).toMatch(/after 1 second of waiting already/);
+  });
+
+  it("starts the count again for the next answer", async () => {
+    retryPolicy.rateLimitMaxWaitMs = 125;
+    const steps: ScriptedStep[] = [limited(0), limited(0), look(), limited(0), limited(0), { text: "Load is fine." }];
+    const { end, model } = await run(protocol, (request) => steps[request.n - 1]);
+    expect(model.requests).toHaveLength(6);
+    expect(end?.type).toBe("run.completed");
   });
 
   it("does not wait at all for a limit that asks for longer than a run waits", async () => {

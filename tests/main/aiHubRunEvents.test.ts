@@ -87,6 +87,72 @@ describe("an answer that broke off and is written again", () => {
     expect(task.messages.map((m) => m.text)).toEqual(["Why is nginx slow?", "The pool is scrubbing."]);
     expect(task.status).toBe("completed");
   });
+
+  it("takes back what was shown before each message the person sent during it", async () => {
+    const { task, send } = await hubWithRun();
+    const said = (text: string) => task.messages.push({ id: text, role: "user", text, by: "person", at: 2 });
+    send({ type: "message.delta", delta: "Line one.\n" });
+    said("also check app-02");
+    send({ type: "message.delta", delta: "Line two.\n" });
+    said("and app-03");
+    send({ type: "message.delta", delta: "Line three.\n" });
+    send({ type: "message.retract", text: "Line three.\n", earlier: ["Line one.\n", "Line two.\n"] });
+    expect(task.messages.map((m) => `${m.role}: ${m.text}`)).toEqual(["user: Why is nginx slow?", "user: also check app-02", "user: and app-03"]);
+    send({ type: "message.delta", delta: "app-02 and app-03 are fine." });
+    expect(task.messages.map((m) => m.role)).toEqual(["user", "user", "user", "assistant"]);
+  });
+
+  it("takes back only the part shown before a message, and moves what the run read to the answer written again", async () => {
+    const { task, send } = await hubWithRun();
+    send({ type: "message.delta", delta: "Earlier turn.\n\n" });
+    send({ type: "message.delta", delta: "Line one.\n" });
+    task.messages.push({ id: "s", role: "user", text: "also check app-02", by: "person", at: 2 });
+    // Nothing was shown after the message before the stream broke.
+    send({ type: "message.retract", text: "", earlier: ["Line one.\n"] });
+    expect(task.messages.map((m) => `${m.role}: ${m.text}`)).toEqual(["user: Why is nginx slow?", "assistant: Earlier turn.\n\n", "user: also check app-02"]);
+
+    const { task: read, send: sendRead } = await hubWithRun();
+    sendRead({ type: "message.delta", delta: "Line one.\n", sourceCalls: [{ id: "c1", sources: [] }] as never });
+    read.messages.push({ id: "s", role: "user", text: "also check app-02", by: "person", at: 2 });
+    sendRead({ type: "message.retract", text: "", earlier: ["Line one.\n"] });
+    // What the run read now stands after the person's message, where the answer is written again.
+    expect(read.messages.map((m) => m.role)).toEqual(["user", "user", "assistant"]);
+    expect(read.messages[2]).toMatchObject({ text: "", sourceCalls: [{ id: "c1" }] });
+    sendRead({ type: "message.delta", delta: "Written again." });
+    expect(read.messages.map((m) => `${m.role}: ${m.text}`)).toEqual(["user: Why is nginx slow?", "user: also check app-02", "assistant: Written again."]);
+  });
+
+  it("leaves the conversation with the person's message and the answer written again, once, through a whole run", async () => {
+    const { DirectAgentRuntime, resetCircuitBreakers, retryPolicy } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const { scriptedModel } = await import("../helpers/scriptedModel");
+    retryPolicy.baseDelayMs = 1;
+    resetCircuitBreakers();
+    try {
+      const { hub, task } = await hubWithRun();
+      const broken = "The pool is scrubbing, and that is what slows the upstream down for every request.\n".repeat(5);
+      const model = scriptedModel("chat", (request) => (request.n === 1 ? { text: broken, breakStream: "reset" } : { text: "It is the pool. app-02 is fine." }));
+      const runtime = new DirectAgentRuntime((async (req: Record<string, unknown>) => (req.action === "context" ? {} : { exitCode: 0, output: "" })) as never, undefined, model.fetch);
+      let steered = false;
+      await runtime.start(task, model.config(), (event) => {
+        hub.event(task, event);
+        if (event.type === "message.delta" && event.delta && !steered) {
+          steered = true;
+          // What the hub's "reply" does while the run is active.
+          void runtime.steer("also check app-02");
+          task.messages.push({ id: "s", role: "user", text: "also check app-02", by: "person", at: 2 });
+        }
+      });
+      expect(task.status).toBe("completed");
+      expect(model.requests).toHaveLength(2);
+      expect(task.messages.map((m) => `${m.role}: ${m.text}`)).toEqual([
+        "user: Why is nginx slow?",
+        "user: also check app-02",
+        "assistant: It is the pool. app-02 is fine.",
+      ]);
+    } finally {
+      retryPolicy.baseDelayMs = 1000;
+    }
+  });
 });
 
 // ------------------------------------------------------------------ a whole run, with a model at an address
@@ -211,6 +277,65 @@ describe("an agent's monthly token budget while it runs", () => {
       expect(task.messages.at(-1)?.text).toBe("All twelve checked.");
     }
   }, 30_000);
+
+  const used = (n: number): RunEvent =>
+    ({ type: "usage.updated", usage: { input_tokens: n, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: 0 } }) as RunEvent;
+  const runOf = (id: string, extra: Partial<AgentTask> = {}): AgentTask =>
+    ({
+      id, title: id, mode: "advice", status: "running", agentId: "dba",
+      messages: [{ id: `${id}-m`, role: "user", text: "look", at: 1 }],
+      changes: [], sources: [], createdAt: 1, updatedAt: 1, maxCommands: 0, maxMinutes: 0, verification: "not-verified",
+      ...extra,
+    }) as unknown as AgentTask;
+
+  it("counts what the agent's other runs spend while they work", async () => {
+    const { hub } = await hubWithRun();
+    await hub.request({ action: "agent-save", agent: { ...agent, monthlyTokenBudget: 1_000 } } as never);
+    const one = runOf("one");
+    const two = runOf("two");
+    hub.store.data.tasks.push(one, two);
+    hub.event(one, used(900));
+    expect(one.status).toBe("running");
+    // 900 and 900 are more than 1,000: the run that went over is stopped.
+    hub.event(two, used(900));
+    await vi.waitFor(() => expect(two.status).toBe("interrupted"));
+    expect(two.error).toMatch(/^DBA has used its token budget for this month \(1,000 tokens\)/);
+    // The other is stopped when it next says what it has spent.
+    hub.event(one, used(950));
+    await vi.waitFor(() => expect(one.status).toBe("interrupted"));
+  });
+
+  it("counts what the investigators a run asked spend, and stops that run", async () => {
+    const { hub } = await hubWithRun();
+    await hub.request({ action: "agent-save", agent: { ...agent, monthlyTokenBudget: 1_000 } } as never);
+    const asker = runOf("asker");
+    // As areas/agents.ts investigate() starts them: background runs of no agent, under a run id the hub ties to the asker.
+    const first = runOf("inv-a", { agentId: undefined, workforceRunId: "inv-1" } as Partial<AgentTask>);
+    const second = runOf("inv-b", { agentId: undefined, workforceRunId: "inv-1" } as Partial<AgentTask>);
+    hub.store.data.tasks.push(asker, first, second);
+    hub.investigations.set("inv-1", asker.id);
+    hub.event(asker, used(300));
+    // One investigator has finished: what it spent is not on the month yet, and still counts.
+    hub.event(first, { type: "run.completed", output: "found it", usage: { input_tokens: 400, output_tokens: 100 } } as RunEvent);
+    expect(asker.status).toBe("running");
+    hub.event(second, used(250));
+    await vi.waitFor(() => expect(asker.status).toBe("interrupted"));
+    expect(asker.error).toMatch(/^DBA has used its token budget for this month/);
+  });
+
+  it("is not reached by spending of another agent's runs or of a run of no agent", async () => {
+    const { hub } = await hubWithRun();
+    await hub.request({ action: "agent-save", agent: { ...agent, monthlyTokenBudget: 1_000 } } as never);
+    const mine = runOf("mine");
+    const other = runOf("other", { agentId: "someone-else" });
+    const none = runOf("none", { agentId: undefined });
+    hub.store.data.tasks.push(mine, other, none);
+    hub.event(other, used(5_000));
+    hub.event(none, used(5_000));
+    hub.event(mine, used(900));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mine.status).toBe("running");
+  });
 });
 
 describe("masking the answer while it streams", () => {

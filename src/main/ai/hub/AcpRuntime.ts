@@ -9,6 +9,7 @@ import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import type { FinalRunEvent } from "./RunOutcome";
 import type { LocalMcpServer } from "./LocalMcpServer";
 import { boundedContext, boundedPrompt, safeError } from "./privacy";
+import { StreamingSecretMasker } from "./StreamingSecretMasker";
 
 /**
  * Runs a conversation on an external coding agent (Claude Code, Codex, Gemini
@@ -594,6 +595,8 @@ export class AcpRuntime implements AgentRuntime {
     });
 
     let text = "";
+    // The agent's answer is masked as it streams, as a model's is: a secret in it is not shown.
+    const masker = new StreamingSecretMasker();
     try {
       const plan = runnerSpawn(this.runner.command, this.runner.args ?? []);
       this.child = spawn(plan.file, plan.args, {
@@ -649,7 +652,10 @@ export class AcpRuntime implements AgentRuntime {
         } catch {
           continue; // Not protocol: an agent that prints to stdout by mistake.
         }
-        void this.receive(message, onEvent, (delta) => (text += delta));
+        void this.receive(message, onEvent, (delta) => {
+          text += delta;
+          return masker.push(delta);
+        });
       }
     });
 
@@ -777,13 +783,15 @@ export class AcpRuntime implements AgentRuntime {
 
     // What the agent says it used is saved with the conversation and counted like any run's.
     const usage = acpUsage(result?.usage) ?? acpUsage(result?._meta?.usage);
+    const rest = masker.flush();
+    if (rest) onEvent({ type: "message.delta", delta: rest });
     onEvent({ ...acpOutcome(result?.stopReason, text), ...(usage ? { usage } : {}) });
   }
 
   private async receive(
     message: Record<string, unknown>,
     onEvent: (event: RunEvent) => void,
-    addText: (delta: string) => void,
+    addText: (delta: string) => string,
   ): Promise<void> {
     const id = message.id as number | string | undefined;
     const method = message.method as string | undefined;
@@ -808,10 +816,8 @@ export class AcpRuntime implements AgentRuntime {
       const kind = update.sessionUpdate;
       if (kind === "agent_message_chunk") {
         const delta = textOf(update.content);
-        if (delta) {
-          addText(delta);
-          onEvent({ type: "message.delta", delta });
-        }
+        const shown = delta ? addText(delta) : "";
+        if (shown) onEvent({ type: "message.delta", delta: shown });
       } else if (kind === "plan" && Array.isArray(update.entries)) {
         const todos: AgentTodo[] = (update.entries as Array<Record<string, unknown>>)
           .filter((e) => typeof e.content === "string")
@@ -954,8 +960,11 @@ export function killRunner(
   child.kill(signal);
 }
 
-/** Never handed over, even when a runner names them: this app's way into the team's servers, and its own settings. */
-const WITHHELD = /^(SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_)/i;
+/**
+ * Never handed over, even when a runner names them: this app's way into the team's servers, its own
+ * settings, and the variables that make a program load and run other code before its own.
+ */
+const WITHHELD = /^(?:SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_|(?:NODE_OPTIONS|LD_PRELOAD|DYLD_INSERT_LIBRARIES)$)/i;
 
 /**
  * What every external agent's program is given of this app's environment: what a program needs
@@ -965,8 +974,12 @@ const WITHHELD = /^(SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_)/i;
 const PASSED = new RegExp(
   "^(" +
     [
-      "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "LC_[A-Z_]+", "TERM", "COLORTERM", "TZ",
-      "TMPDIR", "TMP", "TEMP", "XDG_[A-Z_]+",
+      "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "COLORTERM", "TZ", "TMPDIR", "TMP", "TEMP",
+      // The locale's parts, by name: any other LC_ or XDG_ variable is somebody's own, and may be a token.
+      "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+      "LC_ADDRESS", "LC_IDENTIFICATION", "LC_MEASUREMENT", "LC_NAME", "LC_PAPER", "LC_TELEPHONE",
+      // Where a program keeps its settings, data and cache.
+      "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
       // The way out: a proxy, and the certificates it is trusted by.
       "HTTPS?_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
       // Windows: without these no program starts or finds its own folders.
@@ -977,15 +990,24 @@ const PASSED = new RegExp(
   "i",
 );
 
+/** A proxy's address, which may carry a user name and password. */
+const PROXY = /^(?:HTTPS?_PROXY|ALL_PROXY)$/i;
+/** A proxy address with its user name and password taken out: `http://user:pw@proxy:3128` becomes `http://proxy:3128`. */
+const withoutCredentials = (value: string): string => value.replace(/^((?:[a-z][a-z0-9+.-]*:\/\/)?)[^@/\s]*@/i, "$1");
+
 /**
  * The environment an external agent runs with: the variables in PASSED, and those the runner's own
- * settings name (`extra`). The SSH agent and sshs3's own variables are never among them.
+ * settings name (`extra`). The SSH agent, sshs3's own variables, and the ones that make a program
+ * run other code are never among them. A proxy is passed without the user name and password in its
+ * address, unless the runner names that variable.
  */
 export function childEnv(env: NodeJS.ProcessEnv, extra: readonly string[] = []): NodeJS.ProcessEnv {
   const named = new Set(extra.map((name) => name.toUpperCase()));
   const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env))
-    if (!WITHHELD.test(k) && (PASSED.test(k) || named.has(k.toUpperCase()))) out[k] = v;
+  for (const [k, v] of Object.entries(env)) {
+    if (WITHHELD.test(k) || !(PASSED.test(k) || named.has(k.toUpperCase()))) continue;
+    out[k] = v !== undefined && PROXY.test(k) && !named.has(k.toUpperCase()) ? withoutCredentials(v) : v;
+  }
   return out;
 }
 
@@ -997,4 +1019,4 @@ export function runnerEnvNames(names: unknown): string[] {
 
 /** The words that say, wherever a runner is set up, what its program is given of the environment. */
 export const RUNNER_ENV_NOTE =
-  "The program is given the basics of this app's environment only: the path, the home folder, language, terminal, temporary folder and proxy settings. A variable it needs beyond these (its API key, say) is passed when it is listed in `env`. The SSH agent and sshs3's own variables are never passed.";
+  "The program is given the basics of this app's environment only: the path, the home folder, language, terminal, temporary folder and proxy settings, a proxy without its user name and password. A variable it needs beyond these (its API key, say, or a proxy with its password) is passed when it is listed in `env`. The SSH agent, sshs3's own variables, NODE_OPTIONS, LD_PRELOAD and DYLD_INSERT_LIBRARIES are never passed.";

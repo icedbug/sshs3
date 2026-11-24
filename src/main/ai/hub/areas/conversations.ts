@@ -29,7 +29,7 @@ import {
   buildInstantCommandSuggestion,
 } from "../hubHelpers";
 import { answerSourceReply, evidenceSourceReply, messageForView } from "../answerSourceRead";
-import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS, log } from "../hubShared";
+import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS, isFromHub, log } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
@@ -496,6 +496,7 @@ export class ConversationsPart {
             : spent
               ? more.trim()
               : "Resume the conversation.",
+          by: "hub",
           at: Date.now(),
         });
         await this.launch(task);
@@ -606,6 +607,8 @@ export class ConversationsPart {
         if (again && asked < 0) throw new Error("There is no question here to ask again.");
         // A message is read from its start: what a person says first (or an approval's instruction) is kept.
         const text = again ? "" : clip(requiredText(rawText), 16_000);
+        // The hub's own word (a plan's approval) is told apart from the person's by how it was sent, never by its words.
+        const by = isFromHub(request) ? "hub" : "person";
         if (active(task)) {
           const picturesTaken = await this.runtimes.get(task.id)?.steer(text, replyImages);
           task.messages.push({
@@ -613,6 +616,7 @@ export class ConversationsPart {
             role: "user",
             text,
             ...(replyImages.length > 0 ? { images: replyImages } : {}),
+            by,
             at: Date.now(),
           });
           // This agent takes words only while it works: said at once, not found out from its answer.
@@ -661,6 +665,7 @@ export class ConversationsPart {
               role: "user",
               text,
               ...(replyImages.length > 0 ? { images: replyImages } : {}),
+              by,
               at: Date.now(),
             });
           await this.launch(task);

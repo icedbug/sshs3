@@ -35,8 +35,10 @@ const ANSWER_MAX = 128_000;
 const STREAM_MASK_WINDOW = 2_048;
 /**
  * What the answer that is streaming has delivered so far, as it came. Kept beside the conversation
- * and never stored, so that the whole of it can be masked in one go when the answer is complete:
- * the text that is kept is then exactly what masking the whole answer gives.
+ * and never stored, so that the whole of it can be masked in one go when the answer is complete.
+ * The pieces come masked already: the runtime holds back what could still turn out to be a secret
+ * (StreamingSecretMasker), so they add up to what masking the whole answer gives. Masking them once
+ * more as a whole only catches what the window above missed between two pieces.
  */
 const streamedRaw = new WeakMap<AgentTask, { messageId: string; raw: string }>();
 
@@ -581,17 +583,36 @@ export class RunsPart {
     // An answer that broke off in the middle is asked for again: what was shown of it is taken back,
     // so the conversation does not hold it twice. The windows get the corrected text with the next
     // refresh, which follows at once (this event is not a streamed piece).
-    if (event.type === "message.retract" && event.text) {
-      const message = task.messages.at(-1);
-      if (message?.role === "assistant") {
+    if (event.type === "message.retract" && (event.text || event.earlier?.length)) {
+      /**
+       * Takes the end of the answer at `at` back; says whether the answer was taken from there. One with
+       * nothing left in it goes, unless it holds what the run has read: the last answer then stays where
+       * it is, and the answer is written again into it.
+       */
+      const takeBack = (at: number, text: string, last: boolean): boolean => {
+        const message = task.messages[at];
         const held = streamedRaw.get(task);
-        if (held?.messageId === message.id) held.raw = held.raw.slice(0, Math.max(0, held.raw.length - event.text.length));
-        message.text = message.text.slice(0, Math.max(0, message.text.length - maskContext(event.text).length));
-        // An answer with nothing left in it is taken away, unless it holds what the run has read.
-        if (!message.text && !message.sourceCalls?.length) {
-          task.messages.pop();
-          streamedRaw.delete(task);
+        if (held?.messageId === message.id) held.raw = held.raw.slice(0, Math.max(0, held.raw.length - text.length));
+        message.text = message.text.slice(0, Math.max(0, message.text.length - maskContext(text).length));
+        if (message.text || (last && message.sourceCalls?.length)) return false;
+        task.messages.splice(at, 1);
+        if (held?.messageId === message.id) streamedRaw.delete(task);
+        // An earlier one that holds what the run has read: that goes with the answer written again, after the person's message.
+        if (message.sourceCalls?.length) {
+          const end = task.messages.at(-1);
+          if (end?.role === "assistant") appendSourceCalls(end.sourceCalls ??= [], message.sourceCalls);
+          else task.messages.push(message);
         }
+        return true;
+      };
+      let at = task.messages.length - 1;
+      if (event.text && task.messages[at]?.role === "assistant" && takeBack(at, event.text, true)) at--;
+      // What was shown before each message the person sent during the turn stands just before it.
+      for (const part of [...(event.earlier ?? [])].reverse()) {
+        while (at >= 0 && task.messages[at].role !== "user") at--;
+        at--;
+        if (at < 0) break;
+        if (part && task.messages[at].role === "assistant" && takeBack(at, part, false)) at--;
       }
     }
     if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
@@ -797,17 +818,45 @@ export class RunsPart {
    * the budget is used up. One long run could otherwise spend any amount over it.
    */
   stopWhenBudgetSpent(this: HubService, task: AgentTask): void {
-    if (!task.agentId || isBackgroundRun(task) || !active(task)) return;
-    const agent = this.getAgentsList().find((a) => a.id === task.agentId);
+    // An investigator spends for the run that asked it: that run's agent's budget holds for it, and
+    // that run is stopped when it is spent (its investigators stop with it).
+    const asker = task.workforceRunId ? this.investigations.get(task.workforceRunId) : undefined;
+    const run = asker ? this.store.data.tasks.find((t) => t.id === asker) : task;
+    if (!run?.agentId || isBackgroundRun(run) || !active(run)) return;
+    const agent = this.getAgentsList().find((a) => a.id === run.agentId);
     if (!agent?.monthlyTokenBudget || agent.monthlyTokenBudget <= 0) return;
-    const run = task.runUsage;
-    // Counted as the month counts a finished run: what was read, written and cached.
-    const soFar = (run?.inputTokens ?? 0) + (run?.outputTokens ?? 0) + (run?.cacheReadTokens ?? 0) + (run?.cacheCreationTokens ?? 0);
-    if (tokensLeft(agent, this.usageTotal()) - soFar > 0) return;
+    if (tokensLeft(agent, this.usageTotal()) - this.spendingUnderWay(agent.id) > 0) return;
     void this.stop(
-      task,
+      run,
       `${agent.name} has used its token budget for this month (${agent.monthlyTokenBudget.toLocaleString("en-US")} tokens), so this run was stopped. Raise the budget or wait for the new month.`,
     );
+  }
+
+  /**
+   * What an agent's runs have spent and not yet put down to its month: every run of it that is under
+   * way or has not yet said what it spent in the end (several can work at once), and the
+   * investigators those runs asked, whose spending is put down to the agent when they are all done.
+   * Each is counted as the month will count it.
+   */
+  spendingUnderWay(this: HubService, agentId: string): number {
+    const tasks = this.store.data.tasks;
+    let sum = 0;
+    for (const t of tasks) {
+      if (t.agentId !== agentId || isBackgroundRun(t) || !t.runUsage) continue;
+      // A run is counted as the month counts it when it ends: what was read, written and cached.
+      const u = t.runUsage;
+      sum += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheCreationTokens ?? 0);
+    }
+    for (const [runId, askerId] of this.investigations) {
+      if (tasks.find((t) => t.id === askerId)?.agentId !== agentId) continue;
+      for (const t of tasks) {
+        if (t.workforceRunId !== runId) continue;
+        // An investigator is put down as read and written (areas/agents.ts investigate): what it has said so far.
+        const u = t.runUsage ?? t.usage;
+        sum += (u?.inputTokens ?? 0) + (u?.outputTokens ?? 0);
+      }
+    }
+    return sum;
   }
 
   /** How many of a conversation's tokens are already on an agent's month. A conversation counted before this was kept per run was counted whole. */

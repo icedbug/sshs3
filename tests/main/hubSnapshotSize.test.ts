@@ -172,6 +172,11 @@ describe("asking for a conversation whole", () => {
 });
 
 /** A model that streams one answer in many small pieces. */
+/**
+ * A model that streams its answer in `pieces`. Each piece ends a line: an answer is shown line by
+ * line (the streaming masker holds the line being written), and these tests are about how pieces
+ * reach the windows, not about the masker.
+ */
 async function streamingModel(pieces: number): Promise<{ url: string; close(): Promise<void> }> {
   const server = http.createServer((req, res) => {
     req.resume();
@@ -179,7 +184,7 @@ async function streamingModel(pieces: number): Promise<{ url: string; close(): P
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       let i = 0;
       const tick = (): void => {
-        for (let k = 0; k < 25 && i < pieces; k++, i++) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: `w${i} ` } }] })}\n\n`);
+        for (let k = 0; k < 25 && i < pieces; k++, i++) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: `w${i}\n` } }] })}\n\n`);
         if (i < pieces) return void setTimeout(tick, 4);
         res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
         res.end("data: [DONE]\n\n");

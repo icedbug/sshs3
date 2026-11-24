@@ -396,6 +396,8 @@ export class AgentsPart {
     let next = 0;
     // Its investigators belong to the asking run: stopping it stops them (stop() follows workforceLeads).
     this.workforceLeads.set(runId, parent.id);
+    // And they spend for it: its agent's monthly budget holds for them while they work.
+    this.investigations.set(runId, parent.id);
     const worker = async (): Promise<void> => {
       while (next < asked.length) {
         const index = next++;
@@ -447,6 +449,7 @@ export class AgentsPart {
       );
     } finally {
       this.workforceLeads.delete(runId);
+      this.investigations.delete(runId);
       // What the investigators spent is the asking agent's spending.
       if (parent.agentId) {
         const used = this.store.data.tasks

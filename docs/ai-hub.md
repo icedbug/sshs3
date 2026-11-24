@@ -87,7 +87,10 @@ explicitly enabled presentation on top of the same terminal authority.
   shortened one per turn, no request did. The Anthropic loop also takes the
   model's thinking blocks out of the earlier turns when it shortens: current
   Claude models bind a thinking block to the conversation that produced it
-  and refuse one sent back after an earlier message was edited.
+  and refuse one sent back after an earlier message was edited. The last
+  turn keeps its thinking: its tool calls are the ones being answered, and
+  Anthropic's API reference says that turn's thinking must go back whole.
+  This rests on the API reference only; it was not tried against the API.
 - **`AgentDiscipline`** — what keeps a run on the rails, for all three
   providers and without a model call of its own:
   - *Operating instructions* (`operatingInstructions`): a way of working
@@ -106,16 +109,18 @@ explicitly enabled presentation on top of the same terminal authority.
     ran or a file was written. A plain command never counts: nothing looks at
     what a command did. Each is bounded, so a stuck run can end.
     The three turn loops decide this in one place (`afterAnswerTurn`). A turn
-    that says nothing and calls nothing is sent back like any other with chat
-    completions and Anthropic. The Responses loop takes such a turn for a
-    failed answer ("The model finished without an answer.") before it gets
-    there.
+    that says nothing and calls nothing is sent back like any other, in all
+    three.
     What the model wrote in a turn that was sent back stays part of the
     answer: the final answer is the text of every turn that ended without a
     tool call, in order (a text said twice is kept once). A report followed
-    by "All items are complete." is the report with that line under it. What
-    the model writes in a turn that calls a tool is shown as it comes and is
-    not part of the final answer.
+    by "All items are complete." is the report with that line under it. When
+    the last turn says the report again under a line of its own, the earlier
+    copy is left out. What the model writes in a turn that calls a tool is
+    shown as it comes and is not part of the final answer, also when the turn
+    was cut at the output limit in the middle of the call. A run whose turns
+    gave no answer at all fails, the same way in all three loops: "The model
+    finished without an answer. Ask it again, or ask what it found."
   - *Thorough mode*: `ultrawork` / `ulw` in the request adds a section to the
     instructions and asks for a task list.
   - *What the team knows about a failure* (`failureHints`): a failed command's
@@ -175,7 +180,10 @@ explicitly enabled presentation on top of the same terminal authority.
     while it works (the Hermes service) says so, and the person is told to send
     the pictures again when the run has finished. In the
     conversation the person's message stands after what had been shown when it
-    came, and the final answer is what was said after it.
+    came, and the final answer is what was said after it. A message sent
+    before the run's first request (while it still reads the workspace), or
+    before a spare model starts the run again, is in the conversation the run
+    is built from, and is not given to the model a second time.
   - *Earlier conversations* (`sshs3_session_search`): the agent can search
     this user's own earlier conversations (every word must appear; newest
     first, with the matching lines) and read one in full, with its task list
@@ -199,8 +207,11 @@ explicitly enabled presentation on top of the same terminal authority.
     or as a date, `retry-after-ms`) is waited out for as long as it asks, and
     the conversation shows "Waiting for the provider's rate limit. Asking
     again in …" while it lasts. These waits are not among the three tries.
-    Together they may take five minutes for one answer
-    (`retryPolicy.rateLimitMaxWaitMs`; a wait counts as a second at least).
+    Each wait is a second at least (`retryPolicy.rateLimitMinWaitMs`), also
+    when the provider says to ask again at once. Together they may take five
+    minutes for one answer (`retryPolicy.rateLimitMaxWaitMs`), counted over
+    every request of it: its turn, that turn asked again after a broken
+    stream, and the turns that go on from it after a cut at the output limit.
     Past that, or at once when the provider asks for longer than that, the
     run fails and says how long the provider asked for.
   - *A connection that breaks in the middle of an answer* (the socket drops,
@@ -209,7 +220,10 @@ explicitly enabled presentation on top of the same terminal authority.
     (`retryPolicy.streamRetries`), with backoff. Nothing of the broken answer
     is sent back to the model, and what the person was shown of it is taken
     back first (`message.retract`: the hub removes it from the conversation),
-    so the answer stands there once. After that the run goes to a spare model
+    so the answer stands there once. When the person wrote while the broken
+    answer streamed, what was shown before their message is taken back too
+    (`earlier`): the turn asked again answers their message as well, after
+    it. The same holds when a spare model starts the run again. After that the run goes to a spare model
     if one is set, else it fails as before. An error the provider reports in
     the stream is not asked again.
   - *An answer cut at the output limit* ("Longest answer" in AI settings) does
@@ -241,16 +255,25 @@ explicitly enabled presentation on top of the same terminal authority.
     (`sshs3_change`), file writes, tools of other systems (`mcp__*`) and
     management operations that change something are held. `terminal_command`
     and `sshs3_cluster_exec` are not held: nothing looks at what a command
-    does, and the agent is told to change nothing with one.
+    does, and the agent is told to change nothing with one. A call is held by
+    what the broker would do with it (a change card, a file write), not by
+    the name it was made under, and a tool the run did not offer is refused
+    before it reaches the broker.
     An approval is for the plan that was shown, not for the rest of the
     conversation (`approvedPlanOver`). In Plan mode, and in a request with
     `/plan`, a new change is held again and needs a new plan once every step
     of the approved plan has run, or once the person has written since they
-    approved it. In the second case a step of the approved plan that has not
-    run yet is still not held. The hub's own messages (its word that a plan
-    was approved or sent back, the line a resumed conversation starts with)
-    are not the person writing. In the other modes nothing changes: each
-    change outside a plan is asked about on its own.
+    approved it. A plan made for a request with `/plan` says so
+    (`plan.askedFor`), so this holds after the hub's word that the plan was
+    approved, which has no `/plan` in it. In the second case a step of the
+    approved plan that has not run yet is still not held: its change card, or
+    for a step without a command, a file write to the path the step names.
+    The hub's own messages (its word that a plan was approved or sent back,
+    the line a resumed conversation starts with) are not the person writing:
+    the hub marks them (`by: "hub"`), and a person who types the same words
+    is still the person. Only a message stored before that mark existed is
+    told by its words. In the other modes nothing changes: each change
+    outside a plan is asked about on its own.
   - *The decision* (`plan-decide`, the plan card in the conversation):
     approving sets the agent's task list to the plan's steps and sends it to
     carry them out; sending it back with a note has the agent revise;
@@ -260,7 +283,11 @@ explicitly enabled presentation on top of the same terminal authority.
     text, rollback) and that has not run yet is not asked about again. Any
     other change card, a second run of the same one, and every file write are
     asked about as usual. A plain command a plan lists runs like any other
-    command, and its step is ticked as run. A plan can instead have
+    command, and its step is ticked as run. A step is also ticked when its
+    change card ran after the person was asked about it, and a step without
+    a command when a file write to the path it names ran (`markPlanStepRan`,
+    from the broker's report that a change ran), so a plan that asks about
+    each change, or that writes a file, also comes to an end. A plan can instead have
     every change card ask (`plan.askEach`): when the plan's own text
     promises separate approvals or the agent set `askBeforeEachChange`
     (`"plan"`), when the person ticked "Ask me before each change card" on the
@@ -1377,10 +1404,13 @@ never asked about, because nobody here is watching whoever asked
 already open for that server and nowhere else.
 
 What the server hands out of the knowledge base is somebody's text, read by
-somebody else's model: the body of a page (`kb_read_page`, and the page and
-document resources) and each passage a search returns come inside an
-`untrusted_data` block that names where the text is from, and a closing tag
-written into a page does not close the block. The tools that list or search
+somebody else's model: the body of a page (`kb_read_page`) and each passage
+a search returns come inside an `untrusted_data` block that names where the
+text is from, and a closing tag written into a page does not close the block.
+A page or document read as a resource has all that its authors and sources
+wrote inside the block: its title, when it applies, its targets, its sources'
+titles (a document's cluster and summary) and its text. Only what sshs3 sets,
+the id, the kind and the date, stands outside it. The tools that list or search
 (`list_servers`, `tickets_list`, `kb_search`) declare what their answer looks
 like (`outputSchema`), and a client that checks it finds the answer conforms.
 Every call is a line in the key owner's audit log, with the key's name and
@@ -1484,8 +1514,27 @@ several hundred times a second. Three things keep that down
   process for an answer of 120,000 characters. When the answer is complete
   (the run ends, is stopped, or the person's message cuts the answer in two)
   the whole of it is masked once, from what was streamed as it came, which is
-  kept in memory beside the conversation and never stored. The text that is
-  kept is then exactly what masking the whole answer gives.
+  kept in memory beside the conversation and never stored.
+- **A secret in an answer is masked before the answer is shown.** The pieces
+  come masked from the runtime (`StreamingSecretMasker`, used by the three
+  model loops and by external agents). Whether text is a secret can depend
+  on what follows it on its line (`mysql … -pSECRET`, the last part of a
+  JWT, `"auth": "…"` once its quote closes), so the line being written is
+  held back until it ends, and each line is masked together with the lines
+  before it. The answer appears line by line. A line longer than 512
+  characters (a paragraph of prose) is shown in parts as it grows, cut at a
+  space outside quotes and only where that does not change how the line is
+  masked, with its last 256 characters held back. A private key shows only as
+  `[private key redacted]` from its BEGIN line to its END line, however long
+  it is, and each line of a `chpasswd` heredoc is shown with its password
+  masked. An answer cut at the output limit goes on in the next turn from
+  what was held back, so a secret the limit cut in two is still masked whole.
+  What is shown, and kept when the run is stopped, adds up to what masking
+  the whole answer gives. Where text that came later changes how a line
+  already shown is masked (`Bearer` at the end of one line, its token on the
+  next), that line cannot be taken back: the masked text from where the two
+  differ is shown after it, so the secret is still not shown. Tested in
+  `tests/main/runtimeStreamedSecrets.test.ts`.
 - **A long conversation travels by its tail** (`taskForSnapshot`). While it
   is small (six messages, 2 000 characters, no pictures) it is sent whole.
   Past that, the snapshot carries its last two messages, each cut to its last
@@ -2917,9 +2966,14 @@ because there is no server to run one on.
 - **Team.** An agent has `reportsTo` (a circle is refused) and an optional
   `monthlyTokenBudget`. A paused agent, or one that has spent its budget, is
   not started. The budget also holds while the agent runs: each time a run
-  reports what it has spent so far, that is added to the month, and the run
-  is stopped with a line that says so once the budget is used up
-  (`stopWhenBudgetSpent`). Usage is counted per agent and calendar month from the runs'
+  reports what it has spent so far, that is added to the month together with
+  what the agent's other runs under way have spent and what the investigators
+  its runs asked have spent (`spendingUnderWay`), and the run is stopped with
+  a line that says so once the budget is used up (`stopWhenBudgetSpent`). An
+  investigator's report is checked against the agent of the run that asked
+  it, and that run is stopped, with its investigators. Several runs that
+  work at once can still pass the budget by what each spends between two of
+  its reports. Usage is counted per agent and calendar month from the runs'
   reported tokens: every run of a conversation (a reply, an approved plan,
   "Continue") adds what it spent, not only the first.
 - **A terminal for a ticket nobody sits at.** A ticket started without a
@@ -3070,9 +3124,11 @@ because there is no server to run one on.
   started at all, and the reason is given: it is a program with a shell and
   file access of its own, and refusing what it asks for does not stop what
   it does without asking. The program is given the basics of this app's
-  environment only (`childEnv`: the path, home folder, user, language,
-  terminal, temporary folder, the proxy settings and their certificates, and
-  on Windows what a program needs to start) and the variables its runner
+  environment only (`childEnv`: the path, home folder, user, language and
+  the locale's own `LC_` variables, terminal, temporary folder, the XDG
+  folders for settings, data and cache, the proxy settings and their
+  certificates, and on Windows what a program needs to start) and the
+  variables its runner
   lists under `env`: names only, never values. They are set in the runner's
   form ("Environment variables to pass") or with `save_runner`. The form
   refuses what the hub would drop (`parseRunnerEnvNames` in
@@ -3080,7 +3136,11 @@ because there is no server to run one on.
   `tests/renderer/runnerEnvNames.test.ts`), and always sends the list, so
   emptying the field takes the names away. An agent that reads its API key
   from the environment gets it only when the runner names it.
-  The SSH agent and sshs3's own variables are never passed. On a shared server a runner is a
+  A proxy address is passed without the user name and password in it,
+  unless the runner names that variable. The SSH agent, sshs3's own
+  variables, and `NODE_OPTIONS`, `LD_PRELOAD` and `DYLD_INSERT_LIBRARIES`
+  (they make the program load and run other code) are never passed, and the
+  form refuses them. On a shared server a runner is a
   program on the server's host: only an administrator saves one, checked
   again at every start. On Windows a `.cmd` runner (npx) runs through cmd.exe
   with every word quoted for it; anything else is started directly. **Test**

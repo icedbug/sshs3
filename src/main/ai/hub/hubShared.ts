@@ -19,6 +19,16 @@ import { createLogger } from "../../log";
 export const log = createLogger("ai-hub");
 /** Run events the windows are sent as they happen (host.delta): each changes the conversation it belongs to and nothing else. */
 export const STREAMED_EVENTS: ReadonlySet<string> = new Set(["message.delta", "usage.updated", "tool.result", "run.retrying"]);
+/**
+ * Replies the hub writes in the person's place (a plan's approval or rejection). Marked on the request
+ * object itself: a window's request arrives as a new object and can never carry the mark.
+ */
+const hubReplies = new WeakSet<object>();
+export function fromHub<T extends object>(request: T): T {
+  hubReplies.add(request);
+  return request;
+}
+export const isFromHub = (request: object): boolean => hubReplies.has(request);
 /** How often, at most, the windows are told to fetch everything again while a run streams. */
 export const STREAM_REFRESH_MS = 1000;
 

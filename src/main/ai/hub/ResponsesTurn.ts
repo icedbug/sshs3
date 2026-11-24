@@ -88,7 +88,6 @@ export class ResponsesTurn {
       }
       return { id: item.call_id, name: item.name, argumentsJson: item.arguments };
     });
-    if (!calls.length && !this.text.trim()) throw new Error("The model finished without an answer.");
     return { items, calls };
   }
 }

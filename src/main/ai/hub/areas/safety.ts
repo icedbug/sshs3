@@ -30,7 +30,7 @@ import { boundedContext, boundedPrompt, clip, PERSON_PROMPT_MAX, safeError, secr
 import { resolveTargetSelector } from "../WorkforceRunner";
 import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, todosFromPlan } from "../PlanMode";
 import { requiredText, integer } from "../hubHelpers";
-import { log, BOOLEAN_POLICY_NAMES, active, REVEAL_KEPT_MS } from "../hubShared";
+import { log, BOOLEAN_POLICY_NAMES, active, fromHub, REVEAL_KEPT_MS } from "../hubShared";
 import { chatServiceLabel } from "../chatFence";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
@@ -344,9 +344,9 @@ export class SafetyPart {
       else if (who.peer) say(`${actor} approved this plan as the second person.${wrote}`);
       this.changed();
       told();
-      if (!who.peer) return this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
+      if (!who.peer) return this.request(fromHub({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) }));
       try {
-        return await this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
+        return await this.request(fromHub({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) }));
       } catch (error) {
         // The plan is approved all the same. Why the agent did not start is for the person whose run it is.
         say(`The plan is approved, but the agent could not be started again: ${clip(error instanceof Error ? error.message : String(error), 300)} Send it a message to go on.`);
@@ -367,9 +367,9 @@ export class SafetyPart {
     if (note) {
       plan.decisionNote = boundedContext(note, 2000);
       this.changed();
-      if (!who.peer) return this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
+      if (!who.peer) return this.request(fromHub({ action: "reply", taskId: task.id, text: rejectionMessage(note) }));
       try {
-        return await this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
+        return await this.request(fromHub({ action: "reply", taskId: task.id, text: rejectionMessage(note) }));
       } catch (error) {
         say(`The agent could not be started again: ${clip(error instanceof Error ? error.message : String(error), 300)} Send it a message to go on.`);
         this.changed();

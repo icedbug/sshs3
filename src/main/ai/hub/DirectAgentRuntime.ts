@@ -56,6 +56,7 @@ import {
   safeError,
   stripInvisibleUnicode,
 } from "./privacy";
+import { StreamingSecretMasker } from "./StreamingSecretMasker";
 import {
   DIGEST_CALLS,
   HANDOVER_REQUEST,
@@ -95,10 +96,13 @@ export const retryPolicy = {
   /** How many times one turn is asked again after its answer broke off in the middle of the stream. */
   streamRetries: 2,
   /**
-   * How long one turn waits, in all, for a provider's rate limit that says when to ask again.
-   * Each wait is as long as the provider asks; a wait counts as a second at least.
+   * How long one answer waits, in all, for a provider's rate limit that says when to ask again: its
+   * turn, that turn asked again after a break, and the turns that go on from it after a cut at the
+   * output limit. Each wait is as long as the provider asks, and at least `rateLimitMinWaitMs`.
    */
   rateLimitMaxWaitMs: 300_000,
+  /** The shortest wait for a rate limit: a provider that says "now" (retry-after: 0) is not asked again hundreds of times a second. */
+  rateLimitMinWaitMs: 1_000,
 };
 /** How many times running one call may give one result before it is not made again. */
 const SAME_CALL_LIMIT = 3;
@@ -689,102 +693,7 @@ export function pinnedNodeFetch(target: GuardedTarget, init: RequestInit): Promi
   });
 }
 
-// ------------------------------------------------------------------ Streaming Secret Masker
-
-const PEM_START_MARKER = "-----BEGIN ";
-const PEM_END_MARKER = "-----END ";
-
-/**
- * Sliding-window masker for streamed `message.delta` chunks. Holds back a bounded
- * trailing buffer so secrets split across SSE chunks (e.g. `sk-ant-` + `...`,
- * `Bearer ` + `token`, or `-----BEGIN PRIVATE KEY-----...-----END`) are masked
- * before any prefix reaches the UI or logs.
- */
-export class StreamingSecretMasker {
-  private pending = "";
-
-  constructor(
-    private readonly holdBackChars = 128,
-    private readonly maxTokenHoldback = 1024,
-    private readonly maxPemHoldback = 8192,
-    private readonly mask: (text: string) => string = maskSecrets,
-  ) {}
-
-  static forAnswer(mask: (text: string) => string): StreamingSecretMasker {
-    return new StreamingSecretMasker(undefined, undefined, undefined, mask);
-  }
-
-  push(chunk: string): string {
-    if (!chunk) return "";
-    this.pending += chunk;
-
-    const pemBegin = this.pending.lastIndexOf(PEM_START_MARKER);
-    if (pemBegin >= 0) {
-      const pemEndAfter = this.pending.indexOf(PEM_END_MARKER, pemBegin);
-      if (pemEndAfter < 0 && this.pending.length - pemBegin < this.maxPemHoldback) {
-        if (pemBegin > 0) {
-          const safe = this.mask(this.pending.slice(0, pemBegin));
-          this.pending = this.pending.slice(pemBegin);
-          return safe;
-        }
-        return "";
-      }
-    }
-
-    if (this.pending.length <= this.holdBackChars) {
-      return "";
-    }
-
-    const masked = this.mask(this.pending);
-    if (masked.length <= this.holdBackChars) {
-      this.pending = masked;
-      return "";
-    }
-
-    let splitAt = masked.length - this.holdBackChars;
-    // Walk back to a whitespace boundary so an in-flight token/DSN/key=val isn't split mid-secret.
-    while (splitAt > 0 && !/\s/.test(masked[splitAt - 1])) {
-      splitAt--;
-    }
-    if (splitAt === 0) {
-      if (masked.length < this.maxTokenHoldback) {
-        this.pending = masked;
-        return "";
-      }
-      splitAt = masked.length - this.holdBackChars;
-    }
-
-    // If the line containing splitAt has an active credential keyword/prefix near the tail,
-    // wait for the newline (up to maxTokenHoldback) so multi-word forms like `Bearer <tok>`
-    // or `password = <val>` are masked together.
-    const lineStart = masked.lastIndexOf("\n", splitAt - 1) + 1;
-    const tailSlice = masked.slice(lineStart);
-    if (
-      tailSlice.length < this.maxTokenHoldback &&
-      /\b(?:bearer|basic|password|passphrase|passwd|secret|token|api[_-]?key|credential|client-key-data|token-data)\b/i.test(
-        tailSlice,
-      )
-    ) {
-      if (lineStart > 0) {
-        splitAt = lineStart;
-      } else {
-        this.pending = masked;
-        return "";
-      }
-    }
-
-    const emit = masked.slice(0, splitAt);
-    this.pending = masked.slice(splitAt);
-    return emit;
-  }
-
-  flush(): string {
-    if (!this.pending) return "";
-    const out = this.mask(this.pending);
-    this.pending = "";
-    return out;
-  }
-}
+export { StreamingSecretMasker };
 
 // ------------------------------------------------------------------ Tool Output Formatting, Microcompaction, Rules & Reasoning
 
@@ -854,6 +763,8 @@ export const MAX_TIGHT_HANDOVERS = 3;
 const KEPT_STEERING_MESSAGES = 10;
 /** How many turns in a row may end at the output limit before the run stops asking the model to go on. */
 export const MAX_CUT_TURNS = 3;
+/** A run that ends without an answer: its last turn said nothing, and no earlier turn gave one. */
+const NO_ANSWER = "The model finished without an answer. Ask it again, or ask what it found.";
 const CUT_GO_ON =
   "[sshs3] Your reply was cut off at the output limit. What you wrote so far is kept and the user sees it. Go on exactly where it stopped. Do not repeat or summarize what you already wrote.";
 const CUT_IN_CALL =
@@ -936,10 +847,14 @@ export function microcompactToolResults(
  * Takes the model's thinking out of the earlier turns of an Anthropic conversation. Current Claude
  * models bind a thinking block to the conversation that produced it: sent back after an earlier
  * message was edited, the block is refused. Sending none of them back is accepted, so that is done
- * whenever old tool results were shortened.
+ * whenever old tool results were shortened. The last assistant turn keeps its thinking: it is the turn
+ * whose tool calls are being answered, and Anthropic's API reference says that turn's thinking must be
+ * sent back whole while its tool use goes on (blocks may be left out of earlier turns only). That
+ * rests on the reference alone: it was not tried against the API here.
  */
 export function dropThinkingBlocks(messages: Array<Record<string, unknown>>): void {
-  for (const message of messages) {
+  const last = messages.map((message) => message.role).lastIndexOf("assistant");
+  for (const message of messages.slice(0, Math.max(0, last))) {
     if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
     const kept = (message.content as Array<Record<string, unknown>>).filter(
       (block) => block?.type !== "thinking" && block?.type !== "redacted_thinking",
@@ -1322,6 +1237,15 @@ export function mapToolCallToBrokerRequest(name: string, args: Record<string, un
     default:
       return { action: name, ...args } as ToolRequest;
   }
+}
+
+/**
+ * The tool a call is held as while a plan waits: by what the broker will do with it (a change card,
+ * a file write), not by the name it was called by.
+ */
+function heldAs(name: string, args: Record<string, unknown>): string {
+  const action = mapToolCallToBrokerRequest(name, args).action;
+  return action === "change" ? "sshs3_change" : action === "file-write" ? "file_write" : name;
 }
 
 function resolveActiveAgent(
@@ -2132,6 +2056,23 @@ export class DirectAgentRuntime implements AgentRuntime {
   private steered: string[] = [];
   /** How much of the answer of the turn in progress was shown before the person's last message. */
   private steerCut = 0;
+  /** How many messages the conversation had when the run started: the person's later ones came while it worked. */
+  private messagesAtStart = 0;
+  /**
+   * The run's conversation was just built from the task's messages. A message the person sent while the
+   * run worked is in them once the hub has added it, and also waits in the queue (the hub hands it to
+   * `steer` first, then adds it): taken from the queue as well, it would reach the model twice. That
+   * happens to a message sent before the first request (the run was still reading the workspace) and
+   * to one sent before a spare model starts the run again.
+   */
+  private skipSteeringInConversation(task: AgentTask): void {
+    for (const message of task.messages.slice(this.messagesAtStart)) {
+      if (message.role !== "user") continue;
+      const text = boundedContext(message.text);
+      const at = this.steeringQueue.findIndex((queued) => queued.text === text);
+      if (at >= 0) this.steeringQueue.splice(at, 1);
+    }
+  }
   /** The messages that came in since the last turn, taken into the conversation. */
   private takeSteering(): Steering[] {
     const taken = this.steeringQueue.splice(0);
@@ -2482,10 +2423,15 @@ export class DirectAgentRuntime implements AgentRuntime {
     this.steeringQueue.push({ text: boundedContext(text), ...(pictures.length ? { images: pictures } : {}) });
     // In the conversation the person's message now follows what was shown so far. The answer the
     // run ends with is what comes after it: what was said before stays where it stands.
-    this.kept = "";
-    this.keptLast = "";
+    this.forgetKept();
     this.steerCut += this.shown.length;
+    // What was shown before the person's message now stands before it. It stays there, unless the turn
+    // is asked again (a broken stream, another model): then the answer is written anew after the
+    // message, and what stood before it is taken back too.
+    this.shownBeforeSteer.push(this.shown);
     this.shown = "";
+    this.attemptShownBeforeSteer.push(this.attemptShown);
+    this.attemptShown = "";
     return true;
   }
 
@@ -2504,6 +2450,15 @@ export class DirectAgentRuntime implements AgentRuntime {
     this.callSources = undefined;
     this.capture = new SourceCapture(text => maskProviderText(text, this.piiMode, this.hosts));
     onEvent = (event) => {
+      if (event.type === "message.delta" && event.delta) this.attemptShown += event.delta;
+      if (event.type === "message.retract") {
+        if (event.text) this.attemptShown = this.attemptShown.slice(0, Math.max(0, this.attemptShown.length - event.text.length));
+        // Taken back from before the person's messages as well: the newest of them first.
+        const earlier = event.earlier ?? [];
+        const parts = this.attemptShownBeforeSteer;
+        for (let i = 1; i <= earlier.length && i <= parts.length; i++)
+          parts[parts.length - i] = parts[parts.length - i].slice(0, Math.max(0, parts[parts.length - i].length - earlier[earlier.length - i].length));
+      }
       const answerEvent = event.type === "message.delta" && event.delta || /^run\.(completed|interrupted|failed|cancelled)$/.test(event.type);
       deliver(answerEvent && this.pendingSourceCalls.length ? { ...event, sourceCalls: this.pendingSourceCalls.splice(0) } : event);
     };
@@ -2525,13 +2480,18 @@ export class DirectAgentRuntime implements AgentRuntime {
     this.roundsSinceHandover = 0;
     this.resultsAtLastLook = 0;
     this.tightHandovers = 0;
-    this.kept = "";
-    this.keptLast = "";
+    this.forgetKept();
     this.shown = "";
+    this.shownBeforeSteer = [];
+    this.attemptShownBeforeSteer = [];
+    this.messagesAtStart = task.messages.length;
     this.steered = [];
     this.steerCut = 0;
     this.cutTurns = 0;
     this.thinkLess = false;
+    this.carriedMasker = undefined;
+    this.attemptShown = "";
+    this.rateLimitWaited = 0;
     this.runCalls = [];
     // Counted for each run on its own, whichever of the three turn loops it takes.
     this.sameCall = { signature: "", output: "", times: 0, refused: 0 };
@@ -2601,7 +2561,9 @@ export class DirectAgentRuntime implements AgentRuntime {
             }
             throw error;
           }
-          this.takeBackShown(onEvent);
+          // The spare model is asked from the start of the conversation: nothing the failed one wrote
+          // stays, neither in the answer it would have ended with nor on the screen.
+          this.takeBackAttempt(onEvent);
           onEvent({
             type: "run.degraded",
             text: `Degraded from ${activeModel.kind}:${activeModel.model} to ${nextModel.kind}:${nextModel.model} (${reason})`,
@@ -3164,21 +3126,50 @@ export class DirectAgentRuntime implements AgentRuntime {
   /** The last turn used up its output before any text: the next one is asked with the lowest reasoning effort. */
   private thinkLess = false;
 
-  /** The run's answer: what was kept of earlier turns, then the text it ended on. */
-  private finalAnswer(turnText: string, fallback: string): string {
+  /**
+   * The run's answer: what was kept of earlier turns, then the text it ended on. Only text the
+   * model gave as its answer counts: what it wrote in a turn that called a tool never does. With
+   * none at all the run has no answer, and fails the same way whichever protocol it speaks.
+   */
+  private finalAnswer(turnText: string): string {
     const lastText = this.afterSteer(turnText);
-    if (!this.kept) return lastText || (this.steerCut ? "" : fallback);
-    // Sent back to work, the model sometimes says the same thing again: once is enough.
-    return lastText.trim() && lastText.trim() !== this.keptLast ? this.kept + lastText : this.kept.trimEnd();
+    // The answer the run ends on, with what was kept of it from turns cut at the output limit.
+    const last = (this.kept.slice(this.answerFrom) + lastText).trim();
+    let answer: string;
+    if (!last || last === this.keptLast) answer = this.kept.slice(0, this.answerFrom).trimEnd();
+    // Sent back to work, the model often says its report again under a line of its own: the earlier copy goes.
+    else if (this.keptLast && last.includes(this.keptLast))
+      answer = this.kept.slice(0, this.keptLastFrom) + this.kept.slice(this.answerFrom) + lastText;
+    else answer = this.kept + lastText;
+    // The person wrote in the middle of the answer: all of it stands before their message.
+    if (!answer.trim() && !this.steerCut) throw new Error(NO_ANSWER);
+    return answer;
   }
-  /** The last whole turn that was kept, trimmed: the same text again is not kept twice. */
+  /** The last answer that was kept, trimmed: the same text again is not kept twice. */
   private keptLast = "";
+  /** Where in `kept` that answer starts. */
+  private keptLastFrom = 0;
+  /** Where in `kept` the answer in progress starts: what turns cut at the output limit kept of it. */
+  private answerFrom = 0;
+  /** Nothing of the answer is kept any more: the person wrote, or another model starts over. */
+  private forgetKept(): void {
+    this.kept = "";
+    this.keptLast = "";
+    this.keptLastFrom = 0;
+    this.answerFrom = 0;
+  }
   /** A turn without a tool call is sent back to work: its text stays part of the answer. */
   private keepAnswered(turnText: string, onEvent: (event: RunEvent) => void): void {
     if (!turnText) return;
     const part = this.afterSteer(turnText);
-    if (part.trim() !== this.keptLast) this.kept += `${part}\n\n`;
-    this.keptLast = part.trim();
+    const answer = (this.kept.slice(this.answerFrom) + part).trim();
+    if (answer === this.keptLast) this.kept = this.kept.slice(0, this.answerFrom);
+    else {
+      this.keptLastFrom = this.answerFrom;
+      this.kept += `${part}\n\n`;
+    }
+    this.keptLast = answer;
+    this.answerFrom = this.kept.length;
     onEvent({ type: "message.delta", delta: "\n\n" });
   }
   /**
@@ -3198,6 +3189,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   private afterCut(turnText: string, inToolCall: boolean, maxOutputTokens: number): string {
     this.cutTurns++;
     const limit = maxOutputTokens.toLocaleString("en-US");
+    // The run ends here: what the masker still held back of the answer is shown, so that what it wrote is in the conversation.
+    if ((!turnText && !inToolCall && this.cutTurns > 1) || this.cutTurns > MAX_CUT_TURNS) this.showCarried();
     if (!turnText && !inToolCall && this.cutTurns > 1)
       throw new Error(
         `The model reached its output limit (${limit} tokens) twice before it wrote anything. Raise "Longest answer" in AI settings, or lower the reasoning effort there.`,
@@ -3206,7 +3199,11 @@ export class DirectAgentRuntime implements AgentRuntime {
       throw new Error(
         `The model reached its output limit (${limit} tokens) ${this.cutTurns} times in a row, so the run was stopped. What it wrote is in the conversation. Raise "Longest answer" in AI settings.`,
       );
-    this.kept += this.afterSteer(turnText);
+    // Cut in the middle of a tool call, the turn's text came before a call, as in any turn that calls a
+    // tool: it is not part of the answer, and the model makes the call again rather than going on from it.
+    if (inToolCall) {
+      if (turnText) this.onEvent?.({ type: "message.delta", delta: "\n\n" });
+    } else this.kept += this.afterSteer(turnText);
     this.thinkLess = !turnText && !inToolCall;
     return inToolCall ? CUT_IN_CALL : turnText ? CUT_GO_ON : CUT_BEFORE_TEXT;
   }
@@ -3214,6 +3211,7 @@ export class DirectAgentRuntime implements AgentRuntime {
   private turnEndedWhole(): void {
     this.cutTurns = 0;
     this.thinkLess = false;
+    this.rateLimitWaited = 0;
   }
 
   /** Ends a compaction: what the run continues from, built from the note the model just wrote. */
@@ -3277,8 +3275,6 @@ export class DirectAgentRuntime implements AgentRuntime {
     const wire = typeof init.body === "string" ? this.capture.wire(init.body, this.nowMs()) : undefined;
     const requestInit: RequestInit = { ...init, ...(wire && { body: wire.body }), redirect: "manual" };
     this.rateLimitStop = undefined;
-    /** What this request has waited for the provider's rate limit so far. */
-    let rateLimitWaited = 0;
 
     for (let attempt = 0; ; attempt++) {
       if (!breaker.canRequest(this.nowMs())) {
@@ -3328,24 +3324,25 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
 
       // A rate limit that says when to ask again is waited out, as long as the provider asks, up
-      // to a total for the turn. These waits are not among the few tries a passing failure gets.
+      // to a total for the answer. These waits are not among the few tries a passing failure gets.
+      // What is waited is what is counted: at least the shortest wait, also when the provider says "now".
       const asked = response?.status === 429 ? askedRetryDelayMs(response.headers, this.nowMs()) : undefined;
       if (response && asked !== undefined) {
-        const counted = Math.max(asked, 1_000);
-        if (rateLimitWaited + counted > retryPolicy.rateLimitMaxWaitMs) {
-          this.rateLimitStop = { askedMs: asked, waitedMs: rateLimitWaited };
+        const wait = Math.max(asked, retryPolicy.rateLimitMinWaitMs);
+        if (this.rateLimitWaited + wait > retryPolicy.rateLimitMaxWaitMs) {
+          this.rateLimitStop = { askedMs: asked, waitedMs: this.rateLimitWaited };
           return response;
         }
-        rateLimitWaited += counted;
+        this.rateLimitWaited += wait;
         this.onEvent?.({
           type: "run.retrying",
-          text: `Waiting for the provider's rate limit. Asking again in ${plainDuration(asked)}.`,
-          delayMs: asked,
+          text: `Waiting for the provider's rate limit. Asking again in ${plainDuration(wait)}.`,
+          delayMs: wait,
           endpoint: endpointKey,
           status: 429,
         } as RunEvent);
         await response.body?.cancel().catch(() => {});
-        await this.pause(asked);
+        await this.pause(wait);
         if (this.cancelled) throw new Error("Run cancelled");
         attempt--;
         continue;
@@ -3398,6 +3395,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   }
   /** The last request gave up on a rate limit: what the provider asked for, and what had been waited. */
   private rateLimitStop?: { askedMs: number; waitedMs: number };
+  /** What the answer in progress has waited for the provider's rate limit so far, over all its requests. */
+  private rateLimitWaited = 0;
 
   private async streamSseWithBreaker(
     endpoint: string,
@@ -3406,6 +3405,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     onData: (data: string) => void,
     onEvent: (event: RunEvent) => void,
     onEnd?: () => void,
+    goesOn?: () => boolean,
   ): Promise<void> {
     const breaker = this.circuitBreakers().get(endpoint);
     try {
@@ -3414,9 +3414,15 @@ export class DirectAgentRuntime implements AgentRuntime {
         signal: this.abort.signal,
       });
       onEnd?.();
-      const remaining = deltaMasker.flush();
-      if (this.compaction !== "asked" && remaining) {
-        onEvent({ type: "message.delta", delta: remaining });
+      // Cut at the output limit, the answer goes on in the next turn: what the masker holds back
+      // is shown with what follows it there, so that a secret cut in two by the limit is still masked whole.
+      if (goesOn?.()) this.carriedMasker = deltaMasker;
+      else {
+        const remaining = deltaMasker.flush();
+        if (this.compaction !== "asked" && remaining) {
+          this.shown += remaining;
+          onEvent({ type: "message.delta", delta: remaining });
+        }
       }
       breaker.recordSuccess();
     } catch (error) {
@@ -3435,15 +3441,59 @@ export class DirectAgentRuntime implements AgentRuntime {
 
   /** What the person was shown of the answer of the turn in progress. */
   private shown = "";
+  /** The masker of a turn cut at the output limit, which the next turn goes on from. */
+  private carriedMasker?: StreamingSecretMasker;
+  /** What the cut turn's masker still holds back is shown: the answer will not go on. */
+  private showCarried(): void {
+    const rest = this.carriedMasker?.flush();
+    this.carriedMasker = undefined;
+    if (!rest || this.compaction === "asked") return;
+    this.shown += rest;
+    this.onEvent?.({ type: "message.delta", delta: rest });
+  }
+  /** The masker for the answer of the turn that starts: a copy of the cut turn's when it goes on from one. */
+  private turnMasker(): StreamingSecretMasker {
+    const carried = this.cutTurns > 0 ? this.carriedMasker : undefined;
+    return carried ? carried.clone() : StreamingSecretMasker.forAnswer(this.answerText);
+  }
+  /** What the person was shown of the answer since the run began on its current model, after their last message. */
+  private attemptShown = "";
+  /** The same, before each message the person sent while the run worked on this model, oldest first. */
+  private attemptShownBeforeSteer: string[] = [];
+  /**
+   * The run starts again on a spare model, from the start of the conversation: everything the failed
+   * model showed is taken back, and nothing it wrote is kept for the answer.
+   */
+  private takeBackAttempt(onEvent: (event: RunEvent) => void): void {
+    if (this.attemptShown || this.attemptShownBeforeSteer.some(Boolean))
+      onEvent({
+        type: "message.retract",
+        text: this.attemptShown,
+        ...(this.attemptShownBeforeSteer.length ? { earlier: this.attemptShownBeforeSteer } : {}),
+      });
+    this.attemptShown = "";
+    this.attemptShownBeforeSteer = [];
+    this.shownBeforeSteer = [];
+    this.shown = "";
+    this.forgetKept();
+    this.cutTurns = 0;
+    this.thinkLess = false;
+    this.carriedMasker = undefined;
+    this.rateLimitWaited = 0;
+  }
   /**
    * The turn in progress is asked again (the same model once more, or another one): what the
    * person was shown of its answer is taken back first. The hub removes it from the conversation,
    * so nothing stands there twice when it is written again.
    */
   private takeBackShown(onEvent: (event: RunEvent) => void): void {
-    if (this.shown) onEvent({ type: "message.retract", text: this.shown });
+    if (this.shown || this.shownBeforeSteer.some(Boolean))
+      onEvent({ type: "message.retract", text: this.shown, ...(this.shownBeforeSteer.length ? { earlier: this.shownBeforeSteer } : {}) });
     this.shown = "";
+    this.shownBeforeSteer = [];
   }
+  /** What the person was shown of the turn in progress before each message they sent during it, oldest first. */
+  private shownBeforeSteer: string[] = [];
 
   /**
    * The answer of a turn broke off in the middle of its stream. Returns true when the turn is to
@@ -3622,13 +3672,13 @@ export class DirectAgentRuntime implements AgentRuntime {
         } else if (this.replay && !this.replayLive?.(call.name)) {
           output = this.replay(call.name, call.argumentsJson || "{}");
           isError = classifyToolResultError(output).isError;
-        } else if (this.task && planGate(this.task, call.name, parsedArgs)) {
+        } else if (this.task && planGate(this.task, heldAs(call.name, parsedArgs), parsedArgs)) {
           isError = true;
           output = JSON.stringify({
             ok: false,
             isError: true,
             errorType: "plan_pending",
-            error: planGate(this.task, call.name, parsedArgs),
+            error: planGate(this.task, heldAs(call.name, parsedArgs), parsedArgs),
           });
         } else {
           try {
@@ -3797,6 +3847,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
+    this.skipSteeringInConversation(task);
     const wireTools = this.offer(task, initialContext).map((t) => ({
       type: "function",
       name: t.name,
@@ -3805,7 +3856,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       ...(model.kind === "custom" ? { strict: false } : {}),
     }));
 
-    let finalOutput = "";
     const turnByItem = new WeakMap<object, number>();
     let lastTurnHadError = false;
     let lastTurnToolNames: string[] = [];
@@ -3854,10 +3904,11 @@ export class DirectAgentRuntime implements AgentRuntime {
       // Whether this turn's answer had begun to arrive.
       this.shown = "";
       this.steerCut = 0;
+      this.shownBeforeSteer = [];
       let streaming = false;
       this.commitTurn();
       let usage: Record<string, number> | undefined;
-      const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
+      const deltaMasker = this.turnMasker();
       const responseTurn = new ResponsesTurn(
         (text) => {
           if (this.compaction === "asked" || !text) return;
@@ -3944,6 +3995,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             turnText = responseTurn.text;
             cutInCall = Boolean(inCall);
           },
+          () => responseTurn.cut && !cutInCall && this.compaction !== "asked",
         );
         streamBreaks = 0;
         signInRenewed = false;
@@ -3975,7 +4027,6 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       this.commitTurn();
 
-      if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       // Cut at the output limit: what came is kept and the model is asked to go on. A note that was
       // cut is used as far as it got.
@@ -4018,7 +4069,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         onEvent({
           type: "run.completed",
-          output: this.answerText(this.finalAnswer(turnText, finalOutput)),
+          output: this.answerText(this.finalAnswer(turnText)),
           usage: this.spentUsage(usage?.context_tokens),
         });
         return;
@@ -4104,6 +4155,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
 
+    this.skipSteeringInConversation(task);
     const tools = this.offer(task, initialContext).map((t) => ({
       type: "function",
       function: {
@@ -4113,7 +4165,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       },
     }));
 
-    let finalOutput = "";
     const turnByItem = new WeakMap<object, number>();
     let lastTurnHadError = false;
     let lastTurnToolNames: string[] = [];
@@ -4160,10 +4211,11 @@ export class DirectAgentRuntime implements AgentRuntime {
       // Whether this turn's answer had begun to arrive.
       this.shown = "";
       this.steerCut = 0;
+      this.shownBeforeSteer = [];
       let streaming = false;
       this.commitTurn();
       let usage: Record<string, number> | undefined;
-      const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
+      const deltaMasker = this.turnMasker();
 
       try {
         const response = await this.request(
@@ -4288,6 +4340,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           () => {
             if (!finished) throw new StreamEndedEarlyError();
           },
+          () => cut && ![...toolCallsByIndex.values()].some((c) => c.name) && this.compaction !== "asked",
         );
         streamBreaks = 0;
       } catch (error) {
@@ -4321,7 +4374,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       const started = [...toolCallsByIndex.values()].filter((c) => c.name);
       // A call that was being written when the output limit was reached is incomplete: it is not made.
       const toolCalls = cut ? [] : started;
-      if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       // Cut at the output limit: what came is kept and the model is asked to go on. A note that was
       // cut is used as far as it got.
@@ -4353,7 +4405,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         onEvent({
           type: "run.completed",
-          output: this.answerText(this.finalAnswer(turnText, finalOutput)),
+          output: this.answerText(this.finalAnswer(turnText)),
           usage: this.spentUsage(usage?.context_tokens),
         });
         return;
@@ -4463,6 +4515,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         };
       });
 
+    this.skipSteeringInConversation(task);
     const offeredTools = this.offer(task, initialContext);
     const tools = offeredTools.map((t, idx) => ({
       name: t.name,
@@ -4471,7 +4524,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       ...(idx === offeredTools.length - 1 ? { cache_control: { type: "ephemeral" } } : {}),
     }));
 
-    let finalOutput = "";
     const turnByItem = new WeakMap<object, number>();
     const triedKeys = new Set<string>([this.modelKey(activeModel)]);
     let degradeCount = 0;
@@ -4519,8 +4571,9 @@ export class DirectAgentRuntime implements AgentRuntime {
       // Whether this turn's answer had begun to arrive.
       this.shown = "";
       this.steerCut = 0;
+      this.shownBeforeSteer = [];
       let streaming = false;
-      const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
+      const deltaMasker = this.turnMasker();
       this.commitTurn();
 
       try {
@@ -4639,6 +4692,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           () => {
             if (!stopReason && !finished) throw new StreamEndedEarlyError();
           },
+          () => stopReason === "max_tokens" && ![...toolCalls.values()].some((c) => c.name) && this.compaction !== "asked",
         );
         streamBreaks = 0;
       } catch (error) {
@@ -4690,7 +4744,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       const cut = stopReason === "max_tokens";
       // A tool call cut off at the output limit has incomplete arguments: it is not made.
       const calls = cut ? [] : started;
-      if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       // A declined request is a result of its own, not an empty answer.
       if (stopReason === "refusal")
@@ -4734,7 +4787,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         onEvent({
           type: "run.completed",
-          output: this.answerText(this.finalAnswer(turnText, finalOutput)),
+          output: this.answerText(this.finalAnswer(turnText)),
           usage: this.spentUsage(normalized.context_tokens),
         });
         return;

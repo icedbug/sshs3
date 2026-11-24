@@ -16,6 +16,11 @@ export interface RunEvent {
   delta?: string;
   sourceCalls?: import("../../../shared/answerSources").AnswerSourceCall[];
   text?: string;
+  /**
+   * With `message.retract`: what is taken back from before each message the person sent while the
+   * turn was written, oldest first. `text` is what is taken back after the last of them.
+   */
+  earlier?: string[];
   output?: string;
   error?: string;
   usage?: Record<string, number>;

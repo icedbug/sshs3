@@ -33,6 +33,16 @@ export interface ScriptedStep {
   usage?: { input: number; output: number };
   /** The answer begins with the model's reasoning: a reasoning item (Responses API) or a signed thinking block (Anthropic). */
   reasoning?: boolean;
+  /** The text is sent in pieces of this many characters, as a provider streams it. Default: in one piece. */
+  piece?: number;
+}
+
+/** The text in pieces of `size` characters, or whole. */
+function pieces(text: string, size?: number): string[] {
+  if (!size || size <= 0) return [text];
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  return out;
 }
 
 export interface ScriptedRequest {
@@ -99,7 +109,7 @@ function answer(protocol: Protocol, step: ScriptedStep, n: number, withEncrypted
   const broken = step.breakStream;
   if (protocol === "chat") {
     const frames: unknown[] = [];
-    if (step.text) frames.push({ choices: [{ index: 0, delta: { role: "assistant", content: step.text } }] });
+    if (step.text) for (const part of pieces(step.text, step.piece)) frames.push({ choices: [{ index: 0, delta: { role: "assistant", content: part } }] });
     calls.forEach((call, index) =>
       frames.push({ choices: [{ index: 0, delta: { tool_calls: [{ index, id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.args) } }] } }] }),
     );
@@ -112,7 +122,7 @@ function answer(protocol: Protocol, step: ScriptedStep, n: number, withEncrypted
   }
   if (protocol === "responses") {
     const frames: unknown[] = [];
-    if (step.text) frames.push({ type: "response.output_text.delta", delta: step.text });
+    if (step.text) for (const part of pieces(step.text, step.piece)) frames.push({ type: "response.output_text.delta", delta: part });
     const output: Array<Record<string, unknown>> = [];
     if (step.reasoning)
       output.push({ type: "reasoning", id: `rs_${n}`, summary: [], ...(withEncryptedReasoning ? { encrypted_content: `opaque-${n}` } : {}) });
@@ -140,7 +150,7 @@ function answer(protocol: Protocol, step: ScriptedStep, n: number, withEncrypted
   }
   if (step.text) {
     frames.push({ type: "content_block_start", index, content_block: { type: "text", text: "" } });
-    frames.push({ type: "content_block_delta", index, delta: { type: "text_delta", text: step.text } });
+    for (const part of pieces(step.text, step.piece)) frames.push({ type: "content_block_delta", index, delta: { type: "text_delta", text: part } });
     frames.push({ type: "content_block_stop", index });
     index++;
   }

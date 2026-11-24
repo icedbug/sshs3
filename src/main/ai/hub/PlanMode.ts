@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import type {
+  AgentChange,
   AgentChangeApproval,
+  AgentMessage,
   AgentMode,
   AgentPlan,
   AgentPlanStep,
@@ -10,6 +12,7 @@ import type {
   SafetyPolicyConfig,
   WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
+import { isPlainCommand } from "../../../shared/types/aiHub";
 import { APP_OPS, type AppOpClass } from "./AppGuard";
 import { isProdTag } from "./safetyPolicy";
 import { boundedContext, clip, exactHash, maskContext } from "./privacy";
@@ -181,7 +184,10 @@ export function newPlan(
   previous: AgentPlan | undefined,
   review: AgentPlan["review"],
   now = Date.now(),
+  askedFor = false,
 ): AgentPlan {
+  // A revision of a plan that was asked for was asked for too. A plan after an approved one is a new plan.
+  const asked = askedFor || (previous?.status !== "approved" && previous?.askedFor === true);
   return {
     id: crypto.randomUUID(),
     goal: parsed.goal,
@@ -192,6 +198,7 @@ export function newPlan(
     review,
     createdAt: now,
     ...(parsed.askEach ? { askEach: "plan" as const } : {}),
+    ...(asked ? { askedFor: true } : {}),
   };
 }
 
@@ -307,10 +314,26 @@ const lastUserText = (task: Pick<AgentTask, "messages">): string =>
   task.messages.filter((m) => m.role === "user").at(-1)?.text ?? "";
 
 /**
- * A user message the hub wrote itself, not the person: its word that a plan was approved or sent
- * back, and the line a resumed conversation starts with (areas/conversations.ts, "resume").
+ * The words the hub's own messages start with, for a message stored before the hub marked its own
+ * (`by`): its word that a plan was approved or sent back, and the line a resumed conversation starts
+ * with (areas/conversations.ts, "resume").
  */
 const HUB_WRITTEN = /^(?:\[sshs3\] |Resume on this terminal\.|Resume the conversation\.$|You have \d+ more commands and \d+ more minutes\. Continue where you stopped\.)/;
+
+/**
+ * A user message the hub wrote itself, not the person. Told by the mark the hub puts on its own;
+ * only a message stored before that mark existed is told by its words. A person who types the hub's
+ * words is still the person.
+ */
+export const hubWrote = (message: Pick<AgentMessage, "role" | "text" | "by">): boolean =>
+  message.role === "user" && (message.by ? message.by === "hub" : HUB_WRITTEN.test(message.text));
+
+/** What the person last wrote, the hub's own messages left out. */
+export const lastPersonText = (task: Pick<AgentTask, "messages">): string =>
+  task.messages.filter((m) => m.role === "user" && !hubWrote(m)).at(-1)?.text ?? "";
+
+/** Whether the request a plan is proposed for asked for one (`/plan`). */
+export const planAskedFor = (task: Pick<AgentTask, "messages">): boolean => PLAN_FIRST.test(lastPersonText(task));
 
 /**
  * Why an approved plan does not cover a new change any more, if it does not: every step of it
@@ -322,7 +345,7 @@ export function approvedPlanOver(task: Pick<AgentTask, "plan" | "messages">): "d
   if (plan?.status !== "approved") return undefined;
   if (plan.steps.length > 0 && plan.steps.every((step) => step.ranAt)) return "done";
   const since = plan.decidedAt;
-  if (since !== undefined && task.messages.some((m) => m.role === "user" && m.at >= since && !HUB_WRITTEN.test(m.text)))
+  if (since !== undefined && task.messages.some((m) => m.role === "user" && m.at >= since && !hubWrote(m)))
     return "new-request";
   return undefined;
 }
@@ -333,9 +356,14 @@ export function approvedPlanOver(task: Pick<AgentTask, "plan" | "messages">): "d
  */
 export function planPending(task: Pick<AgentTask, "mode" | "plan" | "messages">): boolean {
   if (task.plan?.status === "proposed") return true;
-  const last = lastUserText(task);
+  const lastMessage = task.messages.filter((m) => m.role === "user").at(-1);
+  const last = lastMessage?.text ?? "";
   // The run that revises a plan the user sent back is still planning.
-  if (task.plan?.status === "rejected" && last.startsWith(REJECTED_PREFIX))
+  if (task.plan?.status === "rejected" && lastMessage && hubWrote(lastMessage) && last.startsWith(REJECTED_PREFIX))
+    return true;
+  // An approved plan that was asked for, in any mode: once it is over, a new change needs a new plan.
+  // The last message is then the hub's word that the plan was approved, which holds no `/plan`.
+  if (task.plan?.status === "approved" && (isPlanMode(task.mode) || task.plan.askedFor) && approvedPlanOver(task) !== undefined)
     return true;
   return wantsPlanFirst(last, task.mode) && (task.plan?.status !== "approved" || approvedPlanOver(task) !== undefined);
 }
@@ -378,9 +406,14 @@ export function planGate(
   if (over === "done")
     return "Every step of the approved plan has run. A new change needs a new plan: propose it with sshs3_plan_propose and wait for the user's approval. Commands still run; make no change.";
   if (over === "new-request") {
-    // What was approved is still approved: a step of the plan that has not run yet is not held.
+    // What was approved is still approved: a step of the plan that has not run yet is not held. A
+    // step with a command is the change card of that command; one without (a file to write) is a
+    // file write to the path the step names.
     const command = typeof args.command === "string" ? args.command.trim() : "";
     if (tool === "sshs3_change" && command && task.plan!.steps.some((step) => !step.ranAt && step.commandHash === exactHash(command)))
+      return undefined;
+    const file = tool === "file_write" && typeof args.path === "string" ? args.path.trim() : "";
+    if (file && task.plan!.steps.some((step) => !step.ranAt && !step.command && namesPath(step, file)))
       return undefined;
     return "The user has written since they approved the plan. A change that plan does not list needs a new plan: propose it with sshs3_plan_propose and wait for their approval. Commands still run; make no change.";
   }
@@ -391,6 +424,43 @@ export function planGate(
     return "This conversation is in Plan mode. Propose a plan with sshs3_plan_propose and wait for the user's approval before changing anything. Commands still run; make no change.";
   }
   return "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything. Commands still run; make no change.";
+}
+
+/** Whether a plan step without a command names this file: in what it does, or as its target. */
+function namesPath(step: Pick<AgentPlanStep, "action" | "target">, file: string): boolean {
+  return file.length > 1 && (step.action.includes(file) || step.target?.trim() === file);
+}
+
+/** A change in these states has run, whatever came of it. */
+const RAN: ReadonlySet<AgentChange["status"]> = new Set(["running", "completed", "failed", "uncertain"]);
+
+/**
+ * A change card, a plain command or a file write of the run has run: the step of the approved plan it
+ * carries out is marked as run, however it was let through. Where the plan covered it, the broker
+ * marked it when it let it through (`planCoversCommand`); this marks the rest: a change card the
+ * person was asked about (a plan that asks about each change), a plain command of such a plan, and a
+ * file write, which no plan covers. A step with a command is matched on that exact command and its
+ * terminal; a step without one, on its terminal and the file's path in what the step says.
+ */
+export function markPlanStepRan(
+  task: Pick<AgentTask, "plan">,
+  change: Pick<AgentChange, "kind" | "status" | "commandHash" | "targetKey" | "description" | "decidedHow" | "check" | "rollback" | "toolCall">,
+  now = Date.now(),
+): void {
+  const plan = task.plan;
+  if (plan?.status !== "approved" || !RAN.has(change.status)) return;
+  if (change.decidedHow === "plan") return;
+  if (change.kind === "command" && isPlainCommand(change) && !plan.askEach) return;
+  const onTarget = (step: AgentPlanStep): boolean => !step.approvedTarget || step.approvedTarget === change.targetKey;
+  let step: AgentPlanStep | undefined;
+  if (change.kind === "command" && change.commandHash && !change.toolCall)
+    step = plan.steps.find((s) => !s.ranAt && s.commandHash === change.commandHash && onTarget(s));
+  if (change.kind === "file") {
+    // A file write's description starts with its path (FileTools).
+    const file = change.description.split(" — ")[0].trim();
+    step = plan.steps.find((s) => !s.ranAt && !s.command && onTarget(s) && namesPath(s, file));
+  }
+  if (step) step.ranAt = now;
 }
 
 /**
