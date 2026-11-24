@@ -6,7 +6,9 @@ import { installed, openShell, shellCase, type RealShell } from "./helpers/realS
 
 /**
  * A command that ran out of time may still be running: a question for a password, a pager, a long
- * job. Nothing is typed into its terminal until a shell prompt has been shown again.
+ * job. Nothing is typed into its terminal until that command has been seen to end: its own end
+ * marker, the shell's prompt marker, or a person connecting the terminal again. A line that only
+ * looks like a prompt is not enough.
  */
 
 const disposals: Array<() => unknown> = [];
@@ -25,6 +27,7 @@ function fake() {
   disposals.push(() => terminals.dispose());
   const written: string[] = [];
   let hanging: string | undefined;
+  let hung = "";
   terminals.register({ id: "t1", label: "web-01", kind: "ssh", profileId: "p1", shell: "bash" }, (data) => {
     written.push(data);
     const nonce = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
@@ -33,10 +36,17 @@ function fake() {
     if (hanging !== undefined) {
       const text = hanging;
       hanging = undefined;
+      hung = nonce;
       setTimeout(() => terminals.feed("t1", begin + text), 2);
     } else setTimeout(() => terminals.feed("t1", `${begin}\x1b]777;SSHS3;${nonce};END;0;/home/ops\x07`), 2);
   });
-  return { terminals, written, hang: (text: string) => void (hanging = text) };
+  return {
+    terminals,
+    written,
+    hang: (text: string) => void (hanging = text),
+    /** The end marker the shell prints when the command that hung is over. */
+    endOfHung: (code = 0) => `\x1b]777;SSHS3;${hung};END;${code};/home/ops\x07`,
+  };
 }
 
 async function claimed(terminals: TerminalRegistry): Promise<string> {
@@ -48,9 +58,9 @@ async function claimed(terminals: TerminalRegistry): Promise<string> {
 }
 
 describe("after a command ran out of time", () => {
-  it("leaves the command running, says so, and types nothing more while no prompt is back", async () => {
+  it("leaves the command running, says so, and types nothing more until it has ended", async () => {
     // sudo asks for a password and nothing answers it.
-    const { terminals, written, hang } = fake();
+    const { terminals, written, hang, endOfHung } = fake();
     const generation = await claimed(terminals);
     hang("[sudo] password for ops: ");
     const outcome = await terminals.execute("t1", generation, "task-1", "sudo systemctl restart nginx", 60).then(
@@ -59,6 +69,7 @@ describe("after a command ran out of time", () => {
     );
     expect(outcome).toMatch(/did not finish within 1 seconds/);
     expect(outcome).toMatch(/It was left running in this terminal: sshs3 does not stop a command by itself/);
+    expect(outcome).toMatch(/Nothing more is typed there until it has ended/);
     expect(outcome).toMatch(/It last showed: \[sudo\] password for ops:/);
     // Nothing was pressed for the person: a long job cut off part way can leave more broken than a slow one.
     expect(written).not.toContain("\x03");
@@ -74,14 +85,52 @@ describe("after a command ran out of time", () => {
     await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
     expect(written).toHaveLength(before);
 
-    // Once the shell shows its prompt again, the terminal is connected to as before.
-    terminals.feed("t1", "\r\nsudo: 3 incorrect password attempts\r\nops@web-01:~$ ");
+    // Once the command is over (its shell prints its end marker), the terminal is connected to as before.
+    terminals.feed("t1", `\r\nsudo: 3 incorrect password attempts\r\n${endOfHung(1)}ops@web-01:~$ `);
     await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
     expect(written.length).toBe(before + 1);
   });
 
-  it("opens the terminal again once the long job has ended and the prompt is back", async () => {
-    const { terminals, written, hang } = fake();
+  it("does not take a line that only looks like a prompt for one: nothing is typed into the program", async () => {
+    // A long job shows its progress in percent, then asks for a password. Both lines end the way a
+    // prompt ends ("%", "$ ", "> "), and the program is still reading the terminal.
+    const { terminals, written, hang, endOfHung } = fake();
+    const generation = await claimed(terminals);
+    hang("/dev/vg0/data: Moved: 45.0%");
+    await terminals.execute("t1", generation, "task-1", "sudo pvmove /dev/sdb1", 60).catch(() => undefined);
+    const before = written.length;
+    for (const looksLikeAPrompt of ["\r/dev/vg0/data: Moved: 95.0%", "\r\nops@web-01:~$ ", "\r\nContinue? > "]) {
+      terminals.feed("t1", looksLikeAPrompt);
+      await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
+    }
+    expect(written).toHaveLength(before);
+    // An end marker of another command, or one written by a program that does not know the secret, opens nothing.
+    terminals.feed("t1", "\x1b]777;SSHS3;00000000000000000000000000000000;END;0;/home/ops\x07ops@web-01:~$ ");
+    await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
+    expect(written).toHaveLength(before);
+    // The command's own end marker, here in two pieces, does.
+    const end = endOfHung(0);
+    terminals.feed("t1", end.slice(0, 20));
+    await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
+    terminals.feed("t1", `${end.slice(20)}ops@web-01:~$ `);
+    await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
+  });
+
+  it("is opened again by the shell's own prompt marker, where the shell sends one", async () => {
+    // A person pressed Ctrl-C: the shell drops the rest of the line, so no end marker comes. A shell
+    // with prompt markers (OSC 133) says by itself that its prompt is back.
+    const { terminals, hang } = fake();
+    const generation = await claimed(terminals);
+    hang("[sudo] password for ops: ");
+    await terminals.execute("t1", generation, "task-1", "sudo systemctl restart nginx", 60).catch(() => undefined);
+    terminals.feed("t1", "^C\r\n");
+    await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
+    terminals.feed("t1", "\x1b]133;D;130\x07\x1b]133;A\x07ops@web-01:~$ \x1b]133;B\x07");
+    await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
+  });
+
+  it("opens the terminal again once the long job has ended", async () => {
+    const { terminals, written, hang, endOfHung } = fake();
     const generation = await claimed(terminals);
     hang("Unpacking nginx (1.24.0-2) ...\r\n");
     const outcome = await terminals.execute("t1", generation, "task-1", "sudo apt-get -y upgrade", 60).then(
@@ -93,8 +142,8 @@ describe("after a command ran out of time", () => {
     // The job is still at work: what it prints is no prompt.
     terminals.feed("t1", "Setting up nginx (1.24.0-2) ...\r\n");
     await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
-    // It ends by itself, and the shell shows its prompt.
-    terminals.feed("t1", "Processing triggers for man-db ...\r\nops@web-01:~$ ");
+    // It ends by itself: its shell prints its end marker and shows its prompt.
+    terminals.feed("t1", `Processing triggers for man-db ...\r\n${endOfHung(0)}ops@web-01:~$ `);
     await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
   });
 
@@ -112,7 +161,7 @@ describe("after a command ran out of time", () => {
 
   it("does not take the prompt shown before the command for a prompt now, after a person took the terminal back", async () => {
     // A pager: it shows a page and waits. The person presses a key, which hands the terminal back.
-    const { terminals, written, hang } = fake();
+    const { terminals, written, hang, endOfHung } = fake();
     const generation = await claimed(terminals);
     hang("line 1\r\nline 2\r\n");
     const run = terminals.execute("t1", generation, "task-1", "journalctl -u nginx", 60_000).catch((e: Error) => e.message);
@@ -122,8 +171,8 @@ describe("after a command ran out of time", () => {
     const before = written.length;
     await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
     expect(written).toHaveLength(before);
-    // The person quits the pager; the shell's prompt is shown.
-    terminals.feed("t1", "\r\nops@web-01:~$ ");
+    // The person quits the pager; the command is over and the shell's prompt is shown.
+    terminals.feed("t1", `\r\n${endOfHung(0)}ops@web-01:~$ `);
     await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
   });
 
@@ -231,6 +280,42 @@ describe("after a command ran out of time, in a real shell", () => {
       expect(next.output).toContain("after-42");
     }, 30_000);
   }
+
+  it.skipIf(!installed("bash"))(`${shellCase("bash")}: a prompt of a shape sshs3 does not read is no obstacle once the command has ended`, async () => {
+    // oh-my-zsh's default theme shows "➜  folder ": nothing a prompt is read by. The end marker is enough.
+    shell = await openShell("bash");
+    shell.type("PS1='➜  \\W '\r");
+    await vi.waitFor(() => expect(shell!.transcript()).toMatch(/➜ {2}\S+ $/), { timeout: 5_000 });
+    const outcome = await shell.run("sleep 1; echo done-$((40+2))", 300).then(
+      () => "resolved",
+      (e: Error) => e.message,
+    );
+    expect(outcome).toMatch(/It was left running in this terminal/);
+    await vi.waitFor(() => shell!.reconnect(), { timeout: 15_000, interval: 250 });
+    expect(shell.transcript()).toContain("done-42");
+    const next = await shell.run("echo again");
+    expect(next.output).toContain("again");
+  }, 30_000);
+
+  it.skipIf(!installed("bash"))(`${shellCase("bash")}: a progress line that ends in % does not get the handshake typed into the program after it`, async () => {
+    shell = await openShell("bash");
+    // The job reports progress in percent, then asks for a password and keeps what it reads.
+    const job =
+      "i=0; while [ $i -lt 8 ]; do printf '\\rMoved: %d.0%%' $((i*10)); i=$((i+1)); sleep 0.2; done; " +
+      "printf '\\nNew password: '; IFS= read -r pw; echo; echo \"read:[$pw]\"";
+    await shell.run(job, 300).catch(() => undefined);
+    // While the progress line shows, the next tool call is refused and nothing is typed.
+    await sleep(300);
+    const before = shell.transcript().length;
+    await expect(shell.registry.ensureReady("real")).rejects.toThrow(STILL_RUNNING);
+    await sleep(200);
+    expect(shell.transcript().slice(before)).not.toMatch(/SSHS3/);
+    // The person answers the question; the job ends; the terminal is free again.
+    await vi.waitFor(() => expect(shell!.transcript()).toContain("New password: "), { timeout: 10_000 });
+    shell.type("s3cret\r");
+    await vi.waitFor(() => shell!.reconnect(), { timeout: 10_000, interval: 250 });
+    expect(shell.transcript()).toContain("read:[s3cret]");
+  }, 30_000);
 
   it.skipIf(!installed("bash"))(`${shellCase("bash")}: a program that waits for a key keeps the terminal closed until it has ended`, async () => {
     shell = await openShell("bash");

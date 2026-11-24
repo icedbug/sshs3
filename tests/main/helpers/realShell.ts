@@ -21,6 +21,8 @@ export interface RealShell {
   reconnect(): Promise<void>;
   /** Everything the terminal sent, raw. */
   transcript(): string;
+  /** Types into the terminal as a person does, past the registry. */
+  type(text: string): void;
   close(): void;
 }
 
@@ -74,6 +76,7 @@ export async function openShell(
       registry.claim("real", generation, "task");
     },
     transcript: () => transcript,
+    type: (text) => terminal.write(text),
     close,
   };
 }

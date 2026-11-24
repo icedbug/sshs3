@@ -3258,12 +3258,19 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   did not run. A person who wants it stopped presses Ctrl-C in the terminal.
 - A terminal whose last command was let go of before it ended (it ran out of
   time, or a person took the terminal back while it ran) is not typed into by
-  itself until it has shown a shell prompt again. What it showed before the
-  command does not count. Until then the agent is told "The last command is
-  still running in this terminal" and to use another terminal. A person can
-  still press "Connect at prompt": they looked, and the shell's answer is
-  taken as proof. `tests/main/terminalAfterTimeout.test.ts` holds this, also in
-  a real bash and dash where they are installed.
+  itself until that command has been seen to end: its own end marker arrives
+  (only its own shell can print it, the marker carries the command's secret),
+  or the shell sends its prompt marker (OSC 133, where shell integration is on),
+  or a person connects the terminal again by hand. What the terminal shows is
+  not read for a prompt here: a progress line that ends in "%" or "$ " looks
+  like one while the program still waits for input, and a review showed the
+  handshake typed into a question for a password that way. Until then the
+  agent is told "The last command in this terminal has not ended" and to use
+  another terminal. A person who stopped the command with Ctrl-C, in a shell
+  without prompt markers, connects the terminal again by hand: the shell drops
+  the rest of the line, so no end marker comes.
+  `tests/main/terminalAfterTimeout.test.ts` holds this, also in a real bash and
+  dash where they are installed.
 - Which shell a terminal runs is read from what it shows and what it was
   started with (`detectShellFromHint`). Its name is what a person called it
   and counts only where a tab is named after its program: "cmd", "powershell"
