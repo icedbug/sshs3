@@ -7,6 +7,9 @@ import { pgReplicationBroken } from './db/pg-replication-broken';
 import { pgTooManyConnections } from './db/pg-too-many-connections';
 import { pgWalFull } from './db/pg-wal-full';
 import { slowQueryMissingIndex } from './db/slow-query-missing-index';
+import { leakedKeyRotate } from './security/leaked-key-rotate';
+import { sshBruteforce } from './security/ssh-bruteforce';
+import { suspiciousProcess } from './security/suspicious-process';
 import { lifecycleDeletesEarly } from './storage/lifecycle-deletes-early';
 import { s3BackupDenied } from './storage/s3-backup-denied';
 import { cronRunaway } from './system/cron-runaway';
@@ -46,6 +49,9 @@ export const SCENARIOS: Scenario[] = [
   redisMaxmemory,
   s3BackupDenied,
   lifecycleDeletesEarly,
+  suspiciousProcess,
+  sshBruteforce,
+  leakedKeyRotate,
 ];
 
 /** Tasks written but not yet shown right three times: `validate` takes them, a campaign does not. */
