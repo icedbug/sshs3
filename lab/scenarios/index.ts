@@ -7,6 +7,10 @@ import { pgReplicationBroken } from './db/pg-replication-broken';
 import { pgTooManyConnections } from './db/pg-too-many-connections';
 import { pgWalFull } from './db/pg-wal-full';
 import { slowQueryMissingIndex } from './db/slow-query-missing-index';
+import { addUserWithKey } from './request/add-user-with-key';
+import { newNginxSite } from './request/new-nginx-site';
+import { packageUpgradeWithRollback } from './request/package-upgrade-with-rollback';
+import { rotateAppDbPassword } from './request/rotate-app-db-password';
 import { leakedKeyRotate } from './security/leaked-key-rotate';
 import { sshBruteforce } from './security/ssh-bruteforce';
 import { suspiciousProcess } from './security/suspicious-process';
@@ -52,6 +56,10 @@ export const SCENARIOS: Scenario[] = [
   suspiciousProcess,
   sshBruteforce,
   leakedKeyRotate,
+  addUserWithKey,
+  rotateAppDbPassword,
+  newNginxSite,
+  packageUpgradeWithRollback,
 ];
 
 /** Tasks written but not yet shown right three times: `validate` takes them, a campaign does not. */
