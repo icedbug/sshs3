@@ -49,6 +49,18 @@ export async function exec(host: string, cmd: string, opts: { user?: string; tim
   return run('ssh', args, opts.timeoutMs ?? 60_000);
 }
 
+/** Waits until a server answers on SSH: a server that has just started takes a moment, as a VM does. */
+export async function waitForSsh(host: string, timeoutMs = 60_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  let last: ExecResult | undefined;
+  while (Date.now() < until) {
+    last = await exec(host, 'true', { timeoutMs: 10_000 });
+    if (last.code === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`${host} did not answer on SSH within ${Math.round(timeoutMs / 1000)} s: ${last?.stderr.trim() ?? ''}`);
+}
+
 function run(file: string, args: string[], timeoutMs = 60_000): Promise<ExecResult> {
   return new Promise((resolve) => {
     execFile(file, args, { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {

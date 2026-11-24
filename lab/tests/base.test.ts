@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { controlKey, exec } from '../src/ssh';
+import { controlKey, exec, waitForSsh } from '../src/ssh';
 
 // One container from the base image, on a network of its own, reached over the lab's control channel.
 const NAME = 'lab-test-base';
@@ -33,6 +33,8 @@ describe('the base server image', () => {
     const key = await controlKey();
     docker('exec', NAME, 'sh', '-c', `mkdir -p /root/.ssh && echo '${key.publicKey}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
 
+    // A server that has just started takes a moment before sshd answers, as a VM does.
+    await waitForSsh(IP, 60_000);
     const state = await exec(IP, 'systemctl is-system-running --wait || true', { timeoutMs: 120_000 });
     expect(['running', 'degraded']).toContain(state.stdout.trim());
     const name = await exec(IP, 'hostname');
