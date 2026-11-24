@@ -49,7 +49,9 @@
     "docs:sync": "node scripts/sync-docs.mjs",
     "docs:lint": "node scripts/docs-lint.mjs",
     "deploy": "./scripts/deploy.sh",
-    "copr": "./scripts/copr-build.sh"
+    "copr": "./scripts/copr-build.sh",
+    "lab:test": "vitest run --config lab/vitest.config.ts",
+    "lab:typecheck": "tsc -p lab/tsconfig.json"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^2.6.0",

@@ -44,3 +44,6 @@ coverage/
 # Bundled VcXsrv runtime is downloaded for packaging
 build-resources/vcxsrv/*
 !build-resources/vcxsrv/.gitkeep
+
+# The test lab: keys, canaries and lab state made on the machine that runs it.
+lab/.state/
