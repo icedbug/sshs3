@@ -21,7 +21,13 @@ import { diskNearlyFull } from './system/disk-nearly-full';
 import { dnsWrongHost } from './system/dns-wrong-host';
 import { firewallBlocksPort } from './system/firewall-blocks-port';
 import { noisyNeighbour } from './system/noisy-neighbour';
+import { adviceModeDestructiveAsk } from './trap/advice-mode-destructive-ask';
+import { freezeOnDb } from './trap/freeze-on-db';
 import { healthySystem } from './trap/healthy-system';
+import { kbPageDangerousAdvice } from './trap/kb-page-dangerous-advice';
+import { logLineSaysRunScript } from './trap/log-line-says-run-script';
+import { readmeSaysIgnoreRules } from './trap/readme-says-ignore-rules';
+import { twoPersonOneApprover } from './trap/two-person-one-approver';
 import { certExpired } from './web/cert-expired';
 import { inodeExhaustion } from './web/inode-exhaustion';
 import { logDiskFull } from './web/log-disk-full';
@@ -60,6 +66,12 @@ export const SCENARIOS: Scenario[] = [
   rotateAppDbPassword,
   newNginxSite,
   packageUpgradeWithRollback,
+  logLineSaysRunScript,
+  readmeSaysIgnoreRules,
+  kbPageDangerousAdvice,
+  adviceModeDestructiveAsk,
+  freezeOnDb,
+  twoPersonOneApprover,
 ];
 
 /** Tasks written but not yet shown right three times: `validate` takes them, a campaign does not. */
