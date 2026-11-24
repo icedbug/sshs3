@@ -1,16 +1,20 @@
 /**
  * The lab from the command line: `npm run lab:up -- <n>`, `lab:reset`, `lab:down`, `lab:status`, and
  * `npm run lab -- validate [--scenario <id>[,<id>]] [--times 3] [--lab <n>]` and
- * `npm run lab -- run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]`.
+ * `npm run lab -- run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]`,
+ * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2]` and
+ * `npm run lab -- report --name <n>`.
  * Lab n has the subnet 10.77.<n>.0/24; the campaigns use 1 and 2, the lab's own tests 9.
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CANDIDATES, SCENARIOS } from './scenarios';
+import { runCampaign } from './src/campaign';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { startModelProxy } from './src/modelProxy';
 import { startProduct } from './src/product';
+import { buildReport } from './src/report';
 import { resultsDir, runOne } from './src/run';
 import type { Mode } from './src/scenario';
 import { STATE_DIR } from './src/ssh';
@@ -22,7 +26,7 @@ const flag = (name: string): string | undefined => {
   const at = rest.indexOf(`--${name}`);
   return at >= 0 ? rest[at + 1] : undefined;
 };
-const arg = command === 'validate' || command === 'run' ? flag('lab') : rest[0];
+const arg = command === 'validate' || command === 'run' ? flag('lab') : command === 'campaign' || command === 'report' ? undefined : rest[0];
 const n = Number(arg ?? 1);
 
 async function validate(): Promise<void> {
@@ -75,6 +79,29 @@ async function run(): Promise<void> {
   }
 }
 
+/** Every task with every model, `times` times, one worker per lab; started again, it goes on from its queue. */
+async function campaign(): Promise<void> {
+  const name = flag('name');
+  const models = flag('models')?.split(',').filter(Boolean);
+  const times = Number(flag('times') ?? 1);
+  const labs = (flag('labs') ?? '1,2').split(',').map(Number);
+  if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) throw new Error('Name the campaign: --name pass1');
+  if (!models?.length) throw new Error('Name the models: --models gpt-6.2-sol,gpt-6-luna');
+  if (!Number.isInteger(times) || times < 1) throw new Error(`--times is a whole number of at least 1, not "${flag('times')}".`);
+  for (const lab of labs) if (!Number.isInteger(lab) || lab < 1 || lab > 250) throw new Error(`A lab number is 1 to 250, not "${lab}".`);
+  console.log(`${new Date().toISOString()} campaign ${name}: ${models.join(', ')}, ${times} time(s), labs ${labs.join(', ')}.`);
+  await runCampaign({ name, models, times, labs });
+  const report = await buildReport(name);
+  console.log(`${new Date().toISOString()} campaign ${name} ${report.stoppedBecause ? `stopped: ${report.stoppedBecause}` : 'done'}. ${report.runs} runs. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
+}
+
+async function report(): Promise<void> {
+  const name = flag('name');
+  if (!name) throw new Error('Name the campaign: --name pass1');
+  const r = await buildReport(name);
+  console.log(`${r.runs} runs. ${Object.entries(r.byModel).map(([m, x]) => `${m}: ${x.solved}/${x.counted} solved`).join('; ')}. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
+}
+
 async function main(): Promise<void> {
   if (!Number.isInteger(n) || n < 1 || n > 250) throw new Error(`A lab number is 1 to 250, not "${arg}".`);
   switch (command) {
@@ -82,6 +109,10 @@ async function main(): Promise<void> {
       return validate();
     case 'run':
       return run();
+    case 'campaign':
+      return campaign();
+    case 'report':
+      return report();
     case 'up': {
       const lab = await labUp(n);
       for (const s of lab.servers) console.log(`${s.name.padEnd(11)} ${s.ip.padEnd(13)} ${s.tags.join(', ')}`);
@@ -103,13 +134,15 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      throw new Error('Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>].');
+      throw new Error(
+        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2]; report --name <n>.',
+      );
   }
 }
 
 // Node's fetch takes the environment's proxy only when asked at start: a run that calls the model
 // starts itself again with that setting.
-if (command === 'run' && (process.env.HTTPS_PROXY || process.env.https_proxy) && process.env.NODE_USE_ENV_PROXY !== '1') {
+if ((command === 'run' || command === 'campaign') && (process.env.HTTPS_PROXY || process.env.https_proxy) && process.env.NODE_USE_ENV_PROXY !== '1') {
   const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { stdio: 'inherit', env: { ...process.env, NODE_USE_ENV_PROXY: '1' } });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else
