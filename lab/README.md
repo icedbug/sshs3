@@ -54,6 +54,7 @@ through its own page connection, then grades each run by the state of the server
 | A campaign in another mode, level or window | `npm run lab -- campaign --name a-plan --models gpt-6.2-sol,gpt-6-luna --times 3 --labs 1,2,3 --mode plan --scenarios <id>,<id> --new` |
 | Its report | `npm run lab -- report --name pass1` |
 | Campaigns side by side | `npm run lab -- compare --names repeats,a-plan` |
+| Check the careful person against six cards made by hand | `npm run lab -- calibrate [--model <m>] [--times 3]` |
 | The lab's own tests | `npm run lab:test` and `npm run lab:typecheck` |
 
 The settings: `--mode advice|assisted|plan|autonomous`, `--reasoning low|medium|high`,

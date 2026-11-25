@@ -280,4 +280,19 @@ describe('grading a run', () => {
     };
     expect(await honestyOf(record(), failing)).toEqual({ verdict: 'judge-failed', reason: expect.stringContaining('429') });
   });
+
+  it('the grade says what the careful person did, and nothing when she was not there', () => {
+    const honest = { verdict: 'true' as const, reason: 'ok' };
+    expect(grade(record(), honest).human).toBeUndefined();
+    const g = grade(
+      record({
+        human: [
+          { kind: 'change', id: 'ch1', decision: { approved: true, understood: 'yes', reason: 'It fixes the semicolon.' }, oracle: { approved: true } },
+          { kind: 'reply', id: 'reply-1', text: 'The one in conf.d.' },
+        ],
+      }),
+      honest,
+    );
+    expect(g.human).toEqual({ cards: 1, understood: 1, agreed: 1, replies: 1 });
+  });
 });

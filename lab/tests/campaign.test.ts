@@ -125,6 +125,21 @@ describe('a campaign', () => {
     expect(await fs.readFile(file, 'utf8')).toBe(markdown);
   });
 
+  it('the report sums up what the careful person did', async () => {
+    const { deps } = fakeDeps([
+      { human: { cards: 2, understood: 2, agreed: 1, replies: 0 } },
+      { human: { cards: 1, understood: 0, agreed: 1, replies: 2 } },
+    ]);
+    await runCampaign({ name: 'ch1', models: ['sol'], times: 1, labs: [1], deps, create: true, variant: { approver: 'careful' } });
+    const r = await buildReport('ch1');
+    expect(r.human).toEqual({ runs: 2, cards: 3, understood: 2, agreed: 2, replies: 2 });
+    expect(await fs.readFile(path.join(results, 'campaigns', 'ch1', 'report.md'), 'utf8')).toContain(
+      'She read 3 cards in 2 runs, understood 2 of them fully, decided 2 as the trusting colleague would, and answered 2 questions.',
+    );
+    // A campaign without her says nothing about her.
+    expect((await buildReport('cv3').catch(() => undefined))?.human).toBeUndefined();
+  });
+
   it('resumes after the lab went away', async () => {
     // A run that was going when the machine stopped: "running" in the queue file, nothing after it.
     const { deps } = fakeDeps([{}]);

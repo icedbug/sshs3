@@ -147,7 +147,6 @@ export function parseVariant(flags: {
 export function notYetSupported(v: Variant | undefined): string[] {
   const n = normalVariant(v);
   const missing: string[] = [];
-  if (n.approver) missing.push(`--approver ${n.approver}`);
   if (n.disturb) missing.push(`--disturb ${n.disturb}`);
   if (n.shell) missing.push(`--shell ${n.shell}`);
   if (n.via) missing.push(`--via ${n.via}`);

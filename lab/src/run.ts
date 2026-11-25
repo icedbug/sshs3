@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import type { AgentChange, AgentTask, WorkspaceLayoutEvent } from '../../src/shared/types/aiHub';
-import { decideChange, decidePlan } from './approver';
+import { makeDeciders, proxyAsk, type Deciders, type HumanRecord } from './carefulHuman';
 import { evidenceOf, grade, honestyOf, plainCommands, toolCallsOf, type Approval, type Grade, type RunRecord, type ToolCallSeen } from './grade';
 import { hostChanges, hostNow, hostSnapshot, restoreHost, type HostChanges, type HostSnapshot } from './hostGuard';
 import { judgeHonesty } from './judge';
@@ -169,6 +169,14 @@ function transcript(s: Scenario, meta: Record<string, unknown>, task: AgentTask 
     lines.push(`- ${c.ref ?? c.id} [${c.status}] on ${c.target}: \`${c.command ?? c.description}\`${answer ? `, ${answer.approved ? 'approved' : 'denied'} by ${answer.by}` : ''}${c.decidedHow ? ` (decided by ${c.decidedHow})` : ''}`);
   }
   if (!task?.changes.length) lines.push('(None.)');
+  if (r.human?.length) {
+    lines.push('', '## The careful person', '');
+    for (const h of r.human as HumanRecord[]) {
+      const ref = task?.changes.find((c) => c.id === h.id)?.ref ?? h.id;
+      if (h.kind === 'reply') lines.push(`- answered: ${h.text}`);
+      else lines.push(`- ${h.kind} ${ref}: ${h.decision!.approved ? 'approved' : 'denied'} (understood: ${h.decision!.understood}; the trusting colleague would have ${h.oracle?.approved ? 'approved' : 'denied'}): ${h.decision!.reason}`);
+    }
+  }
   lines.push('', '## Checks after the run', '');
   for (const c of r.checks) lines.push(`- ${tick(c.ok)}: ${c.name}`);
   lines.push('', '## Damage checks', '');
@@ -230,6 +238,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
   let productFailure: string | undefined;
   let labBroken: string[] | undefined;
   let asked: string | undefined;
+  let people: Deciders | undefined;
   const approvals: Approval[] = [];
   const refusedAnswers: string[] = [];
   const denied = new Set<string>();
@@ -248,6 +257,16 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     }
     lab = await loadLab(opts.lab);
     const values = await labValues(lab);
+    // Who answers the cards and the questions: the trusting colleague, or the careful person (variant.ts).
+    const servers = lab.servers;
+    people = makeDeciders({
+      scenario: s,
+      variant,
+      ask: proxyAsk(opts.proxy.url),
+      runId,
+      production: (target) => Boolean(servers.find((x) => x.name === target || x.ip === target)?.tags.includes('production')),
+    });
+    const deciders = people;
 
     // 2. The fault, and the team's rules for this task.
     for (const step of s.setup) await runStep(lab, values, step);
@@ -317,11 +336,11 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
       let answeredNow = false;
       const pending = task.changes.filter((x) => x.status === 'pending');
       for (const c of pending) {
-        const d = decideChange(s, c);
+        const d = await deciders.change(c);
         const by = account;
         if (!answered.has(c.id)) {
           open = true;
-          answeredNow ||= await tryAnswer(c.id, () => by.answer(taskId!, c.id, d.approved, d.note), { kind: 'change', changeId: c.id, command: c.command, approved: d.approved, by: by.name, at: Date.now() });
+          answeredNow ||= await tryAnswer(c.id, () => by.answer(taskId!, c.id, d.approved, d.note), { kind: 'change', changeId: c.id, command: c.command, approved: d.approved, by: by.name, at: Date.now(), ...(d.note ? { note: d.note } : {}) });
         } else if (d.approved && (c.requiredApprovals ?? 1) > (c.approvals?.length ?? 0) && !answered.has(`peer:${c.id}`)) {
           // A second person is needed (the two-person rule): the other colleague answers the same way.
           open = true;
@@ -336,7 +355,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
       if (task.plan?.status === 'proposed' && !answered.has(`plan:${task.plan.id}`)) {
         open = true;
         if (!['running', 'queued'].includes(task.status)) {
-          const d = decidePlan(s);
+          const d = await deciders.plan(task.plan);
           const by = account;
           answeredNow ||= await tryAnswer(`plan:${task.plan.id}`, () => by.hub({ action: 'plan-decide', taskId: taskId!, approved: d.approved, ...(d.note ? { note: d.note } : {}) }), {
             kind: 'plan',
@@ -347,6 +366,21 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
         }
       }
       if (answeredNow) continue;
+      // The careful person answers what the agent asked her, as the person who asked would, and the
+      // run goes on once the product has taken the answer.
+      if (!open && !pending.length) {
+        const text = await deciders.reply(task);
+        if (text) {
+          await account.hub({ action: 'reply', taskId, text });
+          for (let i = 0; i < 10; i++) {
+            await sleep(1000);
+            task = await account.task(taskId);
+            if (task.status === 'running' || task.status === 'queued' || task.messages.at(-1)?.role !== 'assistant') break;
+          }
+          questionSince = 0;
+          continue;
+        }
+      }
       if (DONE.includes(task.status) && !open && !pending.length) break;
       // The run waits on a person and the lab's people have nothing more to give: a question to the
       // person, or a change nobody here may approve. Nobody answers; the run ends.
@@ -433,6 +467,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     productFailure,
     interrupted,
     rules: s.rules,
+    ...(people?.records.length ? { human: people.records } : {}),
     ms: Date.now() - started,
   };
   const honesty = await honestyOf(record, (answer) =>
@@ -459,6 +494,8 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     madeSecrets: Object.keys(made),
     askedAndWaited: asked,
     approvals,
+    // The careful person's answers beside the trusting colleague's, and the calls she made (not the agent's).
+    ...(people?.records.length ? { human: people.records, humanCalls: (await opts.proxy.calls(`human-${runId}`)).length } : {}),
     refusedAnswers,
     // Kept so that the run can be graded again without the lab: the servers' state is gone after the run.
     checks,

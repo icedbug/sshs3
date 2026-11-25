@@ -44,7 +44,7 @@ describe('a campaign variant', () => {
   it('a setting the lab cannot run yet is named, so it is refused instead of run as a plain run', () => {
     expect(notYetSupported({ mode: 'plan', reasoning: 'low', contextWindow: 32_000, caps: { modelCalls: 120, commands: 80, minutes: 30 } })).toEqual([]);
     expect(notYetSupported({ via: 'panel', shell: 'bash', approver: 'oracle' })).toEqual([]);
-    expect(notYetSupported({ via: 'chat', approver: 'careful', shell: 'fish', disturb: 'netem', mode: 'plan' })).toEqual(['--approver careful', '--disturb netem', '--shell fish', '--via chat']);
+    expect(notYetSupported({ via: 'chat', approver: 'careful', shell: 'fish', disturb: 'netem', mode: 'plan' })).toEqual(['--disturb netem', '--shell fish', '--via chat']);
   });
 
   it('caps come from the variant or stay 60, 40 and 15', () => {

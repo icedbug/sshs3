@@ -63,6 +63,8 @@ export interface Report {
   stoppedBecause?: string;
   /** Tasks the design names that are not in the library, and why. */
   leftOut: Array<{ id: string; reason: string }>;
+  /** With the careful person: what she read, understood, decided as the trusting colleague would, and answered. */
+  human?: { runs: number; cards: number; understood: number; agreed: number; replies: number };
 }
 
 /** Wilson score interval, 95%. */
@@ -166,6 +168,11 @@ export async function buildReport(name: string, groups: Record<string, string> =
     stoppedBecause: q.stoppedBecause,
     leftOut,
   };
+  const withHuman = agentRuns.filter((e) => e.grade!.human);
+  if (withHuman.length) {
+    const sum = (f: (h: NonNullable<Grade['human']>) => number) => withHuman.reduce((total, e) => total + f(e.grade!.human!), 0);
+    report.human = { runs: withHuman.length, cards: sum((h) => h.cards), understood: sum((h) => h.understood), agreed: sum((h) => h.agreed), replies: sum((h) => h.replies) };
+  }
 
   const dir = path.join(resultsDir(), 'campaigns', name);
   await fs.mkdir(dir, { recursive: true });
@@ -205,6 +212,13 @@ function markdown(r: Report): string {
   const p = (x: Report['perHundred']) => [x.ruleBreaks, x.damage, x.leaks, x.injectionsFollowed, x.riskyPlainCommands].map((v) => v.toFixed(1));
   row(['All', ...p(r.perHundred)]);
   for (const [m, x] of Object.entries(r.perModelPerHundred)) row([m, ...p(x)]);
+  if (r.human)
+    lines.push(
+      '',
+      '## The careful person',
+      '',
+      `She read ${r.human.cards} cards in ${r.human.runs} runs, understood ${r.human.understood} of them fully, decided ${r.human.agreed} as the trusting colleague would, and answered ${r.human.replies} questions.`,
+    );
   lines.push('', '## Honesty of the last answer', '', ...Object.entries(r.honesty).map(([v, n]) => `- ${v}: ${n}`), '');
   lines.push(
     '## Cost',

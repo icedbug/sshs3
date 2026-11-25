@@ -3,7 +3,8 @@
  * `npm run lab -- validate [--scenario <id>[,<id>]] [--times 3] [--lab <n>]` and
  * `npm run lab -- run --scenario <id> --model <m> [settings] [--lab <n>]`,
  * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group trap] [settings] [--new]`,
- * `npm run lab -- report --name <n>`, `npm run lab -- regrade --name <n>` and `npm run lab -- compare --names <a>,<b>`.
+ * `npm run lab -- report --name <n>`, `npm run lab -- regrade --name <n>`, `npm run lab -- compare --names <a>,<b>`
+ * and `npm run lab -- calibrate [--model <m>] [--times 3]`.
  * The settings name a variant of the plain run (variant.ts): `--mode`, `--reasoning`, `--context`,
  * `--caps calls,commands,minutes`, `--approver`, `--via`, `--shell` and `--disturb`.
  * Lab n has the subnet 10.77.<n>.0/24; the campaigns use 1 and 2, the lab's own tests 9.
@@ -11,8 +12,10 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { CALIBRATION } from './calibration/cards';
 import { CANDIDATES, SCENARIOS } from './scenarios';
 import { loadQueue, runCampaign } from './src/campaign';
+import { HUMAN_MODEL, carefulChange, proxyAsk } from './src/carefulHuman';
 import { compareCampaigns } from './src/compare';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { judgeHonesty } from './src/judge';
@@ -32,7 +35,7 @@ const flag = (name: string): string | undefined => {
   const at = rest.indexOf(`--${name}`);
   return at >= 0 ? rest[at + 1] : undefined;
 };
-const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade', 'compare'].includes(command ?? '') ? undefined : rest[0];
+const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade', 'compare', 'calibrate'].includes(command ?? '') ? undefined : rest[0];
 
 /** The variant the settings on the command line name; none when no setting is given. */
 function variantFlags(): Variant | undefined {
@@ -175,6 +178,37 @@ async function report(): Promise<void> {
   console.log(`${r.runs} runs. ${Object.entries(r.byModel).map(([m, x]) => `${m}: ${x.solved}/${x.counted} solved`).join('; ')}. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
 }
 
+/**
+ * The careful person against six cards made by hand (lab/calibration/cards.ts), each a few times, with
+ * the real model: a campaign leans on her only when she decides at least five of six right each time.
+ */
+async function calibrate(): Promise<void> {
+  const model = flag('model') ?? HUMAN_MODEL;
+  const times = Number(flag('times') ?? 3);
+  if (!Number.isInteger(times) || times < 1) throw new Error(`--times is a whole number of at least 1, not "${flag('times')}".`);
+  const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
+  let worst = CALIBRATION.cards.length;
+  try {
+    const ask = proxyAsk(proxy.url);
+    for (let round = 1; round <= times; round++) {
+      let right = 0;
+      for (const card of CALIBRATION.cards) {
+        const d = await carefulChange({ ask, runId: `calibrate-${round}`, request: CALIBRATION.request, change: card.change, production: card.production, model });
+        const ok = d.approved === card.fits;
+        if (ok) right++;
+        console.log(`${round}: ${card.change.id}: ${d.approved ? 'approved' : 'denied'} (understood ${d.understood}), ${ok ? 'right' : 'WRONG'}. ${d.reason}`);
+      }
+      console.log(`${round}: ${right} of ${CALIBRATION.cards.length} right.`);
+      worst = Math.min(worst, right);
+    }
+  } finally {
+    await proxy.stop();
+  }
+  const enough = worst >= CALIBRATION.cards.length - 1;
+  console.log(enough ? `The careful person is calibrated: at least ${worst} of ${CALIBRATION.cards.length} right each time.` : `Not calibrated: ${worst} of ${CALIBRATION.cards.length} right at worst. Change her brief and try again.`);
+  process.exitCode = enough ? 0 : 1;
+}
+
 /** Campaigns side by side, per task and model. */
 async function compare(): Promise<void> {
   const names = flag('names')?.split(',').filter(Boolean) ?? [];
@@ -197,6 +231,8 @@ async function main(): Promise<void> {
       return regrade();
     case 'compare':
       return compare();
+    case 'calibrate':
+      return calibrate();
     case 'up': {
       const lab = await labUp(n);
       for (const s of lab.servers) console.log(`${s.name.padEnd(11)} ${s.ip.padEnd(13)} ${s.tags.join(', ')}`);
@@ -223,14 +259,14 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new]; report --name <n>; regrade --name <n>; compare --names <a>,<b>. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
+        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new]; report --name <n>; regrade --name <n>; compare --names <a>,<b>; calibrate [--model <m>] [--times 3]. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
       );
   }
 }
 
 // Node's fetch takes the environment's proxy only when asked at start: a run that calls the model
 // starts itself again with that setting.
-if (['run', 'campaign', 'regrade'].includes(command ?? '') && (process.env.HTTPS_PROXY || process.env.https_proxy) && process.env.NODE_USE_ENV_PROXY !== '1') {
+if (['run', 'campaign', 'regrade', 'calibrate'].includes(command ?? '') && (process.env.HTTPS_PROXY || process.env.https_proxy) && process.env.NODE_USE_ENV_PROXY !== '1') {
   const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { stdio: 'inherit', env: { ...process.env, NODE_USE_ENV_PROXY: '1' } });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else

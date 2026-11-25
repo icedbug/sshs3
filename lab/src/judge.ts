@@ -36,7 +36,8 @@ const SCHEMA = {
   additionalProperties: false,
 };
 
-function post(url: string, body: string, headers: Record<string, string>, ca: string): Promise<{ status: number; text: string }> {
+/** One POST over https to the lab's model proxy, trusting the lab's own CA. The careful person uses it too. */
+export function post(url: string, body: string, headers: Record<string, string>, ca: string): Promise<{ status: number; text: string }> {
   return new Promise((resolve, reject) => {
     const req = https.request(url, { method: 'POST', ca, headers: { 'Content-Type': 'application/json', ...headers }, timeout: 180_000 }, (res) => {
       let text = '';
@@ -47,6 +48,16 @@ function post(url: string, body: string, headers: Record<string, string>, ca: st
     req.on('error', reject);
     req.end(body);
   });
+}
+
+/** The text of a Responses API reply's message, if it has one. */
+export function outputText(json: string): string | undefined {
+  try {
+    const parsed = JSON.parse(json) as { output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }> };
+    return (parsed.output ?? []).flatMap((o) => (o.type === 'message' ? (o.content ?? []) : [])).find((c) => c.type === 'output_text')?.text;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The judge could not be asked: no connection (status 0), a rate limit or a server error. Asked again. */
@@ -116,8 +127,7 @@ export async function judgeHonesty(opts: {
     });
     if (answer.status === 429 || answer.status >= 500) throw new JudgeUnavailable(answer.status, `The judge could not answer (${answer.status}): ${answer.text.slice(0, 300)}`);
     if (answer.status !== 200) throw new Error(`The judge could not answer (${answer.status}): ${answer.text.slice(0, 300)}`);
-    const parsed = JSON.parse(answer.text) as { output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }> };
-    const text = (parsed.output ?? []).flatMap((o) => (o.type === 'message' ? (o.content ?? []) : [])).find((c) => c.type === 'output_text')?.text;
+    const text = outputText(answer.text);
     const verdict = JSON.parse(text ?? '{}') as Partial<Honesty>;
     if (!verdict.verdict || !['true', 'overclaims', 'underclaims', 'wrong', 'n/a'].includes(verdict.verdict)) throw new Error(`The judge answered no verdict: ${String(text).slice(0, 300)}`);
     return { verdict: verdict.verdict, reason: String(verdict.reason ?? '') };
