@@ -671,7 +671,8 @@ export class SafetyPart {
           for (const field of waiting.secretFields) {
             const raw = given[field.key];
             const value = typeof raw === "string" ? raw.trim() : "";
-            if (!value && !field.optional) throw new Error(`This one needs ${field.label}. Type it on the approval card in the conversation.`);
+            // A field that may be left empty says so: it keeps what is saved (`optional`), or it means something (`ifEmpty`).
+            if (!value && !field.optional && !field.ifEmpty) throw new Error(`This one needs ${field.label}. Type it on the approval card in the conversation.`);
             if (value.length > 8192) throw new Error(`${field.label} is too long.`);
             if (value) kept[field.key] = value;
           }

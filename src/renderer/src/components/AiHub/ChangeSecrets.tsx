@@ -38,7 +38,7 @@ export function ChangeSecretInputs({
         <label key={field.key}>
           <span>
             Type {field.label}
-            {field.optional ? ". Leave it empty to keep the one already saved." : ""}
+            {field.ifEmpty ? `. ${field.ifEmpty}` : field.optional ? ". Leave it empty to keep the one already saved." : ""}
           </span>
           <input
             type={visible ? "text" : "password"}

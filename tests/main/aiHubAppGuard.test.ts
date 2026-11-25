@@ -181,7 +181,7 @@ describe("a run that tries to change its own rules", () => {
       expect(inboxItems(snap).find((i) => i.changeId === change.id)).toMatchObject({ kind: "approval", title: "Change the safety rules" });
       expect(snap.safetyPolicy?.requireApprovalOnProdTags ?? true).toBe(true);
       broker.approve(task.id, change.id, false);
-      await expect(asked).rejects.toThrow("Action not approved");
+      await expect(asked).rejects.toThrow("Not approved: the person said no to this");
       expect(change.status).toBe("denied");
       expect((await hub.snapshot()).safetyPolicy?.requireApprovalOnProdTags ?? true).toBe(true);
     }
@@ -448,7 +448,7 @@ describe("which agent a call is about", () => {
     const change = await pending();
     expect(change.description).toContain("Night operator");
     broker.approve(task.id, change.id, false);
-    await expect(asked).rejects.toThrow("Action not approved");
+    await expect(asked).rejects.toThrow("Not approved: the person said no to this");
     expect(hub.store.data.agents[0].mission).toBe("m");
   });
 
@@ -486,7 +486,7 @@ describe("taking something away", () => {
       expect(change.description).toBe("Remove an agent, an MCP server or a dependency from this workspace");
       expect(hub.store.data.agents).toHaveLength(1);
       broker.approve(task.id, change.id, false);
-      await expect(asked).rejects.toThrow("Action not approved");
+      await expect(asked).rejects.toThrow("Not approved: the person said no to this");
       expect(hub.store.data.agents).toHaveLength(1);
     }
     // And with a yes it goes.

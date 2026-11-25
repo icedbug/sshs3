@@ -356,7 +356,10 @@ export interface AgentChangeStructuredCheck {
 export interface ChangeSecretField {
   key: string;
   label: string;
+  /** Left empty, the value already saved is kept. */
   optional?: boolean;
+  /** What leaving it empty means, where nothing is saved yet (a new channel's signing secret). */
+  ifEmpty?: string;
 }
 
 export interface AgentChange {

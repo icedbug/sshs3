@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import "@testing-library/jest-dom/vitest";
 import type { AgentChange, AgentTask, HubRequest, HubSnapshot } from "../../src/shared/types/aiHub";
 import { AiHubPanel } from "../../src/renderer/src/components/AiHub/AiHubPanel";
-import { ChangeReveal, SECRETS_ELSEWHERE } from "../../src/renderer/src/components/AiHub/ChangeSecrets";
+import { ChangeReveal, ChangeSecretInputs, SECRETS_ELSEWHERE } from "../../src/renderer/src/components/AiHub/ChangeSecrets";
 import { InboxView } from "../../src/renderer/src/components/AiHub/InboxView";
 
 /**
@@ -88,6 +88,25 @@ function Panel() {
 }
 
 const sent = (action: string): HubRequest[] => request.mock.calls.map((c) => c[0] as HubRequest).filter((r) => r.action === action);
+
+describe("what an empty field means", () => {
+  it("is said for each field: kept as saved, or what happens without it", () => {
+    render(
+      <ChangeSecretInputs
+        change={{ id: "c9", kind: "setting", target: "sshs3", description: "Add a channel", status: "pending", at: 1,
+          secretFields: [
+            { key: "url", label: "the channel's address (the webhook URL)" },
+            { key: "secret", label: "the secret that signs the webhook", ifEmpty: "Leave it empty to send without a signature." },
+            { key: "token", label: "the API token", optional: true },
+          ] } as AgentChange}
+        values={{}}
+        onChange={() => {}}
+      />,
+    );
+    const card = screen.getByTestId("ai-change-secrets-c9");
+    expect(card).toHaveTextContent("Type the channel's address (the webhook URL)Type the secret that signs the webhook. Leave it empty to send without a signature.Type the API token. Leave it empty to keep the one already saved.");
+  });
+});
 
 describe("a setting that takes a token", () => {
   it("has a hidden field for each on its card in the conversation, and sends them with the approval", async () => {

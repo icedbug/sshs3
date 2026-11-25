@@ -297,18 +297,31 @@ function settingAsk(tool: string, op: string, payload: Record<string, unknown>, 
   }
 
   if (tool === "sshs3_manage_alerts_and_integrations") {
-    if (op === "save_notify_channel")
+    if (op === "save_notify_channel") {
+      // A channel is changed by its name or id. Without one a new channel is added, and nothing is saved yet to keep.
+      const changing = has(payload, "idOrName");
       return {
         title: "Add or change where notifications are sent",
         detail: lines(
           show(payload, ["idOrName", "kind", "name", "enabled", "events", "includeCommand", "alertMinSeverity"]),
-          "What waits for an answer is sent to the address you type below, with the command when includeCommand is on. Left empty, the address already saved is kept.",
+          `What waits for an answer is sent to the address you type below, with the command when includeCommand is on. ${
+            changing ? "Left empty, the address already saved is kept." : "A new channel needs its address."
+          }`,
         ),
         secrets: askFor([
-          { key: "url", label: "the channel's address (the webhook URL)", optional: true },
-          ...(text(payload, "kind").toLowerCase() === "webhook" ? [{ key: "secret", label: "the secret that signs the webhook", optional: true }] : []),
+          changing
+            ? { key: "url", label: "the channel's address (the webhook URL)", optional: true }
+            : { key: "url", label: "the channel's address (the webhook URL)" },
+          ...(text(payload, "kind").toLowerCase() === "webhook"
+            ? [
+                changing
+                  ? { key: "secret", label: "the secret that signs the webhook", optional: true }
+                  : { key: "secret", label: "the secret that signs the webhook", ifEmpty: "Leave it empty to send without a signature." },
+              ]
+            : []),
         ]),
       };
+    }
     if (op === "notify_settings")
       return {
         title: "Change the notification settings",

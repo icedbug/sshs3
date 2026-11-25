@@ -94,6 +94,18 @@ describe("the settings a conversation can change", () => {
     expect(fields("sshs3_manage_team_chat", { operation: "context_connect", service: "slack" })).toEqual(["token"]);
     expect(fields("sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", kind: "slack", name: "ops" })).toEqual(["url"]);
     expect(fields("sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", kind: "webhook", name: "pager" })).toEqual(["url", "secret"]);
+    // Found by the security lead tester: a new channel's card said "Leave it empty to keep the one already
+    // saved", where nothing was saved. A new channel needs its address; a changed one keeps it when left empty.
+    const ask = (payload: Record<string, unknown>) => guardAsk("sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", ...payload }, { mode: "assisted" }, known);
+    expect(ask({ kind: "webhook", name: "pager" })?.secrets).toEqual([
+      { key: "url", label: "the channel's address (the webhook URL)" },
+      { key: "secret", label: "the secret that signs the webhook", ifEmpty: "Leave it empty to send without a signature." },
+    ]);
+    expect(ask({ kind: "webhook", name: "pager" })?.detail).toContain("A new channel needs its address.");
+    expect(ask({ idOrName: "pager", kind: "webhook" })?.secrets).toEqual([
+      { key: "url", label: "the channel's address (the webhook URL)", optional: true },
+      { key: "secret", label: "the secret that signs the webhook", optional: true },
+    ]);
     expect(fields("sshs3_manage_alerts_and_integrations", { operation: "atlassian_connect", product: "jira", baseUrl: "https://acme.atlassian.net" })).toEqual(["token"]);
     expect(fields("sshs3_manage_app_and_settings", { operation: "save_model_profile", name: "fast", provider: "openai-compatible", model: "m" })).toEqual(["apiKey"]);
 
@@ -210,7 +222,7 @@ describe("a secret a setting needs", () => {
     const change = await pending();
     // Declined, with something typed: nothing is kept and nothing is saved.
     await hub.request({ action: "approve", taskId: task.id, changeId: change.id, approved: false, secrets: { apiKey: KEY } });
-    await expect(asked).rejects.toThrow("Action not approved");
+    await expect(asked).rejects.toThrow("Not approved: the person said no to this");
     expect(secrets.size).toBe(0);
     expect((await hub.snapshot()).config.profiles ?? []).toEqual([]);
     // An answer to a change that no longer waits.
@@ -259,10 +271,12 @@ describe("a secret a setting needs", () => {
     // A plain yes, as a shortcut or another list would send it, does not answer a change that takes a secret.
     await expect(run.approve(noAddress.id)).rejects.toThrow("This one takes a token or key. Answer it on its card in the conversation.");
     expect(noAddress.status).toBe("pending");
-    // Its card always says what was typed, also when that is nothing.
-    await run.approve(noAddress.id, {});
-    await expect(first).rejects.toThrow("A new channel needs its address");
-    expect(noAddress.status).toBe("failed");
+    // Its card always says what was typed, also when that is nothing. A new channel's address cannot be left
+    // empty: the answer without it is refused at once, and the card still waits for it.
+    await expect(run.approve(noAddress.id, {})).rejects.toThrow("This one needs the channel's address (the webhook URL). Type it on the approval card in the conversation.");
+    expect(noAddress.status).toBe("pending");
+    await hub.request({ action: "approve", taskId: run.task.id, changeId: noAddress.id, approved: false });
+    await expect(first).rejects.toThrow("Not approved: the person said no to this");
 
     const second = run.call("sshs3_manage_alerts_and_integrations", { operation: "save_notify_channel", kind: "slack", name: "ops", events: ["approval", "alert"] });
     const withAddress = await run.pending();
@@ -422,7 +436,7 @@ describe("what the person approves is what is done", () => {
     expect(collect.description).toBe("Collect facts from servers now");
     expect(collect.command).toContain("serverIdOrName: db-test");
     await hub.request({ action: "approve", taskId: run.task.id, changeId: collect.id, approved: false });
-    await expect(collecting).rejects.toThrow("Action not approved");
+    await expect(collecting).rejects.toThrow("Not approved: the person said no to this");
 
     // A key held to a server says which one, whole, on its card.
     const key = run.call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", idOrName: "k", scopes: ["read"], serverIdOrName: "10.0.0.2" });
@@ -430,7 +444,7 @@ describe("what the person approves is what is done", () => {
     expect(made.command).toContain("name: k");
     expect(made.command).toContain("serverIdOrName: db-test");
     await hub.request({ action: "approve", taskId: run.task.id, changeId: made.id, approved: false });
-    await expect(key).rejects.toThrow("Action not approved");
+    await expect(key).rejects.toThrow("Not approved: the person said no to this");
   });
 
   it("keeps what a change to a connection does not name", async () => {
