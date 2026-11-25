@@ -231,6 +231,46 @@ describe('TerminalView Component', () => {
     expect(mockTerminalKill).toHaveBeenCalledWith('session-123');
   });
 
+  // Found by the feature test: the agent's own check that a file is not there yet ends with exit 1, and
+  // the terminal offered "Explain & fix the error" for it, as if something had gone wrong.
+  describe('the offer to explain a failed command', () => {
+    const failed = '\x1b]133;D;1\x07';
+    const started = async () => {
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+    };
+    const pressEnter = () => {
+      const input = screen.getByTestId('terminal-container').querySelector('textarea');
+      expect(input).not.toBeNull();
+      act(() => {
+        fireEvent.keyDown(input!, { key: 'Enter', code: 'Enter', keyCode: 13 });
+      });
+    };
+
+    it('is made for a command the person ran that failed', async () => {
+      await started();
+      pressEnter();
+      act(() => dataCallback?.('session-123', `ls /nope\r\nls: cannot access '/nope': No such file or directory\r\n${failed}`));
+      expect(screen.getByTestId('terminal-fix-error-btn')).toBeInTheDocument();
+    });
+
+    it('is not made for a command the agent ran, however it ended', async () => {
+      await started();
+      act(() => dataCallback?.('session-123', `test -e /tmp/new-file\r\n${failed}`));
+      expect(screen.queryByTestId('terminal-fix-error-btn')).not.toBeInTheDocument();
+    });
+
+    it('is not made again for the agent once the person\'s own command has ended', async () => {
+      await started();
+      pressEnter();
+      act(() => dataCallback?.('session-123', 'true\r\n\x1b]133;D;0\x07'));
+      act(() => dataCallback?.('session-123', `test -e /tmp/new-file\r\n${failed}`));
+      expect(screen.queryByTestId('terminal-fix-error-btn')).not.toBeInTheDocument();
+    });
+  });
+
   it('renders reconnect overlay and buttons when session terminates under reconnect action', async () => {
     const onCloseTab = vi.fn();
     render(<TerminalView config={sampleConfig} onCloseTab={onCloseTab} sessionExitAction="reconnect" />);

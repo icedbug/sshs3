@@ -1070,6 +1070,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           let inputLineBuffer = '';
           /** When a person last pressed Enter here: error words in output count only shortly after. */
           let lastEnterAt = 0;
+          /**
+           * A command the person ran here has not ended yet. The agent's commands come to the shell
+           * without the person's keys, and its own checks often end with an error on purpose (a file
+           * that must not be there yet): only what the person ran is offered to be explained. Without
+           * shell integration no end is ever seen, and the 20 seconds after Enter decide alone.
+           */
+          let personCommandRunning = false;
           term.onData((data) => {
             const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
             if (sessionIdRef.current && write) {
@@ -1082,6 +1089,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               outputTracker.recordEnter();
               scheduleBlocksRefresh();
               lastEnterAt = Date.now();
+              personCommandRunning = true;
               // A new command: the last one's error chip is stale.
               setTerminalErrorHint(null);
               sudoRetryRef.current.notifyEnter();
@@ -1135,11 +1143,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // A command that ended well clears the chip: the error it pointed at is behind us.
                 // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
                 if (/\x1b\]133;D;0(?:\x07|\x1b\\)/.test(data)) setTerminalErrorHint(null);
+                const personRan = personCommandRunning;
+                // Any end of a command: the person's, if one was running, is over.
+                // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+                if (/\x1b\]133;D(?:;[0-9]*)?(?:\x07|\x1b\\)/.test(data)) personCommandRunning = false;
                 if (
-                  oscExitMatch ||
+                  (oscExitMatch && personRan) ||
                   // Words in output count only right after a person ran something: `tail -f` or a grep that
                   // prints "Permission denied" is not a failed command.
-                  (Date.now() - lastEnterAt < 20_000 &&
+                  (personRan && Date.now() - lastEnterAt < 20_000 &&
                   /(?:command not found|Permission denied|Connection refused|No such file or directory|502 Bad Gateway|CrashLoopBackOff|MountVolume\.SetUp failed|AttachVolume\.Attach failed|snapmirror.*broken-off|HEALTH_ERR|CommandNotFoundException|ParserError|failed \(Result: exit-code\)|ERR!|fatal:)/i.test(
                     data
                   ))
