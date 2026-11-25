@@ -371,6 +371,25 @@ describe("a conversation that cannot be started", () => {
     // The terminal is still the other run's.
     expect(hub.terminals.get("t1")!.owner).toBe("somebody-else");
   });
+
+  // Found by the insider tester: a new message on a terminal whose run waited for an approval only said
+  // that another task owned it, and the person did not see what to do.
+  it("says when the run that holds the terminal waits for a person's answer, and where to give it", async () => {
+    const hub = await makeHub();
+    shell(hub, "t1", "web-01");
+    await hub.terminals.arm("t1", "bash");
+    const waiting = {
+      id: "held", title: "Append a test line on web-01", mode: "assisted", status: "running", messages: [], sources: [],
+      changes: [{ id: "c1", kind: "command", target: "web-01", description: "Append", command: "printf x >> /tmp/f", status: "pending", at: Date.now() }],
+      createdAt: Date.now(), updatedAt: Date.now(), maxCommands: 20, maxMinutes: 15, verification: "not-verified",
+    } as unknown as AgentTask;
+    hub.store.data.tasks.push(waiting);
+    hub.terminals.claim("t1", hub.terminals.get("t1")!.generation, "held");
+    vi.stubGlobal("fetch", vi.fn(async () => say("never asked")));
+    await expect(hub.request({ action: "start", task: { prompt: "Check the shop", mode: "assisted", sessionId: "t1" } })).rejects.toThrow(
+      "Another task owns this terminal: “Append a test line on web-01” waits for your answer in it. Approve or Deny it on the terminal's bar or in the Inbox, or pick another terminal.",
+    );
+  });
 });
 
 describe("a reply in a conversation whose terminal another run has taken", () => {

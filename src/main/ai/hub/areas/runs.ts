@@ -181,8 +181,13 @@ export class RunsPart {
     // took since does run: its agent uses another terminal, or says what waits there.)
     if (terminal?.owner) {
       const other = this.store.data.tasks.find((t) => t.id === terminal.owner);
+      const title = other ? `“${clip(other.title.replace(/\s+/g, " "), 80)}”` : "";
+      // A run that waits for an answer holds its terminal until it gets one: the person is told where to give it.
+      const waits = other && (other.changes.some((c) => c.status === "pending") || other.plan?.status === "proposed");
       throw new Error(
-        `Another task owns this terminal${other ? `: “${clip(other.title.replace(/\s+/g, " "), 80)}” is running in it` : ""}. Pick another terminal, or wait until that run is done.`,
+        waits
+          ? `Another task owns this terminal: ${title} waits for your answer in it. Approve or Deny it on the terminal's bar or in the Inbox, or pick another terminal.`
+          : `Another task owns this terminal${other ? `: ${title} is running in it` : ""}. Pick another terminal, or wait until that run is done.`,
       );
     }
     const now = Date.now();
