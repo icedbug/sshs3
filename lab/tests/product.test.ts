@@ -85,6 +85,15 @@ describe('the product driver', () => {
     expect(plain?.contextWindowTokens).toBe(128_000);
   });
 
+  it("useModel points a Claude model at the lab's proxy, with the run's dummy key", async () => {
+    const { maria } = await product.team();
+    await maria.useModel('claude-sonnet-5-5', 'product-test-claude', `https://${labGateway(lab)}:${proxy.port}`);
+    const config = (await maria.hub({ action: 'snapshot' })).config;
+    expect(config).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-5-5', baseUrl: `https://${labGateway(lab)}:${proxy.port}`, hasApiKey: true });
+    // Back to the fake OpenAI model for the tests after this one.
+    await maria.useModel('fake-1', 'product-test', `https://${labGateway(lab)}:${proxy.port}`);
+  });
+
   it('a lab server cannot use the model proxy', async () => {
     // An agent runs commands on the lab servers: from there the proxy, which spends the real key, is shut.
     const web = lab.servers.find((s) => s.name === 'web-01')!;

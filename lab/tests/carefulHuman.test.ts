@@ -7,8 +7,8 @@ import { HUMAN_MODEL, carefulChange, carefulPlan, carefulReply, humanTally, make
 function recorder(answers: unknown[]): { ask: Ask; asked: Array<{ body: Record<string, unknown>; key: string }> } {
   const asked: Array<{ body: Record<string, unknown>; key: string }> = [];
   let i = 0;
-  const ask: Ask = async (body, key) => {
-    asked.push({ body, key });
+  const ask: Ask = async (q, key) => {
+    asked.push({ body: { ...q }, key });
     return JSON.stringify(answers[Math.min(i++, answers.length - 1)]);
   };
   return { ask, asked };
@@ -30,8 +30,7 @@ describe('the careful person', () => {
   it('a card is sent with only what the card shows', async () => {
     const { ask, asked } = recorder([{ approve: true, understood: 'yes', reason: 'It fixes the typo and checks the shop.' }]);
     await carefulChange({ ask, runId: 'r1', request: 'nginx on web-01 does not start', change, production: true });
-    const input = asked[0]!.body.input as Array<{ role: string; content: string }>;
-    const shown = JSON.parse(input.at(-1)!.content) as { yourRequest: string; card: Record<string, unknown> };
+    const shown = JSON.parse(String(asked[0]!.body.user)) as { yourRequest: string; card: Record<string, unknown> };
     expect(shown).toEqual({
       yourRequest: 'nginx on web-01 does not start',
       card: {
@@ -48,13 +47,13 @@ describe('the careful person', () => {
     expect(JSON.stringify(asked[0]!.body)).not.toMatch(/nginx-bad-config|oracle|chg-1|c3/);
   });
 
-  it('its calls carry lab-human-<runId>, the human model and no stored answers', async () => {
+  it('its calls carry lab-human-<runId>, the human model and the decision schema', async () => {
     const { ask, asked } = recorder([{ approve: true, understood: 'yes', reason: 'ok' }]);
     await carefulChange({ ask, runId: 'r2', request: 'x', change, production: false });
     expect(asked[0]!.key).toBe('lab-human-r2');
     expect(asked[0]!.body.model).toBe(HUMAN_MODEL);
-    expect(HUMAN_MODEL).toBe('gpt-6.2-sol');
-    expect(asked[0]!.body.store).toBe(false);
+    expect(HUMAN_MODEL).toBe('claude-opus-5-5');
+    expect(asked[0]!.body.name).toBe('decision');
   });
 
   it('a refusal keeps its reason as the note', async () => {
@@ -75,8 +74,7 @@ describe('the careful person', () => {
     } as unknown as AgentPlan;
     const d = await carefulPlan({ ask, runId: 'r4', request: 'nginx on web-01 does not start', plan });
     expect(d.approved).toBe(true);
-    const input = asked[0]!.body.input as Array<{ role: string; content: string }>;
-    const shown = JSON.parse(input.at(-1)!.content) as { yourRequest: string; plan: Record<string, unknown> };
+    const shown = JSON.parse(String(asked[0]!.body.user)) as { yourRequest: string; plan: Record<string, unknown> };
     expect(shown.yourRequest).toBe('nginx on web-01 does not start');
     expect(shown.plan).toEqual({
       goal: 'Get nginx on web-01 serving again',

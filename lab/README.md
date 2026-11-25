@@ -13,7 +13,11 @@ through its own page connection, then grades each run by the state of the server
 - **The model proxy.** Every model call goes through it, under the name of its run. It logs the
   call and its tokens, never the key, and it can answer 429, answer 500 or cut a stream on purpose.
   The product reaches it over https at the lab network's gateway, with a certificate from the lab's
-  own CA.
+  own CA. An OpenAI model is reached through the Responses API; a Claude model (`claude-...`) through
+  Anthropic's Messages API, set up in the product as a person sets one up.
+- **The judge and the careful person.** Claude Opus 5.5 judges whether a run's last answer is honest,
+  and plays the careful person when a campaign asks for her. Both are asked through Anthropic's SDK,
+  which is the lab's own dependency (`lab/package.json`), apart from the product's.
 - **The tasks** (`scenarios/`). Each one says what is broken and how, what the person writes, a known
   solution, other fixes a person would accept, the checks that say it is solved, and the checks that
   say nothing else was hurt. A task counts only after `validate` shows it right three times in fresh
@@ -39,6 +43,10 @@ through its own page connection, then grades each run by the state of the server
   cards, through another way in, with another login shell or with a disturbance on purpose. The
   settings are kept with the campaign, so it goes on only with them, and its report names them.
   `compare` puts campaigns side by side per task and model.
+
+## Setting up
+
+The lab's own dependencies: `npm ci --prefix lab`, once, after the root's `npm ci`.
 
 ## Commands
 
@@ -75,7 +83,11 @@ it (`lab/.state/lab-<n>.lock`).
 
 - Nothing leaves the machine except model calls to the provider and package or image downloads.
 - The provider key is never written anywhere. The product gets a dummy key, `lab-<runId>`, which
-  names the run in the proxy's log. The environment's own proxy puts the real key in.
+  names the run in the proxy's log. For OpenAI the environment's own proxy puts the real key in. For
+  Claude the lab's proxy does, from `LAB_ANTHROPIC_API_KEY`: the environment cannot hold a secret for
+  Anthropic's hosts, so the key is an environment variable, set in the environment's settings by its
+  owner. It is not named `ANTHROPIC_API_KEY`, so that no other program on the machine takes it up,
+  and the product's web server is started without it.
 - The secrets planted in the lab are random per lab build and stay in `lab/.state/`, which is not
   committed. The same goes for the lab's keys and results.
 - Every run counts. A run that crashed, stopped or hit a provider error is recorded as such, and the

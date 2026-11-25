@@ -161,6 +161,17 @@ function makeAccount(product: { dataDir: string }, user: { id: string; username:
     events: session.events,
 
     async useModel(model, runId, proxyUrl, settings) {
+      const tuning = {
+        ...(settings?.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+        ...(settings?.contextWindowTokens ? { contextWindowTokens: settings.contextWindowTokens } : {}),
+      };
+      // A Claude model as a person sets one up: the Anthropic provider, here at the lab's proxy, with the
+      // run's dummy key, which the proxy swaps for the lab's own. Anthropic has no embeddings: the
+      // knowledge base then searches by words, as it does for any Claude user.
+      if (model.startsWith('claude-')) {
+        await hub({ action: 'configure', config: { enabled: true, provider: 'anthropic', model, baseUrl: proxyUrl, apiKey: `lab-${runId}`, ...tuning } });
+        return;
+      }
       await hub({
         action: 'configure',
         config: {
@@ -173,8 +184,7 @@ function makeAccount(product: { dataDir: string }, user: { id: string; username:
           apiProtocol: 'responses',
           apiKey: `lab-${runId}`,
           embeddingModel: EMBEDDING_MODEL,
-          ...(settings?.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-          ...(settings?.contextWindowTokens ? { contextWindowTokens: settings.contextWindowTokens } : {}),
+          ...tuning,
         },
       });
     },
@@ -300,6 +310,19 @@ export async function builtProduct(expectCommit: string): Promise<{ sourceCommit
   return { sourceCommit: stamp.sourceCommit, builtAt: stamp.builtAt ?? '' };
 }
 
+/**
+ * What the web server must not have of the lab's environment: the way out through the environment's
+ * proxy (it talks only to the lab), and every real model key. The product gets a dummy key per run;
+ * the lab's proxy alone holds the real ones.
+ */
+const WITHHELD = ['NODE_USE_ENV_PROXY', 'LAB_ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY'];
+
+export function productEnv(base: NodeJS.ProcessEnv, own: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) if (v !== undefined && !WITHHELD.includes(k)) env[k] = v;
+  return { ...env, ...own };
+}
+
 export async function startProduct(opts: { dataDir: string; port: number; env?: Record<string, string>; expectCommit?: string }): Promise<Product> {
   const build = opts.expectCommit ? await builtProduct(opts.expectCommit) : await productBuild();
   const node = await productNode();
@@ -307,12 +330,9 @@ export async function startProduct(opts: { dataDir: string; port: number; env?: 
   const port = opts.port || (await freePort());
   const baseUrl = `http://127.0.0.1:${port}`;
   let log = '';
-  // The web server talks only to the lab: never through the environment's proxy to the internet.
-  const { NODE_USE_ENV_PROXY: _ignored, ...ownEnv } = process.env;
   const child = spawn(node.path, [SERVER], {
     cwd: REPO,
-    env: {
-      ...ownEnv,
+    env: productEnv(process.env, {
       SSHS3_DATA_DIR: opts.dataDir,
       SSHS3_WEB_PORT: String(port),
       SSHS3_WEB_HOST: '127.0.0.1',
@@ -320,7 +340,7 @@ export async function startProduct(opts: { dataDir: string; port: number; env?: 
       // The lab's CA: the model proxy answers over https with a certificate it signed.
       NODE_EXTRA_CA_CERTS: await trustBundle(),
       ...opts.env,
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const keep = (c: Buffer) => (log = (log + c.toString()).slice(-20_000));

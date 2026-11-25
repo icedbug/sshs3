@@ -1,9 +1,7 @@
-import fs from 'node:fs/promises';
 import type { AgentChange, AgentPlan, AgentTask } from '../../src/shared/types/aiHub';
 import { decideChange, decidePlan, type Decision } from './approver';
-import { JudgeUnavailable, outputText, post, withRetries } from './judge';
+import { askerFor, type Asker } from './llm';
 import type { Scenario } from './scenario';
-import { labTls } from './tls';
 import type { Variant } from './variant';
 
 /**
@@ -13,7 +11,8 @@ import type { Variant } from './variant';
  * questions, as the person who asked, with only what her request said.
  */
 
-export const HUMAN_MODEL = 'gpt-6.2-sol';
+/** Claude Opus 5.5: the lab's models are Claude's since the OpenAI account ran dry (2026-11-25). */
+export const HUMAN_MODEL = 'claude-opus-5-5';
 
 export interface HumanDecision extends Decision {
   understood: 'yes' | 'partly' | 'no';
@@ -31,8 +30,8 @@ export interface HumanRecord {
   text?: string;
 }
 
-/** How she reaches a model: the body of a Responses call and its key; the answer's text comes back. */
-export type Ask = (body: Record<string, unknown>, key: string) => Promise<string>;
+/** How she reaches a model (llm.ts): a question with the answer's shape, and the key that names her calls. */
+export type Ask = Asker;
 
 /** Questions she answers in one run at most: a run that only asks is not carried by her. */
 export const MAX_REPLIES = 3;
@@ -99,15 +98,7 @@ function planOf(plan: AgentPlan): Record<string, unknown> {
 
 async function decide(o: { ask: Ask; runId: string; request: string; shown: Record<string, unknown>; model?: string }): Promise<HumanDecision> {
   const text = await o.ask(
-    {
-      model: o.model ?? HUMAN_MODEL,
-      store: false,
-      input: [
-        { role: 'developer', content: CARD_BRIEF },
-        { role: 'user', content: JSON.stringify({ yourRequest: o.request, ...o.shown }) },
-      ],
-      text: { format: { type: 'json_schema', name: 'decision', strict: true, schema: DECISION_SCHEMA } },
-    },
+    { model: o.model ?? HUMAN_MODEL, system: CARD_BRIEF, user: JSON.stringify({ yourRequest: o.request, ...o.shown }), name: 'decision', schema: DECISION_SCHEMA, effort: 'medium' },
     `lab-human-${o.runId}`,
   );
   let parsed: { approve?: unknown; understood?: unknown; reason?: unknown } = {};
@@ -132,15 +123,7 @@ export function carefulPlan(o: { ask: Ask; runId: string; request: string; plan:
 
 export async function carefulReply(o: { ask: Ask; runId: string; request: string; question: string; model?: string }): Promise<string> {
   const text = await o.ask(
-    {
-      model: o.model ?? HUMAN_MODEL,
-      store: false,
-      input: [
-        { role: 'developer', content: REPLY_BRIEF },
-        { role: 'user', content: JSON.stringify({ yourRequest: o.request, question: o.question }) },
-      ],
-      text: { format: { type: 'json_schema', name: 'reply', strict: true, schema: REPLY_SCHEMA } },
-    },
+    { model: o.model ?? HUMAN_MODEL, system: REPLY_BRIEF, user: JSON.stringify({ yourRequest: o.request, question: o.question }), name: 'reply', schema: REPLY_SCHEMA, effort: 'medium' },
     `lab-human-${o.runId}`,
   );
   let answer = '';
@@ -181,20 +164,9 @@ export function humanTally(records: HumanRecord[]): { cards: number; understood:
   };
 }
 
-/** Her model through the lab's proxy, asked again after a rate limit, a server error or no connection. */
-export function proxyAsk(proxyUrl: string): Ask {
-  let ca: string | undefined;
-  return async (body, key) => {
-    ca ??= await fs.readFile((await labTls()).caPath, 'utf8');
-    return withRetries(async () => {
-      const answer = await post(`${proxyUrl}/v1/responses`, JSON.stringify(body), { Authorization: `Bearer ${key}` }, ca!).catch((error: unknown) => {
-        throw new JudgeUnavailable(0, `The careful person's model could not be reached: ${error instanceof Error ? error.message : String(error)}`);
-      });
-      if (answer.status === 429 || answer.status >= 500) throw new JudgeUnavailable(answer.status, `The careful person's model could not answer (${answer.status}): ${answer.text.slice(0, 300)}`);
-      if (answer.status !== 200) throw new Error(`The careful person's model could not answer (${answer.status}): ${answer.text.slice(0, 300)}`);
-      return outputText(answer.text) ?? '';
-    });
-  };
+/** Her model: Claude through Anthropic's SDK, another model through the lab's proxy (llm.ts). */
+export function humanAsker(proxyUrl: string, model: string = HUMAN_MODEL): Ask {
+  return askerFor(model, proxyUrl);
 }
 
 /** The lab's people in one run: who decides each card and plan, and who answers the agent's questions. */

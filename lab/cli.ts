@@ -15,12 +15,12 @@ import path from 'node:path';
 import { CALIBRATION } from './calibration/cards';
 import { CANDIDATES, SCENARIOS } from './scenarios';
 import { loadQueue, runCampaign } from './src/campaign';
-import { HUMAN_MODEL, carefulChange, proxyAsk } from './src/carefulHuman';
+import { HUMAN_MODEL, carefulChange, humanAsker } from './src/carefulHuman';
 import { compareCampaigns } from './src/compare';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { judgeHonesty } from './src/judge';
 import { takeLock } from './src/lock';
-import { startModelProxy } from './src/modelProxy';
+import { ANTHROPIC_ROUTE, startModelProxy } from './src/modelProxy';
 import { startProduct } from './src/product';
 import { regradeRun } from './src/regrade';
 import { buildReport } from './src/report';
@@ -92,7 +92,7 @@ async function run(): Promise<void> {
   const variant = variantFlags();
   // The run resets the lab first: the last run may have left it broken.
   await labUp(n, { waitHealthy: false });
-  const proxy = await startModelProxy({ port: 0, host: '0.0.0.0', tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
+  const proxy = await startModelProxy({ port: 0, host: '0.0.0.0', tls: await labTls(), upstream: 'https://api.openai.com', anthropic: ANTHROPIC_ROUTE, logDir: path.join(resultsDir(), '_proxy') });
   const dataDir = path.join(STATE_DIR, 'products', `${new Date().toISOString().replace(/[-:.]/g, '')}-${scenario.id}`);
   await fs.mkdir(dataDir, { recursive: true });
   const product = await startProduct({ dataDir, port: 0 });
@@ -156,7 +156,7 @@ async function regrade(): Promise<void> {
   const q = await loadQueue(name);
   const only = flag('runs')?.split(',').filter(Boolean);
   const why = flag('why');
-  const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
+  const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', anthropic: ANTHROPIC_ROUTE, logDir: path.join(resultsDir(), '_proxy') });
   try {
     for (const entry of q.entries) {
       if (!entry.dir || (only && !only.includes(entry.runId ?? ''))) continue;
@@ -193,10 +193,10 @@ async function calibrate(): Promise<void> {
   const model = flag('model') ?? HUMAN_MODEL;
   const times = Number(flag('times') ?? 3);
   if (!Number.isInteger(times) || times < 1) throw new Error(`--times is a whole number of at least 1, not "${flag('times')}".`);
-  const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
+  const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', anthropic: ANTHROPIC_ROUTE, logDir: path.join(resultsDir(), '_proxy') });
   let worst = CALIBRATION.cards.length;
   try {
-    const ask = proxyAsk(proxy.url);
+    const ask = humanAsker(proxy.url, model);
     for (let round = 1; round <= times; round++) {
       let right = 0;
       for (const card of CALIBRATION.cards) {

@@ -97,6 +97,9 @@ export interface ModelProxy {
 
 const RESPONSE_KEPT = 2 * 1024 * 1024;
 
+/** Claude's route for the lab's proxies: Anthropic's API, with the lab's own key from LAB_ANTHROPIC_API_KEY. */
+export const ANTHROPIC_ROUTE = { upstream: 'https://api.anthropic.com', key: (): string | undefined => process.env.LAB_ANTHROPIC_API_KEY || undefined };
+
 /**
  * The usage the provider reported, from a JSON answer or from the events of a streamed one. OpenAI:
  * the last usage wins, its input counts the cached part too. Anthropic: the start of the message and

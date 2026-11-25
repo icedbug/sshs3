@@ -4,7 +4,7 @@ import { SCENARIOS } from '../scenarios';
 import type { CampaignDeps } from './campaign';
 import { labUp } from './lab';
 import { takeLock } from './lock';
-import { startModelProxy } from './modelProxy';
+import { ANTHROPIC_ROUTE, startModelProxy } from './modelProxy';
 import { productBuild, startProduct } from './product';
 import { resultsDir, runOne } from './run';
 import { STATE_DIR } from './ssh';
@@ -15,7 +15,7 @@ import { labTls } from './tls';
  * server for each run, so that nothing one run left in the product (memory, learning) reaches the next.
  */
 export async function defaultDeps(): Promise<CampaignDeps> {
-  const proxy = await startModelProxy({ port: 0, host: '0.0.0.0', tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
+  const proxy = await startModelProxy({ port: 0, host: '0.0.0.0', tls: await labTls(), upstream: 'https://api.openai.com', anthropic: ANTHROPIC_ROUTE, logDir: path.join(resultsDir(), '_proxy') });
   return {
     scenarios: SCENARIOS.map((s) => ({ id: s.id, group: s.group, ...(s.injected?.length ? { injects: true } : {}) })),
     freeBytes: async (dir) => {

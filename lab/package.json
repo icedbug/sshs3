@@ -1,0 +1,9 @@
+{
+  "name": "sshs3-lab",
+  "private": true,
+  "type": "module",
+  "description": "The test lab's own dependencies, kept apart from the product's: a dependency of the lab must not change the product under test, whose build is pinned by package.json at the root.",
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.12.0"
+  }
+}

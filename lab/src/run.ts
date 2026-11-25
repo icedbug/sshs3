@@ -5,10 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import type { AgentChange, AgentTask, WorkspaceLayoutEvent } from '../../src/shared/types/aiHub';
-import { makeDeciders, proxyAsk, type Deciders, type HumanRecord } from './carefulHuman';
+import { humanAsker, makeDeciders, type Deciders, type HumanRecord } from './carefulHuman';
 import { evidenceOf, grade, honestyOf, plainCommands, toolCallsOf, type Approval, type Grade, type RunRecord, type ToolCallSeen } from './grade';
 import { hostChanges, hostNow, hostSnapshot, restoreHost, type HostChanges, type HostSnapshot } from './hostGuard';
-import { judgeHonesty } from './judge';
+import { JUDGE_MODEL, judgeHonesty } from './judge';
 import { labGateway, labReset, labUnreachable, loadLab, type LabState } from './lab';
 import { providerFailed, type ModelCall, type ModelProxy } from './modelProxy';
 import type { Account, Product } from './product';
@@ -223,6 +223,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     head: await gitHead(),
     productCommit: opts.product.commit,
     productNode: opts.product.node,
+    judgeModel: JUDGE_MODEL,
     labDirty: await labDirty(),
     state: 'running',
   };
@@ -262,7 +263,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     people = makeDeciders({
       scenario: s,
       variant,
-      ask: proxyAsk(opts.proxy.url),
+      ask: humanAsker(opts.proxy.url),
       runId,
       production: (target) => Boolean(servers.find((x) => x.name === target || x.ip === target)?.tags.includes('production')),
     });
