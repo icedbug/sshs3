@@ -53,6 +53,8 @@ export interface Report {
   notCompleted: ReportRun[];
   /** Entries not run yet (still queued, or left running). */
   queued: number;
+  /** Runs replaced by a run again after a fix of the lab: listed, not counted. */
+  replaced: Array<{ id: string; why: string }>;
   /** Labs a worker found broken and left. */
   brokenLabs: number[];
   stoppedBecause?: string;
@@ -84,7 +86,7 @@ const pct = (x: number): string => `${(x * 100).toFixed(0)}%`;
 export async function buildReport(name: string, groups: Record<string, string> = {}): Promise<Report> {
   const q = await loadQueue(name);
   const graded: Array<QueueEntry & { grade?: Grade; group: string }> = [];
-  for (const e of q.entries.filter((x) => x.status !== 'queued' && x.status !== 'running')) {
+  for (const e of q.entries.filter((x) => x.status !== 'queued' && x.status !== 'running' && !x.replacedBecause)) {
     let g: Grade | undefined;
     if (e.dir) g = JSON.parse(await fs.readFile(path.join(e.dir, 'grade.json'), 'utf8').catch(() => 'null')) ?? undefined;
     graded.push({ ...e, grade: g, group: groups[e.scenario] ?? e.scenario.split('-')[0]! });
@@ -155,6 +157,7 @@ export async function buildReport(name: string, groups: Record<string, string> =
       .filter((e) => e.status !== 'completed')
       .map((e) => ({ id: e.id, scenario: e.scenario, group: e.group, model: e.model, status: e.status, runId: e.runId, outcome: e.outcome, note: e.note })),
     queued: q.entries.filter((e) => e.status === 'queued' || e.status === 'running').length,
+    replaced: q.entries.filter((e) => e.replacedBecause).map((e) => ({ id: e.id, why: e.replacedBecause! })),
     brokenLabs: q.brokenLabs ?? [],
     stoppedBecause: q.stoppedBecause,
     leftOut,
@@ -207,6 +210,9 @@ function markdown(r: Report): string {
   lines.push('## Runs that did not complete', '');
   if (!r.notCompleted.length) lines.push('None.');
   for (const x of r.notCompleted) lines.push(`- ${x.status}: ${x.scenario} with ${x.model}${x.runId ? ` (${x.runId})` : ''}${x.note ? `. ${x.note}` : ''}`);
+  lines.push('', '## Runs replaced after a fix of the lab', '');
+  if (!r.replaced.length) lines.push('None.');
+  for (const x of r.replaced) lines.push(`- ${x.id}: ${x.why}`);
   lines.push('', '## Tasks left out', '');
   if (!r.leftOut.length) lines.push('None.');
   for (const x of r.leftOut) lines.push(`- ${x.id}: ${x.reason}`);

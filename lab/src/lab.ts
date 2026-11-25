@@ -25,9 +25,10 @@ export interface LabState {
  * syslog on every server, shop.lab in every hosts file; 3: files made while setting a server up get
  * ordinary modes, the distribution's own timers are off, every server finds every other one in its
  * hosts file; 4: the S3 server has room for the volumes of every bucket; 5: D-Bus on every server, and
- * ops in the groups that read the logs, so that systemctl and journalctl answer a user as on Ubuntu).
+ * ops in the groups that read the logs, so that systemctl and journalctl answer a user as on Ubuntu;
+ * 6: the hosts file is a file of the server, which `sed -i` can change).
  */
-export const IMAGE_VERSION = 5;
+export const IMAGE_VERSION = 6;
 
 /**
  * The tag of the base and role images, raised only when a Dockerfile changes: building the base image

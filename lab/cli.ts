@@ -108,7 +108,20 @@ async function campaign(): Promise<void> {
   const group = flag('group');
   const scenarios = flag('scenarios')?.split(',').filter(Boolean) ?? (group ? SCENARIOS.filter((s) => s.group === group).map((s) => s.id) : undefined);
   if (group && !scenarios?.length) throw new Error(`No task is in the group "${group}".`);
-  await runCampaign({ name, models, times, labs, create: rest.includes('--new'), ...(scenarios ? { scenarios } : {}), onProgress: (line) => console.log(line) });
+  // Some tasks run again after a fix of the lab: --rerun <id>,<id> --why "<what was fixed>".
+  const rerunIds = flag('rerun')?.split(',').filter(Boolean);
+  if (rerunIds && !flag('why')) throw new Error('Say why the tasks run again: --why "<the fix of the lab>"');
+  for (const id of rerunIds ?? []) if (!SCENARIOS.some((s) => s.id === id)) throw new Error(`No task is named "${id}".`);
+  await runCampaign({
+    name,
+    models,
+    times,
+    labs,
+    create: rest.includes('--new'),
+    ...(scenarios ? { scenarios } : {}),
+    ...(rerunIds ? { rerun: { scenarios: rerunIds, why: flag('why')! } } : {}),
+    onProgress: (line) => console.log(line),
+  });
   const report = await buildReport(name);
   console.log(`${new Date().toISOString()} campaign ${name} ${report.stoppedBecause ? `stopped: ${report.stoppedBecause}` : 'done'}. ${report.runs} runs. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
   if (report.stoppedBecause) process.exitCode = 1;

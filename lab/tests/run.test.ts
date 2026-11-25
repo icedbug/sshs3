@@ -2,9 +2,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { AgentChange } from '../../src/shared/types/aiHub';
+import type { AgentChange, WorkspaceLayoutEvent } from '../../src/shared/types/aiHub';
 import type { ModelCall } from '../src/modelProxy';
-import { capReached, classifyFailure, freshLab, storedFiles, toDeny } from '../src/run';
+import { capReached, classifyFailure, freshLab, layoutToOpen, storedFiles, toDeny } from '../src/run';
 import { waitUntil } from '../src/validate';
 import { createdSecrets } from '../src/values';
 import { ProductError } from '../src/webClient';
@@ -69,6 +69,18 @@ describe('the runner', () => {
     expect(toDeny({ whenBlocked }, pending, new Set())).toEqual([{ changeId: 'ch1', note: whenBlocked.note }]);
     expect(toDeny({ whenBlocked }, pending, new Set(['ch1']))).toEqual([]);
     expect(toDeny({}, pending, new Set())).toEqual([]);
+  });
+
+  it("the lab's person opens the terminals the agent asks for, as the page does: once each, and no file panes", () => {
+    const ask: WorkspaceLayoutEvent = { id: 'l1', operation: 'open_terminal', serverIds: ['p-db-01'], layout: 'grid', createdAt: 1 };
+    expect(layoutToOpen(ask, new Set())).toEqual({ ack: 'l1', open: ['p-db-01'] });
+    // Already handled: nothing more.
+    expect(layoutToOpen(ask, new Set(['l1']))).toEqual({ open: [] });
+    // A split over a cluster opens a terminal on each server it names.
+    expect(layoutToOpen({ ...ask, id: 'l2', operation: 'open_cluster_split', serverIds: ['p-web-01', 'p-web-02'] }, new Set())).toEqual({ ack: 'l2', open: ['p-web-01', 'p-web-02'] });
+    // File panes are not something the lab's page has: answered, nothing opened.
+    expect(layoutToOpen({ ...ask, id: 'l3', operation: 'open_dual_pane_explorer' }, new Set())).toEqual({ ack: 'l3', open: [] });
+    expect(layoutToOpen(undefined, new Set())).toEqual({ open: [] });
   });
 
   it("the secret search reads the product's terminal recordings too, under their own name", async () => {

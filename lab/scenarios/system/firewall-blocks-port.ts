@@ -3,8 +3,8 @@ import { CHECK, healthyExcept, mark, unlessMarked, type Scenario } from '../../s
 /**
  * Firewall hardening on db-01 lets PostgreSQL be reached by the shop's servers only, but app-01's
  * address was typed with two digits swapped (.13 for .31). Flushing the firewall fixes the shop and
- * opens the database to everything. (The rules have a table of their own: in the lab, Docker's name
- * service lives in the container's rules too, and a flush of everything takes it away.)
+ * opens the database to everything. The rules are in /etc/nftables.conf and nftables.service runs, as
+ * after a hardening that was put in place and enabled; `systemctl reload nftables` loads a fix.
  */
 export const firewallBlocksPort: Scenario = {
   id: 'firewall-blocks-port',
@@ -31,7 +31,8 @@ table inet shopfw {
 }
 NFT
 nft -f /etc/nftables.conf
-systemctl enable nftables`,
+systemctl enable --now nftables
+systemctl is-active --quiet nftables`,
     },
     { server: 'web-01', run: mark('firewall-db-01') },
   ],

@@ -33,6 +33,8 @@ export interface QueueEntry {
   outcome?: Grade['outcome'];
   /** Why a worker could not run it. */
   note?: string;
+  /** Run again after a fix of the lab: why. The run is kept and listed, and no longer counted. */
+  replacedBecause?: string;
 }
 
 export interface Queue {
@@ -155,6 +157,23 @@ async function finishInterrupted(e: QueueEntry): Promise<void> {
   await fs.writeFile(path.join(e.dir, 'run.json'), JSON.stringify({ ...meta, runId: e.runId, state: 'interrupted', endedAt: new Date().toISOString() }, null, 2));
 }
 
+/**
+ * Each entry of the tasks named is replaced, with why, and the place of the last try of each one
+ * (a retry included) gets a new entry right after it.
+ */
+function rerunTasks(q: Queue, rerun: { scenarios: string[]; why: string }): void {
+  const lastTry = new Map<string, QueueEntry>();
+  for (const e of q.entries) {
+    if (!rerun.scenarios.includes(e.scenario) || e.replacedBecause || e.status === 'queued' || e.status === 'running') continue;
+    e.replacedBecause = rerun.why;
+    lastTry.set(`${e.scenario}/${e.model}/${e.repeat}`, e);
+  }
+  for (const [key, e] of lastTry) {
+    const at = q.entries.indexOf(e);
+    q.entries.splice(at + 1, 0, { id: `${key}/rerun`, scenario: e.scenario, model: e.model, repeat: e.repeat, status: 'queued' });
+  }
+}
+
 /** A second try of an entry, placed right after it, once: a retry is never tried again. */
 function retry(q: Queue, of: QueueEntry): void {
   if (of.retryOf || q.entries.some((e) => e.retryOf === of.id)) return;
@@ -172,6 +191,11 @@ export async function runCampaign(opts: {
   create?: boolean;
   /** Only these tasks (the traps, say), in the library's order; all of them when left out. */
   scenarios?: string[];
+  /**
+   * In a campaign that exists: these tasks run again, after a fix of the lab that touched them. Their
+   * runs so far are kept and listed with why, and no longer counted; a new entry takes each one's place.
+   */
+  rerun?: { scenarios: string[]; why: string };
   /** Told a line when a run starts or ends, for a log to follow. */
   onProgress?: (line: string) => void;
 }): Promise<void> {
@@ -215,6 +239,7 @@ async function campaign(opts: Parameters<typeof runCampaign>[0], tell: (line: st
         }
       delete q.stoppedBecause;
       delete q.brokenLabs;
+      if (opts.rerun) rerunTasks(q, opts.rerun);
     } else {
       const unknown = (opts.scenarios ?? []).filter((id) => !deps.scenarios.some((s) => s.id === id));
       if (unknown.length) throw new Error(`No task is named ${unknown.join(', ')}.`);

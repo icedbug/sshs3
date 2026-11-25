@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import type { AgentChange, AgentTask } from '../../src/shared/types/aiHub';
+import type { AgentChange, AgentTask, WorkspaceLayoutEvent } from '../../src/shared/types/aiHub';
 import { decideChange, decidePlan } from './approver';
 import { evidenceOf, grade, honestyOf, plainCommands, toolCallsOf, type Approval, type Grade, type RunRecord, type ToolCallSeen } from './grade';
 import { hostChanges, hostNow, hostSnapshot, restoreHost, type HostChanges, type HostSnapshot } from './hostGuard';
@@ -74,6 +74,17 @@ export async function freshLab(reset: () => Promise<string[]>): Promise<{ ok: tr
 export function classifyFailure(error: unknown, conversationStarted: boolean): { productFailure?: string; harnessError?: string } {
   const message = error instanceof Error ? error.message : String(error);
   return error instanceof ProductError && conversationStarted ? { productFailure: message } : { harnessError: message };
+}
+
+/**
+ * What the person's page does with a layout the agent asked for (sshs3_workspace_layout): it answers
+ * it once and opens a terminal on each server it names, so the agent can aim a change card at it by
+ * its session. File panes the lab's page does not have: those are answered, nothing opened.
+ */
+export function layoutToOpen(event: Pick<WorkspaceLayoutEvent, 'id' | 'operation' | 'serverIds'> | undefined, handled: Set<string>): { ack?: string; open: string[] } {
+  if (!event || handled.has(event.id)) return { open: [] };
+  const opens = event.operation === 'open_terminal' || event.operation === 'open_cluster_split';
+  return { ack: event.id, open: opens ? [...event.serverIds] : [] };
 }
 
 /** The waiting changes the person denies, with the task's words, because nobody in the lab may approve them. */
@@ -216,6 +227,8 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
   const approvals: Approval[] = [];
   const refusedAnswers: string[] = [];
   const denied = new Set<string>();
+  const layoutsHandled = new Set<string>();
+  const openedTerminals: Array<{ server: string; sessionId?: string; error?: string }> = [];
   let hostBefore: HostSnapshot | undefined;
 
   try {
@@ -276,6 +289,20 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     for (;;) {
       await sleep(1500);
       task = await account.task(taskId);
+      // The person's page opens the terminals the agent asks for (sshs3_workspace_layout), so that a
+      // change card can be aimed at another server by its session, as in the browser.
+      const layout = layoutToOpen((await account.hub({ action: 'snapshot' })).pendingLayoutEvent, layoutsHandled);
+      if (layout.ack) {
+        layoutsHandled.add(layout.ack);
+        await account.hub({ action: 'layout-event-ack', id: layout.ack }).catch(() => {});
+        for (const server of layout.open) {
+          try {
+            openedTerminals.push({ server, sessionId: await account.openTerminal(server) });
+          } catch (error) {
+            openedTerminals.push({ server, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+      }
       // Something the lab's people can still answer.
       let open = false;
       let answeredNow = false;
@@ -417,6 +444,8 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     unreachable,
     // This machine's kernel settings or clock changed during the run (by this run, or by another lab's).
     ...(hostChanged.sysctl.length || hostChanged.clockShiftMs ? { hostChanged } : {}),
+    // Terminals the person's page opened because the agent asked for them.
+    ...(openedTerminals.length ? { openedTerminals } : {}),
     // The names of the secrets the run made, searched for like the planted ones (never their values).
     madeSecrets: Object.keys(made),
     askedAndWaited: asked,

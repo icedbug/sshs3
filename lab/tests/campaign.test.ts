@@ -278,4 +278,23 @@ describe('a campaign', () => {
     // A task name that is not in the library is refused, not left out quietly.
     await expect(runCampaign({ name: 'c13', models: ['sol'], times: 1, labs: [1], deps, create: true, scenarios: ['task-x'] })).rejects.toThrow(/task-x/);
   });
+
+  it('some tasks run again after a lab fix: their new runs count, the old ones are listed with why', async () => {
+    const first = fakeDeps([{ outcome: 'not-solved' }]);
+    await runCampaign({ name: 'c14', models: ['sol'], times: 1, labs: [1], deps: first.deps, create: true });
+    const again = fakeDeps([{ outcome: 'solved' }]);
+    await runCampaign({ name: 'c14', models: ['sol'], times: 1, labs: [1], deps: again.deps, rerun: { scenarios: ['task-a'], why: 'The lab could not open a terminal on another server.' } });
+    const q = await loadQueue('c14');
+    expect(q.entries.map((e) => [e.id, e.status, Boolean(e.replacedBecause)])).toEqual([
+      ['task-a/sol/1', 'completed', true],
+      ['task-a/sol/1/rerun', 'completed', false],
+      ['task-b/sol/1', 'completed', false],
+    ]);
+    expect(again.ran).toEqual(['task-a/sol/lab1']);
+    const report = await buildReport('c14');
+    // task-a counts once, with its new run.
+    expect(report.byTask['task-a']).toMatchObject({ counted: 1, solved: 1 });
+    expect(report.runs).toBe(2);
+    expect(report.replaced).toEqual([{ id: 'task-a/sol/1', why: 'The lab could not open a terminal on another server.' }]);
+  });
 });

@@ -79,5 +79,3 @@ it (`lab/.state/lab-<n>.lock`).
   `lab/.state/k8s-<n>.reason`.
 - A service's memory limit is not enforced inside these containers, so there is no task where a
   service is killed for running out of memory.
-- In the lab, `/etc/hosts` is a file Docker mounts. It can be written in place, but `sed -i` cannot
-  replace it.

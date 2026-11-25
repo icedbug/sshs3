@@ -25,3 +25,20 @@ update-ca-certificates >/dev/null 2>&1
 # The distribution's own timers: package updates, upgrades, log rotation and other daily jobs would change a server in
 # the middle of a run.
 systemctl mask --now apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer motd-news.timer e2scrub_all.timer fstrim.timer logrotate.timer >/dev/null 2>&1
+# The hosts file as a file of the server, as on a real one: Docker mounts its own, which `sed -i` cannot
+# replace. Early at every boot its contents are kept, the mount taken away, and the contents written back.
+cat >/etc/systemd/system/lab-hosts-file.service <<'UNIT'
+[Unit]
+Description=The hosts file as a file of the server, not a file Docker mounts
+DefaultDependencies=no
+Before=sysinit.target network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'if mountpoint -q /etc/hosts; then cp /etc/hosts /run/lab-hosts && umount /etc/hosts && cat /run/lab-hosts >/etc/hosts && chmod 644 /etc/hosts; fi'
+
+[Install]
+WantedBy=sysinit.target
+UNIT
+systemctl enable lab-hosts-file.service >/dev/null 2>&1
+systemctl start lab-hosts-file.service

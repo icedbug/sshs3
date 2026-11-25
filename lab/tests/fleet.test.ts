@@ -68,6 +68,15 @@ describe('the lab fleet', () => {
     expect(r.stdout).not.toContain('not seeing messages from other users');
   });
 
+  it('the hosts file is a file of the server, so sed -i can change it as on a real one', async () => {
+    // Docker mounts /etc/hosts into a container: `sed -i` then fails with "Device or resource busy", and
+    // an agent that fixed a hosts entry the usual way was graded not solved.
+    for (const s of lab.servers.filter((x) => x.role !== 's3')) {
+      const r = await exec(s.ip, "sed -i 's/^# lab-probe$//' /etc/hosts && ! mountpoint -q /etc/hosts && getent -s files hosts db-01");
+      expect(r.code, `${s.name}: ${r.stdout}${r.stderr}`).toBe(0);
+    }
+  });
+
   it('S3 has room for every bucket to grow its volumes', async () => {
     // SeaweedFS grows 7 volumes at a time for a bucket that has none, and its default ceiling follows the
     // machine's free disk: with three buckets in use there was no room left for the backups bucket.

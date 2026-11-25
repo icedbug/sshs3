@@ -2,8 +2,7 @@ import { CHECK, healthyExcept, type Scenario } from '../../src/scenario';
 
 /**
  * app-01's /etc/hosts line for db-01, changed during a migration, points at an address where nothing
- * runs. db-01 itself is fine. (In the lab /etc/hosts is a file Docker mounts: it is written in place,
- * not replaced, so `sed -i` refuses it and `cat >` or an editor works.)
+ * runs. db-01 itself is fine.
  */
 export const dnsWrongHost: Scenario = {
   id: 'dns-wrong-host',
