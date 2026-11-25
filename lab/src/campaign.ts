@@ -5,6 +5,7 @@ import { takeLock } from './lock';
 import type { ModelCall } from './modelProxy';
 import type { RunResult } from './run';
 import { makeRunId, resultsDir } from './run';
+import { normalVariant, variantKey, type Variant } from './variant';
 
 /**
  * A campaign: every task, with every model, a number of times, run by one worker per lab. Its queue is
@@ -51,6 +52,8 @@ export interface Queue {
   stoppedBecause?: string;
   /** Labs a worker found broken (not healthy after a second reset), and left. */
   brokenLabs?: number[];
+  /** How every run of the campaign differs from a plain run (variant.ts); none for a plain campaign. */
+  variant?: Variant;
 }
 
 export interface CampaignDeps {
@@ -63,7 +66,7 @@ export interface CampaignDeps {
   lockLab?(lab: number): Promise<() => Promise<void>>;
   /** The product build for the whole campaign, made once at its start: its commit. */
   productCommit(): Promise<string>;
-  runOne(opts: { lab: number; scenario: string; model: string; runId: string; productCommit: string }): Promise<RunResult>;
+  runOne(opts: { lab: number; scenario: string; model: string; runId: string; productCommit: string; variant?: Variant }): Promise<RunResult>;
   /** Stops what the campaign started (the model proxy). */
   close?(): Promise<void>;
   now?(): Date;
@@ -196,6 +199,11 @@ export async function runCampaign(opts: {
    * runs so far are kept and listed with why, and no longer counted; a new entry takes each one's place.
    */
   rerun?: { scenarios: string[]; why: string };
+  /**
+   * How every run differs from a plain one. A new campaign keeps it; one that exists goes on with its
+   * own when this is left out, and is refused when this names other settings.
+   */
+  variant?: Variant;
   /** Told a line when a run starts or ends, for a log to follow. */
   onProgress?: (line: string) => void;
 }): Promise<void> {
@@ -228,6 +236,10 @@ async function campaign(opts: Parameters<typeof runCampaign>[0], tell: (line: st
       q = existing;
       if (q.productCommit && q.productCommit !== productCommit)
         throw new Error(`Campaign ${opts.name} was started on product ${q.productCommit.slice(0, 10)}; the product is now ${productCommit.slice(0, 10)}. Its runs would not be comparable: start a new campaign for this product.`);
+      if (opts.variant && variantKey(opts.variant) !== variantKey(q.variant)) {
+        const name = (v: Variant | undefined): string => variantKey(v) || 'the default settings';
+        throw new Error(`Campaign ${opts.name} was started with ${name(q.variant)}, not ${name(opts.variant)}. Its runs would not be comparable: start a new campaign for these settings.`);
+      }
       // Started again: what was running when it stopped was cut short. Its folder is finished and graded so.
       for (const e of [...q.entries])
         if (e.status === 'running') {
@@ -245,6 +257,7 @@ async function campaign(opts: Parameters<typeof runCampaign>[0], tell: (line: st
       if (unknown.length) throw new Error(`No task is named ${unknown.join(', ')}.`);
       const chosen = opts.scenarios ? deps.scenarios.filter((s) => opts.scenarios!.includes(s.id)) : deps.scenarios;
       q = freshQueue(opts.name, opts.models, opts.times, chosen, productCommit);
+      if (variantKey(opts.variant)) q.variant = normalVariant(opts.variant);
     }
   } catch (error) {
     await deps.close?.();
@@ -302,7 +315,7 @@ async function campaign(opts: Parameters<typeof runCampaign>[0], tell: (line: st
         await save();
         tell(`lab ${lab}: ${entry.id} starts (${q.entries.filter((e) => e.status === 'queued').length} queued)`);
         try {
-          const result = await deps.runOne({ lab, scenario: entry.scenario, model: entry.model, runId, productCommit: q.productCommit ?? '' });
+          const result = await deps.runOne({ lab, scenario: entry.scenario, model: entry.model, runId, productCommit: q.productCommit ?? '', ...(q.variant ? { variant: q.variant } : {}) });
           if (result.labBroken) {
             // The lab is broken: this worker leaves it. The entry waits for another lab, and was no run.
             Object.assign(entry, { status: 'queued', lab: undefined, startedAt: undefined, runId: undefined, dir: undefined });

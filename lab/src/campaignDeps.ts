@@ -29,7 +29,7 @@ export async function defaultDeps(): Promise<CampaignDeps> {
     lockLab: (lab) => takeLock(path.join(STATE_DIR, `lab-${lab}.lock`), `Lab ${lab}`),
     // Built once, at the campaign's start; every run uses that build and no other.
     productCommit: async () => (await productBuild()).sourceCommit,
-    runOne: async ({ lab, scenario, model, runId, productCommit }) => {
+    runOne: async ({ lab, scenario, model, runId, productCommit, variant }) => {
       const s = SCENARIOS.find((x) => x.id === scenario);
       if (!s) throw new Error(`No task is named "${scenario}".`);
       const dataDir = path.join(STATE_DIR, 'products', `${new Date().toISOString().replace(/[-:.]/g, '')}-lab${lab}-${scenario}`);
@@ -37,7 +37,7 @@ export async function defaultDeps(): Promise<CampaignDeps> {
       try {
         const product = await startProduct({ dataDir, port: 0, expectCommit: productCommit });
         try {
-          return await runOne({ lab, product, proxy, scenario: s, model, runId });
+          return await runOne({ lab, product, proxy, scenario: s, model, runId, ...(variant ? { variant } : {}) });
         } finally {
           await product.stop();
         }

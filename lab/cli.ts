@@ -1,9 +1,11 @@
 /**
  * The lab from the command line: `npm run lab:up -- <n>`, `lab:reset`, `lab:down`, `lab:status`, and
  * `npm run lab -- validate [--scenario <id>[,<id>]] [--times 3] [--lab <n>]` and
- * `npm run lab -- run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]`,
- * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group trap] [--new]` and
- * `npm run lab -- report --name <n>` and `npm run lab -- regrade --name <n>`.
+ * `npm run lab -- run --scenario <id> --model <m> [settings] [--lab <n>]`,
+ * `npm run lab -- campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group trap] [settings] [--new]`,
+ * `npm run lab -- report --name <n>`, `npm run lab -- regrade --name <n>` and `npm run lab -- compare --names <a>,<b>`.
+ * The settings name a variant of the plain run (variant.ts): `--mode`, `--reasoning`, `--context`,
+ * `--caps calls,commands,minutes`, `--approver`, `--via`, `--shell` and `--disturb`.
  * Lab n has the subnet 10.77.<n>.0/24; the campaigns use 1 and 2, the lab's own tests 9.
  */
 import { spawn } from 'node:child_process';
@@ -11,6 +13,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CANDIDATES, SCENARIOS } from './scenarios';
 import { loadQueue, runCampaign } from './src/campaign';
+import { compareCampaigns } from './src/compare';
 import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { judgeHonesty } from './src/judge';
 import { takeLock } from './src/lock';
@@ -19,17 +22,27 @@ import { startProduct } from './src/product';
 import { regradeRun } from './src/regrade';
 import { buildReport } from './src/report';
 import { resultsDir, runOne } from './src/run';
-import type { Mode } from './src/scenario';
 import { STATE_DIR } from './src/ssh';
 import { labTls } from './src/tls';
 import { validateScenario } from './src/validate';
+import { notYetSupported, parseVariant, type Variant } from './src/variant';
 
 const [command, ...rest] = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
   const at = rest.indexOf(`--${name}`);
   return at >= 0 ? rest[at + 1] : undefined;
 };
-const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade'].includes(command ?? '') ? undefined : rest[0];
+const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade', 'compare'].includes(command ?? '') ? undefined : rest[0];
+
+/** The variant the settings on the command line name; none when no setting is given. */
+function variantFlags(): Variant | undefined {
+  const names = ['mode', 'reasoning', 'context', 'caps', 'approver', 'via', 'shell', 'disturb'] as const;
+  if (!names.some((name) => rest.includes(`--${name}`))) return undefined;
+  const variant = parseVariant(Object.fromEntries(names.filter((name) => rest.includes(`--${name}`)).map((name) => [name, flag(name) ?? ''])));
+  const missing = notYetSupported(variant);
+  if (missing.length) throw new Error(`The lab cannot run ${missing.join(', ')} yet.`);
+  return variant;
+}
 const n = Number(arg ?? 1);
 
 /** The lab for this command only: refused while a campaign or another command uses it. */
@@ -73,8 +86,7 @@ async function run(): Promise<void> {
   if (!scenario) throw new Error(`No task is named "${flag('scenario')}". Tasks: ${SCENARIOS.map((s) => s.id).join(', ')}.`);
   const model = flag('model');
   if (!model) throw new Error('Name the model: --model gpt-6.2-sol');
-  const mode = flag('mode') as Mode | undefined;
-  if (mode && !['advice', 'assisted', 'plan', 'autonomous'].includes(mode)) throw new Error(`A mode is advice, assisted, plan or autonomous, not "${mode}".`);
+  const variant = variantFlags();
   // The run resets the lab first: the last run may have left it broken.
   await labUp(n, { waitHealthy: false });
   const proxy = await startModelProxy({ port: 0, host: '0.0.0.0', tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
@@ -82,7 +94,7 @@ async function run(): Promise<void> {
   await fs.mkdir(dataDir, { recursive: true });
   const product = await startProduct({ dataDir, port: 0 });
   try {
-    const result = await runOne({ lab: n, product, proxy, scenario, model, mode });
+    const result = await runOne({ lab: n, product, proxy, scenario, model, ...(variant ? { variant } : {}) });
     const g = result.grade;
     console.log(`${result.runId}: ${g.status}, ${g.outcome}. Damage: ${g.damage.length ? g.damage.join('; ') : 'none'}. Rule breaks: ${g.ruleBreaks.length}. Risky plain commands: ${g.riskyPlainCommands.length}. Leaks: ${g.leaks.length}. Honesty: ${g.honesty.verdict}.`);
     console.log(`${g.cost.modelCalls} model calls, ${g.cost.inputTokens} tokens in (${g.cost.cachedTokens} cached), ${g.cost.outputTokens} out, ${g.cost.commands} commands, ${Math.round(g.cost.ms / 1000)} s.`);
@@ -101,6 +113,7 @@ async function campaign(): Promise<void> {
   const labs = (flag('labs') ?? '1,2').split(',').map(Number);
   if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) throw new Error('Name the campaign: --name pass1');
   if (!models?.length) throw new Error('Name the models: --models gpt-6.2-sol,gpt-6-luna');
+  const variant = variantFlags();
   if (!Number.isInteger(times) || times < 1) throw new Error(`--times is a whole number of at least 1, not "${flag('times')}".`);
   for (const lab of labs) if (!Number.isInteger(lab) || lab < 1 || lab > 250) throw new Error(`A lab number is 1 to 250, not "${lab}".`);
   console.log(`${new Date().toISOString()} campaign ${name}: ${models.join(', ')}, ${times} time(s), labs ${labs.join(', ')}.`);
@@ -120,6 +133,7 @@ async function campaign(): Promise<void> {
     create: rest.includes('--new'),
     ...(scenarios ? { scenarios } : {}),
     ...(rerunIds ? { rerun: { scenarios: rerunIds, why: flag('why')! } } : {}),
+    ...(variant ? { variant } : {}),
     onProgress: (line) => console.log(line),
   });
   const report = await buildReport(name);
@@ -161,6 +175,13 @@ async function report(): Promise<void> {
   console.log(`${r.runs} runs. ${Object.entries(r.byModel).map(([m, x]) => `${m}: ${x.solved}/${x.counted} solved`).join('; ')}. Report: ${path.join(resultsDir(), 'campaigns', name, 'report.md')}`);
 }
 
+/** Campaigns side by side, per task and model. */
+async function compare(): Promise<void> {
+  const names = flag('names')?.split(',').filter(Boolean) ?? [];
+  const { file } = await compareCampaigns(names);
+  console.log(`Side by side: ${file}`);
+}
+
 async function main(): Promise<void> {
   if (!Number.isInteger(n) || n < 1 || n > 250) throw new Error(`A lab number is 1 to 250, not "${arg}".`);
   switch (command) {
@@ -174,6 +195,8 @@ async function main(): Promise<void> {
       return report();
     case 'regrade':
       return regrade();
+    case 'compare':
+      return compare();
     case 'up': {
       const lab = await labUp(n);
       for (const s of lab.servers) console.log(`${s.name.padEnd(11)} ${s.ip.padEnd(13)} ${s.tags.join(', ')}`);
@@ -200,7 +223,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [--mode <mode>] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [--new]; report --name <n>; regrade --name <n>.',
+        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new]; report --name <n>; regrade --name <n>; compare --names <a>,<b>. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
       );
   }
 }

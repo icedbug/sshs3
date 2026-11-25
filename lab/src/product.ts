@@ -18,13 +18,19 @@ import { must, openSession, type CapturedEvent, type WebSession } from './webCli
 
 export type { CapturedEvent } from './webClient';
 
+export interface ModelSettings {
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  contextWindowTokens?: number;
+}
+
 export interface Account {
   id: string;
   name: string;
   hub(req: HubRequest): Promise<HubSnapshot>;
   events: CapturedEvent[];
   /** The model, through the lab's model proxy, under the run's name. */
-  useModel(model: string, runId: string, proxyUrl: string): Promise<void>;
+  /** The model through the lab's proxy; the reasoning level and context window only when a campaign names them. */
+  useModel(model: string, runId: string, proxyUrl: string, settings?: ModelSettings): Promise<void>;
   /** The account's key on every lab server, and the servers' host keys in the account's known hosts. */
   trustLab(lab: LabState): Promise<void>;
   /** One shared SSH profile per lab server. */
@@ -154,7 +160,7 @@ function makeAccount(product: { dataDir: string }, user: { id: string; username:
     hub,
     events: session.events,
 
-    async useModel(model, runId, proxyUrl) {
+    async useModel(model, runId, proxyUrl, settings) {
       await hub({
         action: 'configure',
         config: {
@@ -167,6 +173,8 @@ function makeAccount(product: { dataDir: string }, user: { id: string; username:
           apiProtocol: 'responses',
           apiKey: `lab-${runId}`,
           embeddingModel: EMBEDDING_MODEL,
+          ...(settings?.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+          ...(settings?.contextWindowTokens ? { contextWindowTokens: settings.contextWindowTokens } : {}),
         },
       });
     },

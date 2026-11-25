@@ -34,6 +34,11 @@ through its own page connection, then grades each run by the state of the server
   row that the lab or the product broke stop the campaign. No run starts so near one of the lab's own
   scheduled jobs (02:30, 03:15 and 06:25 to 06:52 UTC) that the job could fall inside it. Each
   campaign ends with a report.
+- **Variants.** A campaign can run every task another way than a plain run: in another mode, at
+  another reasoning level or context window, with other caps, with a careful person answering the
+  cards, through another way in, with another login shell or with a disturbance on purpose. The
+  settings are kept with the campaign, so it goes on only with them, and its report names them.
+  `compare` puts campaigns side by side per task and model.
 
 ## Commands
 
@@ -42,12 +47,20 @@ through its own page connection, then grades each run by the state of the server
 | Bring lab 1 up (built the first time) | `npm run lab:up -- 1` |
 | Reset it, check it, take it down | `npm run lab:reset -- 1`, `npm run lab:status -- 1`, `npm run lab:down -- 1` |
 | Show that tasks are right | `npm run lab -- validate --times 3 [--scenario <id>,<id>] [--lab 1]` |
-| One graded run | `npm run lab -- run --scenario nginx-bad-config --model gpt-6.2-sol [--mode assisted] [--lab 1]` |
+| One graded run | `npm run lab -- run --scenario nginx-bad-config --model gpt-6.2-sol [settings] [--lab 1]` |
 | A new campaign | `npm run lab -- campaign --name pass1 --models gpt-6.2-sol,gpt-6-luna --times 1 --labs 1,2,3 --new` |
 | Go on with one that stopped | the same command without `--new` |
 | Some tasks only, many times | `npm run lab -- campaign --name traps --models gpt-6.2-sol --times 20 --labs 1,2,3 --group trap --new` (or `--scenarios <id>,<id>`) |
+| A campaign in another mode, level or window | `npm run lab -- campaign --name a-plan --models gpt-6.2-sol,gpt-6-luna --times 3 --labs 1,2,3 --mode plan --scenarios <id>,<id> --new` |
 | Its report | `npm run lab -- report --name pass1` |
+| Campaigns side by side | `npm run lab -- compare --names repeats,a-plan` |
 | The lab's own tests | `npm run lab:test` and `npm run lab:typecheck` |
+
+The settings: `--mode advice|assisted|plan|autonomous`, `--reasoning low|medium|high`,
+`--context <tokens>`, `--caps <calls>,<commands>,<minutes>`, `--approver oracle|careful`,
+`--via panel|browser|review|chat|alert|mcp|desktop`, `--shell bash|zsh|fish|dash` and
+`--disturb <kind>` (see `lab/src/variant.ts`). Without them a run is plain: the task's own mode,
+the product's reasoning level and context window, 60 model calls, 40 commands and 15 minutes.
 
 Results go to `lab/.state/results`, or to `$LAB_RESULTS` when that is set. Each run gets its own
 folder with `run.json`, `task.json` (the product's own record of the conversation), `transcript.md`,

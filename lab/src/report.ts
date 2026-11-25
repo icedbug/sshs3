@@ -4,6 +4,7 @@ import type { QueueEntry } from './campaign';
 import { loadQueue } from './campaign';
 import type { Grade } from './grade';
 import { resultsDir } from './run';
+import { variantKey } from './variant';
 
 /**
  * What a campaign found: how often the agent solved a task, by task, group and model, with Wilson 95%
@@ -38,6 +39,8 @@ export interface ReportRun {
 export interface Report {
   name: string;
   at: string;
+  /** The settings every run of the campaign had (variant.ts), when they were not a plain run's. */
+  variant?: string;
   runs: number;
   byStatus: Record<string, number>;
   /** Per task: its solve rate, and the planted secrets its runs of the agent showed or sent. */
@@ -135,6 +138,7 @@ export async function buildReport(name: string, groups: Record<string, string> =
   const report: Report = {
     name,
     at: new Date().toISOString(),
+    ...(variantKey(q.variant) ? { variant: variantKey(q.variant) } : {}),
     runs: graded.length,
     byStatus: Object.fromEntries([...new Set(graded.map((e) => e.status))].map((s) => [s, graded.filter((e) => e.status === s).length])),
     byTask,
@@ -175,6 +179,7 @@ function markdown(r: Report): string {
   const row = (cells: Array<string | number>) => lines.push(`| ${cells.join(' | ')} |`);
   const rateCells = (x: Rate) => [x.counted, x.solved, pct(x.rate), `${pct(x.interval[0])} to ${pct(x.interval[1])}`];
   lines.push(`# Campaign ${r.name}`, '', `${r.runs} runs. ${Object.entries(r.byStatus).map(([s, n]) => `${s}: ${n}`).join(', ')}.`, '');
+  if (r.variant) lines.push(`Every run had these settings: ${r.variant}.`, '');
   if (r.queued) lines.push(`${r.queued} entries are not run yet.`, '');
   if (r.brokenLabs.length) lines.push(`Labs found broken and left: ${r.brokenLabs.join(', ')}.`, '');
   if (r.stoppedBecause) lines.push(`Stopped before its queue was done: ${r.stoppedBecause}`, '');

@@ -72,6 +72,19 @@ describe('the product driver', () => {
     expect((await proxy.calls('product-test')).filter((c) => c.path.endsWith('/responses')).length).toBeGreaterThanOrEqual(2);
   });
 
+  it('useModel sets the reasoning effort and the context window', async () => {
+    const { omar, lina } = await product.team();
+    await omar.useModel('fake-1', 'product-test-settings', `https://${labGateway(lab)}:${proxy.port}`, { reasoningEffort: 'low', contextWindowTokens: 32_000 });
+    const budget = (await omar.hub({ action: 'snapshot' })).contextBudget;
+    expect(budget?.reasoningEffort).toBe('low');
+    expect(budget?.contextWindowTokens).toBe(32_000);
+    // Without them the product keeps its own: what every run before these settings had.
+    await lina.useModel('fake-1', 'product-test-default', `https://${labGateway(lab)}:${proxy.port}`);
+    const plain = (await lina.hub({ action: 'snapshot' })).contextBudget;
+    expect(plain?.reasoningEffort).toBe('medium');
+    expect(plain?.contextWindowTokens).toBe(128_000);
+  });
+
   it('a lab server cannot use the model proxy', async () => {
     // An agent runs commands on the lab servers: from there the proxy, which spends the real key, is shut.
     const web = lab.servers.find((s) => s.name === 'web-01')!;

@@ -16,6 +16,7 @@ import { HOST_DISK_CHECKS, fillIn, type Mode, type Scenario } from './scenario';
 import { exec } from './ssh';
 import { runChecks, runStep, waitUntil, type CheckResult } from './validate';
 import { createdSecrets, labValues, secretValues } from './values';
+import { DEFAULT_CAPS, capsFor, normalVariant, variantKey, type Caps, type Variant } from './variant';
 import { ProductError, type CapturedEvent } from './webClient';
 
 /**
@@ -25,8 +26,8 @@ import { ProductError, type CapturedEvent } from './webClient';
  * Everything it leaves is written to its own folder.
  */
 
-/** A run stops at the first of these. The same caps as the real-model test in tests/main. */
-export const CAPS = { modelCalls: 60, commands: 40, minutes: 15 };
+/** A run stops at the first of these, unless its campaign's variant raises them (see variant.ts). */
+export const CAPS: Caps = DEFAULT_CAPS;
 /** How long a run may wait on a question nobody in the lab will answer before it ends. */
 const QUESTION_WAIT_MS = 20_000;
 /** How long a run's checks may take to hold after it ended: a service still coming up is not read as broken. */
@@ -52,11 +53,11 @@ export interface RunResult {
  * provider does not use up a run), the commands the product recorded (it records every one, a plain
  * command too), and time.
  */
-export function capReached(o: { calls: Array<Pick<ModelCall, 'status' | 'broken'>>; commands: number; ms: number }): string | undefined {
+export function capReached(o: { calls: Array<Pick<ModelCall, 'status' | 'broken'>>; commands: number; ms: number }, caps: Caps = CAPS): string | undefined {
   const answered = o.calls.filter((c) => c.status >= 200 && c.status < 300 && !providerFailed(c)).length;
-  if (answered >= CAPS.modelCalls) return `${CAPS.modelCalls} model calls`;
-  if (o.commands >= CAPS.commands) return `${CAPS.commands} commands`;
-  if (o.ms >= CAPS.minutes * 60_000) return `${CAPS.minutes} minutes`;
+  if (answered >= caps.modelCalls) return `${caps.modelCalls} model calls`;
+  if (o.commands >= caps.commands) return `${caps.commands} commands`;
+  if (o.ms >= caps.minutes * 60_000) return `${caps.minutes} minutes`;
   return undefined;
 }
 
@@ -143,7 +144,8 @@ export async function storedFiles(dataDir: string): Promise<RunRecord['stored']>
 function transcript(s: Scenario, meta: Record<string, unknown>, task: AgentTask | undefined, tools: ToolCallSeen[], approvals: Approval[], r: RunRecord, g: Grade): string {
   const lines: string[] = [];
   const tick = (ok: boolean) => (ok ? 'ok' : 'FAILED');
-  lines.push(`# ${s.title}`, '', `Run \`${meta.runId}\`: ${meta.model}, mode ${meta.mode}, lab ${meta.lab}, product ${String(meta.productCommit).slice(0, 10)}, started ${meta.startedAt}.`, '');
+  const variant = meta.variant ? variantKey(meta.variant as Variant) : '';
+  lines.push(`# ${s.title}`, '', `Run \`${meta.runId}\`: ${meta.model}, mode ${meta.mode}${variant ? `, variant ${variant}` : ''}, lab ${meta.lab}, product ${String(meta.productCommit).slice(0, 10)}, started ${meta.startedAt}.`, '');
   lines.push('## What the person asked', '', s.prompt, '');
   if (task?.error) lines.push(`The run ended ${task.status}: ${task.error}`, '');
   lines.push('## The conversation', '');
@@ -192,9 +194,12 @@ async function secretsMadeIn(lab: LabState, values: Record<string, string>, s: S
   return createdSecrets(outputs.map((o) => o.stdout).join('\n'), known);
 }
 
-export async function runOne(opts: { lab: number; product: Product; proxy: ModelProxy; scenario: Scenario; model: string; mode?: Mode; runId?: string }): Promise<RunResult> {
+export async function runOne(opts: { lab: number; product: Product; proxy: ModelProxy; scenario: Scenario; model: string; mode?: Mode; runId?: string; variant?: Variant }): Promise<RunResult> {
   const s = opts.scenario;
-  const mode: Mode = opts.mode ?? s.rules?.mode ?? 'assisted';
+  // The campaign's variant first: a campaign in Plan runs every task in Plan, a trap's own mode too.
+  const variant = normalVariant(opts.variant);
+  const mode: Mode = variant.mode ?? opts.mode ?? s.rules?.mode ?? 'assisted';
+  const caps = capsFor(variant);
   const started = Date.now();
   const runId = opts.runId ?? makeRunId(s.id, opts.model, new Date(started));
   const dir = path.join(resultsDir(), runId);
@@ -204,6 +209,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     scenario: s.id,
     model: opts.model,
     mode,
+    ...(variantKey(variant) ? { variant } : {}),
     lab: opts.lab,
     startedAt: new Date(started).toISOString(),
     head: await gitHead(),
@@ -261,7 +267,10 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
     await team.maria.saveProfiles(lab);
     account = team[s.as ?? 'maria'];
     const peer = account === team.maria ? team.omar : team.maria;
-    await account.useModel(opts.model, runId, `https://${labGateway(lab)}:${opts.proxy.port}`);
+    await account.useModel(opts.model, runId, `https://${labGateway(lab)}:${opts.proxy.port}`, {
+      ...(variant.reasoning ? { reasoningEffort: variant.reasoning } : {}),
+      ...(variant.contextWindow ? { contextWindowTokens: variant.contextWindow } : {}),
+    });
     eventsFrom = account.events.length;
     const sessionId = await account.openTerminal(s.start);
     taskId = await account.start({ prompt: s.prompt, mode, sessionId });
@@ -364,7 +373,7 @@ export async function runOne(opts: { lab: number; product: Product; proxy: Model
       // Commands: every command and change the agent ran or asked for. The product records each of them
       // (a plain command too) as a change of its own; reading tools are not counted.
       const commands = task.changes.length || plainCommands({ tools: toolsOf(account.events.slice(eventsFrom), taskId) }).length;
-      stoppedBy = capReached({ calls: await opts.proxy.calls(runId), commands, ms: Date.now() - started });
+      stoppedBy = capReached({ calls: await opts.proxy.calls(runId), commands, ms: Date.now() - started }, caps);
       if (stoppedBy) {
         await account.hub({ action: 'stop', taskId });
         for (let i = 0; i < 20 && !DONE.includes(task.status); i++) {

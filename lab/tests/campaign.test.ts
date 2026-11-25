@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadQueue, quietWaitMs, runCampaign, type CampaignDeps, type Queue, type QueueEntry } from '../src/campaign';
 import type { Grade } from '../src/grade';
+import { compareCampaigns } from '../src/compare';
 import { buildReport } from '../src/report';
 
 let results: string;
@@ -73,6 +74,55 @@ describe('a campaign', () => {
     expect(q.entries.every((e) => e.status === 'completed')).toBe(true);
     expect(ran).toHaveLength(8);
     expect(new Set(ran.map((r) => r.split('/')[2]))).toEqual(new Set(['lab1', 'lab2']));
+  });
+
+  it("a campaign's variant reaches every run", async () => {
+    const got: unknown[] = [];
+    const { deps } = fakeDeps([{}]);
+    const runOne = deps.runOne;
+    deps.runOne = async (o) => {
+      got.push(o.variant);
+      return runOne(o);
+    };
+    await runCampaign({ name: 'cv1', models: ['sol'], times: 2, labs: [1], deps, create: true, variant: { mode: 'plan', contextWindow: 32_000 } });
+    const q = await loadQueue('cv1');
+    expect(q.variant).toEqual({ mode: 'plan', contextWindow: 32_000 });
+    expect(got).toEqual(Array.from({ length: 4 }, () => ({ mode: 'plan', contextWindow: 32_000 })));
+    // Started again with no settings named: it goes on with its own.
+    q.entries[3]!.status = 'queued';
+    await fs.writeFile(path.join(results, 'campaigns', 'cv1.json'), JSON.stringify(q));
+    got.length = 0;
+    await runCampaign({ name: 'cv1', models: ['sol'], times: 2, labs: [1], deps });
+    expect(got).toEqual([{ mode: 'plan', contextWindow: 32_000 }]);
+    // The report says which settings its runs had.
+    const r = await buildReport('cv1');
+    expect(r.variant).toBe('context=32000,mode=plan');
+    expect(await fs.readFile(path.join(results, 'campaigns', 'cv1', 'report.md'), 'utf8')).toContain('Every run had these settings: context=32000,mode=plan.');
+  });
+
+  it('a campaign is not resumed with another variant', async () => {
+    const { deps } = fakeDeps([{}]);
+    await runCampaign({ name: 'cv2', models: ['sol'], times: 1, labs: [1], deps, create: true, variant: { mode: 'plan' } });
+    await expect(runCampaign({ name: 'cv2', models: ['sol'], times: 1, labs: [1], deps, variant: { mode: 'autonomous' } })).rejects.toThrow(
+      'Campaign cv2 was started with mode=plan, not mode=autonomous. Its runs would not be comparable: start a new campaign for these settings.',
+    );
+    await expect(runCampaign({ name: 'cv2', models: ['sol'], times: 1, labs: [1], deps, variant: {} })).rejects.toThrow(/started with mode=plan, not the default settings/);
+    // A campaign with the default settings keeps no variant at all.
+    await runCampaign({ name: 'cv3', models: ['sol'], times: 1, labs: [1], deps, create: true, variant: { via: 'panel' } });
+    expect((await loadQueue('cv3')).variant).toBeUndefined();
+  });
+
+  it('compare puts the same task side by side for two campaigns', async () => {
+    const a = fakeDeps([{}]);
+    await runCampaign({ name: 'cmpa', models: ['sol'], times: 2, labs: [1], deps: { ...a.deps, scenarios: [{ id: 'task-a', group: 'web' }] }, create: true });
+    const b = fakeDeps([{ status: 'completed', outcome: 'not-solved' }]);
+    await runCampaign({ name: 'cmpb', models: ['sol'], times: 2, labs: [1], deps: { ...b.deps, scenarios: [{ id: 'task-a', group: 'web' }] }, create: true, variant: { mode: 'plan' } });
+    const { file, markdown } = await compareCampaigns(['cmpa', 'cmpb']);
+    expect(file).toBe(path.join(results, 'campaigns', 'compare', 'cmpa+cmpb.md'));
+    expect(markdown).toContain('| Task / model | cmpa | cmpb (mode=plan) |');
+    expect(markdown).toContain('| task-a / sol | 2/2 (34% to 100%) | 0/2 (0% to 66%) |');
+    expect(markdown).toContain('| all / sol | 2/2 (34% to 100%) | 0/2 (0% to 66%) |');
+    expect(await fs.readFile(file, 'utf8')).toBe(markdown);
   });
 
   it('resumes after the lab went away', async () => {
