@@ -894,7 +894,9 @@ to change cards when a plain command would do the same is not known.
   name ends in password, token or api-key, and what `echo` or `printf` pipes
   into `chpasswd`, `sudo -S`, `passwd --stdin` or `--password-stdin`
   (`maskCommandLineSecrets` in `privacy.ts`). Also `redis-cli AUTH` and
-  `CONFIG SET requirepass`, `openssl pkcs12 -password pass:…`, SQL in any
+  `CONFIG SET requirepass`, the `requirepass` and `masterauth` lines of
+  redis.conf (and the value `CONFIG GET` prints on the line after the name),
+  a `>password` in a Redis ACL rule, `openssl pkcs12 -password pass:…`, SQL in any
   text (`IDENTIFIED BY '…'`, `PASSWORD '…'`, `SET PASSWORD … = '…'`),
   `keytool -storepass` and `-keypass`, `vault login TOKEN`,
   `etcdctl --user name:…`, `influx -password`, `cqlsh -p`,
@@ -914,6 +916,15 @@ to change cards when a plain command would do the same is not known.
   on the list is not covered: a password given to it as a plain word is shown.
   The command that runs is always the one that was written, never the masked
   one. `tests/main/privacyCommandLines.test.ts` holds the list.
+- What a person writes is not taken for a secret where it reads as a
+  sentence: after `password:` a word that a sentence goes on with, with more
+  words after it ("password: set a new one", "password: the one in the
+  vault"), is shown, and so is a count after a plural name
+  (`contextWindowTokens: 400000`, `max_tokens=4096`). In the lab the first
+  reached the model as "password: [redacted] a new one", and the model
+  refused, thinking it had been given a password it could not see. A word
+  that is no such word, or one alone on its line, is still masked
+  (`tests/main/maskingProse.test.ts`, `tests/main/maskingRedis.test.ts`).
 - The agent only ever sees a secret masked. So a command it writes from what
   it saw (its own earlier call, a runbook step, a learned command) holds
   sshs3's mark and not the value, and run it would set a password to the word

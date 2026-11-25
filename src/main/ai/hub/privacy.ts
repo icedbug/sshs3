@@ -553,6 +553,22 @@ export function maskSecrets(value: string): string {
     .replace(/\b((?:pre-?shared-?key|psk)(?:\s+(?:local|remote|ascii|hex|[0-9]))?\s+)(?!address\b|[:=])(?!\[redacted\])[^\s,;]+/gi, "$1[redacted]")
     // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
     .replace(/\b(crypto\s+isakmp\s+key\s+(?:[0-9]\s+)?)\S+/gi, "$1[redacted]")
+    // Redis: `requirepass <password>` and `masterauth <password>` (redis.conf, CONFIG SET), the value
+    // CONFIG GET prints on the line after the name, and `>password` in an ACL rule. A sentence about
+    // them ("set requirepass in redis.conf") is left as it is.
+    .replace(
+      /\b((?:requirepass|masterauth)[ \t]+)(?!\[redacted\])("[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'<>]+)/gi,
+      (match: string, prefix: string, value: string, offset: number, whole: string) =>
+        (PROSE_WORD.test(value) || /^(?:is|was|are|has|had|must|should|can|will|needs?|does|do)$/i.test(value)) &&
+        /^ +[A-Za-z]/.test(whole.slice(offset + match.length, offset + match.length + 8))
+          ? match
+          : `${prefix}${/^["']/.test(value) ? `${value[0]}[redacted]${value[0]}` : "[redacted]"}`,
+    )
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored at a line start on a keyword, each part bounded or separated by fixed characters, so it cannot backtrack
+    .replace(/^((?:\d+\)[ \t]*)?["']?(?:requirepass|masterauth)["']?[ \t]*\r?\n(?:\d+\)[ \t]*)?)("?)(?!\[redacted\])([^\r\n"]+)("?)$/gim, "$1$2[redacted]$4")
+    .replace(/^([ \t]*(?:user[ \t]+\S+|.*\bACL[ \t]+SETUSER[ \t]+\S+)[ \t].*)$/gim, (line: string) =>
+      line.replace(/([ \t]['"]?[<>])(?!\[redacted\])[^\s'"]+/g, "$1[redacted]"),
+    )
     .replace(/\b(Bearer|Basic)\s+(?!(?:auth|authentication|token|tokens|scheme|realm|access|header|credentials?)\b)[^\s"']+/gi, "$1 [redacted]")
     // kubeconfig keys and certificates' private halves, and a docker config's auth.
     .replace(/\b((?:client-key|token)-data:\s*)\S+/g, "$1[redacted]")
@@ -623,6 +639,13 @@ export function secretLine(value: string): string | undefined {
 const POLICY_UNIT = /^\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|h|days?|d|weeks?|w|months?|years?|y|characters?|chars?|times?|attempts?|tries|retries|versions?|%|percent)\b/i;
 /** Words that, as a value, say how secrets are handled ("secrets: weekly"), not what one is. */
 const POLICY_WORD = /^(?:never|always|required|optional|none|n\/a|daily|weekly|monthly|quarterly|yearly|annually|hourly|rotated|expired|disabled|enabled|yes|no|true|false|null|unset|empty|redacted|\[redacted\])$/i;
+/**
+ * Words a sentence goes on with after "password:" in what a person writes ("password: set a new one",
+ * "password: the one in the vault"): verbs of asking and doing, small words, and words that say where
+ * or how a secret is kept. Not words anyone would choose as a password and then write more after.
+ */
+const PROSE_WORD =
+  /^(?:set|use|choose|pick|make|create|generate|rotate|change|reset|update|replace|keep|store|put|give|send|share|ask|check|see|read|write|enter|type|copy|move|remove|add|get|find|look|leave|please|the|a|an|this|that|it|its|same|your|our|their|my|his|her|any|each|every|all|in|on|at|for|from|to|with|by|of|if|when|and|or|but|as|so|not|unchanged|missing|stored|saved|kept|held|found|given|sent|shared|written|taken|managed|handled|needed|known|unknown|wrong|temporary)$/i;
 
 /**
  * A value after `password:` that is a fact about passwords, not a password:
@@ -635,6 +658,11 @@ function isPolicyValue(prefix: string, value: string, after: string): boolean {
   if (/^\d{1,4}(?:[.,]\d+)?$/.test(bare) && POLICY_UNIT.test(after)) return true;
   if (POLICY_WORD.test(bare)) return true;
   const plural = /(?:passwords|passphrases|secrets|tokens|credentials|keys)["']?\s*[:=]\s*$/i.test(prefix);
+  // A count after a plural name: "contextWindowTokens: 400000", "max_tokens=4096". One token is a secret.
+  if (plural && /^\d{1,10}[}\]]*$/.test(value)) return true;
+  // A sentence that goes on after a colon ("password: set a new one", "password: please choose a long
+  // one"): its first word is one a sentence goes on with, and more words follow it on the line.
+  if (/:\s*$/.test(prefix) && value === bare && PROSE_WORD.test(bare) && /^ +[A-Za-z]/.test(after)) return true;
   return plural && /^[a-z]{2,20}$/.test(bare) && /^\s+[a-z]/i.test(after);
 }
 
