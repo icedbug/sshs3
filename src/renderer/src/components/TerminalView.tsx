@@ -43,6 +43,7 @@ import {
   unregisterLiveSession,
 } from '../lib/liveSessions';
 import { persistLiveSession } from '../lib/useSessionPersistence';
+import { disposeTerminalLater } from '../lib/xtermDispose';
 import { isWebBrowserMode } from '../lib/webClientBridge';
 import { isTerminalZoomShortcut } from '../lib/terminalZoomKey';
 
@@ -1250,7 +1251,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           killSession(sid);
         }
       }
-      term.dispose();
+      disposeTerminalLater(term);
       if (container) {
         container.removeEventListener('paste', handleDomPaste, true);
         container.removeEventListener('mouseup', handleMiddleClick, true);
