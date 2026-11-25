@@ -19,6 +19,7 @@ export const AREA_OF = {
   takeover: "conversations",
   "terminal-settle": "conversations",
   "answer-command": "conversations",
+  "answer-command-typed": "conversations",
   arm: "conversations",
   approve: "safety",
   "change-reveal": "safety",

@@ -540,7 +540,7 @@ parts that define the same method name are refused when the file loads.
 | --- | --- | --- |
 | `HubService.ts` | The hub's state (every field), its start and end, the snapshot, the clock (`tick`), `changed`, and the handing out of requests | none of its own |
 | `areas/routes.ts` | The table of which part answers which request, and its types | |
-| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log, a terminal a person uses again after a stopped command, a command a person runs from an answer | 21 |
+| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log, a terminal a person uses again after a stopped command, a command a person runs from an answer or a runbook, and whether it was typed | 22 |
 | `areas/runs.ts` | A run: starting it, its events, what it spends, stopping it; runs on an external agent | none: started by other parts |
 | `areas/chatRuns.ts` | Conversations asked for from a chat thread: the fence they run inside (`chatFence.ts`), starting and going on, their own terminals, and following a run without a browser (`onRun`, `runView`) | none: called by the chat agent |
 | `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 12 |
@@ -1100,11 +1100,16 @@ reads them. There are none in the desktop app and none in the demo lab.
   does, so a freeze does not stop an agent that runs a change as a plain
   command: the agent is told not to. An administrator can end a freeze early. A freeze a person set
   for a cluster in their own rules is stopped at the same places. Run in
-  Terminal under an answer types a command as the person, so it is not
-  refused, but the hub is asked first (`answer-command`): during a freeze
-  on the terminal's server the person is told until when, and presses it
-  again to run it anyway. Every such run is written in the audit log as the
-  person's, with the freeze when one held.
+  Terminal under an answer, and on a runbook step in the knowledge base,
+  types a command as the person, so it is not refused, but the hub is asked
+  first (`answer-command`): during a freeze on the terminal's server the
+  person is told until when, and presses it again in the same terminal to
+  run it anyway. The audit log gets a line, as the person's and with the
+  freeze when one held, that the command is about to be typed (`intent`),
+  and then one that says whether the terminal took it (`sent` or `failed`,
+  from the window with `answer-command-typed`). A command the person types
+  in the composer with `!` is theirs, as one typed in the terminal is, and
+  is not asked about.
 - **Where they are kept.** One file in the server's shared folder
   (`shared-workspace/team-rules.json`), read into memory when the server
   starts. Every account's hub reads the same set (`HubHost.teamRules`). A

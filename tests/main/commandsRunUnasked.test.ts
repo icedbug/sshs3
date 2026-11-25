@@ -314,25 +314,41 @@ describe("a change card and a file write", () => {
 
   // Found by the security lead tester: "Run in Terminal" under an AI answer typed the very command a
   // freeze had just refused into the terminal, with only "Sent to web-02." and nothing in the audit log.
-  it("are not slipped past by a person's Run in Terminal: it asks during a freeze, and it is written down", async () => {
+  it("are not slipped past by a person's Run in Terminal: it asks during a freeze, and what was typed is written down", async () => {
     const { hub } = await hubWith();
     hub.store.data.safetyPolicy = { requireApprovalOnProdTags: true, clusterPolicies: { web: { frozenUntil: Date.now() + 3_600_000 } } };
     const asked = await hub.request({ action: "answer-command", sessionId: "term-web", command: "echo x > /tmp/frozen" });
-    expect(asked.reply?.answerCommand).toMatchObject({ sent: false, frozenUntil: expect.any(Number), label: "web-1" });
-    const read = async () => (await hub.request({ action: "audit-read" } as never)).reply!.audit!.entries.filter((e) => e.what === "echo x > /tmp/frozen");
-    expect(await read()).toEqual([]);
+    expect(asked.reply?.answerCommand).toEqual({ cleared: false, frozenUntil: expect.any(Number), label: "web-1" });
+    // Newest first.
+    const read = async (what: string) => (await hub.request({ action: "audit-read" } as never)).reply!.audit!.entries.filter((e) => e.what === what);
+    expect(await read("echo x > /tmp/frozen")).toEqual([]);
 
+    // Pressed again, it may be typed. That it is about to be is written down before anything is typed.
     const ran = await hub.request({ action: "answer-command", sessionId: "term-web", command: "echo x > /tmp/frozen", confirmFreeze: true });
-    expect(ran.reply?.answerCommand).toMatchObject({ sent: true });
-    await vi.waitFor(async () => expect(await read()).toHaveLength(1));
-    const [entry] = await read();
-    expect(entry.actor).toMatch(/from an AI answer/);
-    expect(entry.approvedBy).toMatch(/ran it themselves, during a change freeze/);
-    expect(entry.target).toBe("web-1");
+    const answer = ran.reply!.answerCommand!;
+    expect(answer).toMatchObject({ cleared: true, intentId: expect.any(String) });
+    await vi.waitFor(async () => expect((await read("echo x > /tmp/frozen")).map((e) => e.outcome)).toEqual(["intent"]));
+    // Found by the review of the fix: the line said "sent" before anything was typed. The line after it
+    // now says whether it was.
+    await hub.request({ action: "answer-command-typed", intentId: answer.intentId!, typed: true });
+    await vi.waitFor(async () => expect((await read("echo x > /tmp/frozen")).map((e) => e.outcome)).toEqual(["sent", "intent"]));
+    for (const entry of await read("echo x > /tmp/frozen")) {
+      expect(entry.actor).toMatch(/from an AI answer, with Run in Terminal/);
+      expect(entry.approvedBy).toMatch(/ran it themselves, during a change freeze/);
+      expect(entry.target).toBe("web-1");
+    }
+    // What was typed is said once.
+    await expect(hub.request({ action: "answer-command-typed", intentId: answer.intentId!, typed: true })).rejects.toThrow(
+      "That run is not known here any more. Nothing was written down for it.",
+    );
 
-    // Outside a freeze it is not asked about, and still written down.
-    const plain = await hub.request({ action: "answer-command", sessionId: "term-api", command: "uptime" });
-    expect(plain.reply?.answerCommand).toMatchObject({ sent: true });
+    // Outside a freeze it is not asked about, and written down all the same: here the terminal did not take it.
+    const plain = await hub.request({ action: "answer-command", sessionId: "term-api", command: "uptime", from: "runbook" });
+    expect(plain.reply?.answerCommand).toMatchObject({ cleared: true });
+    await hub.request({ action: "answer-command-typed", intentId: plain.reply!.answerCommand!.intentId!, typed: false });
+    await vi.waitFor(async () => expect((await read("uptime")).map((e) => e.outcome)).toEqual(["failed", "intent"]));
+    expect((await read("uptime"))[0].actor).toMatch(/from a runbook in the knowledge base, with Run in terminal/);
+    expect((await read("uptime"))[0].approvedBy).not.toMatch(/freeze/);
   });
 
   it("wait for a second person on production where the two-person rule is on, and a command there waits for nobody", async () => {

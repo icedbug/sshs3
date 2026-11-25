@@ -538,8 +538,8 @@ describe("Shell Integration Overhaul", () => {
       const until = Date.now() + 3_600_000;
       mockState.hubRequest.mockImplementation(async (req: HubRequest) =>
         req.action === "answer-command" && !req.confirmFreeze
-          ? { ...mockState.hub!, reply: { answerCommand: { sent: false, frozenUntil: until, label: "prod-web-01" } } }
-          : { ...mockState.hub!, reply: { answerCommand: { sent: true, label: "prod-web-01" } } },
+          ? { ...mockState.hub!, reply: { answerCommand: { cleared: false, frozenUntil: until, label: "prod-web-01" } } }
+          : { ...mockState.hub!, reply: { answerCommand: { cleared: true, intentId: "intent-1", label: "prod-web-01" } } },
       );
       render(<AiHubPanel mode="panel" setMode={vi.fn()} initialTaskId="task-1" />);
       const run = () => screen.getAllByRole("button", { name: "Run in Terminal" })[0];
@@ -552,8 +552,10 @@ describe("Shell Integration Overhaul", () => {
       expect(mockState.terminalWrite).not.toHaveBeenCalled();
       fireEvent.click(run());
       await waitFor(() => expect(mockState.terminalWrite).toHaveBeenCalledWith("term-1", "sudo systemctl reload nginx\n"));
-      expect(mockState.hubRequest).toHaveBeenLastCalledWith({ ...asked, confirmFreeze: true });
+      expect(mockState.hubRequest).toHaveBeenCalledWith({ ...asked, confirmFreeze: true });
       expect(mockState.terminalWrite).toHaveBeenCalledTimes(1);
+      // The audit log's second line: the terminal took it.
+      await waitFor(() => expect(mockState.hubRequest).toHaveBeenLastCalledWith({ action: "answer-command-typed", intentId: "intent-1", typed: true }));
     });
 
     it("warns about matching secrets in demo when a real remote model is selected", () => {

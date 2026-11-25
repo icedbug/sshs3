@@ -104,7 +104,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               request={hubRequest}
               openTab={kbTabRequest}
               onOpenFileRef={handleOpenFileRef}
-              onRunStepInTerminal={terminalHandoff.run}
+              onRunStepInTerminal={terminalHandoff.runStep}
               onAskAiStep={(stepPrompt) => {
                 setPrompt(stepPrompt);
                 setView("Work");

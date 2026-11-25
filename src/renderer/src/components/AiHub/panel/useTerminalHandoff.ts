@@ -22,7 +22,8 @@ export function useTerminalHandoff(
   const [writing, setWriting] = useState(false);
   const pending = useRef(false);
   const epoch = useRef(0);
-  // The command a person was told about during a change freeze. Pressing Run in Terminal on it again runs it.
+  // The command, and the terminal, a person was told about during a change freeze. Pressing Run in Terminal on
+  // that command in that terminal again runs it.
   const confirming = useRef<string | null>(null);
 
   const reset = useCallback((): void => {
@@ -61,28 +62,32 @@ export function useTerminalHandoff(
   }
 
   /**
-   * A command from an answer is run as the person, so no approval is asked. The hub still checks it against a
-   * change freeze on the terminal's server, asks the person once more during one, and writes the run in the audit log.
+   * A command from an answer or a runbook is run as the person, so no approval is asked. The hub still checks it
+   * against a change freeze on the terminal's server, asks the person once more during one, and writes in the
+   * audit log that it is about to be typed. What it answers is undefined when the command is not to be typed now.
    */
-  async function cleared(command: string, key: string): Promise<boolean> {
+  async function cleared(command: string, key: string, from: "answer" | "runbook"): Promise<{ intentId?: string } | undefined> {
     if (!session) {
       setError("The selected terminal is no longer available. Select a current terminal first.");
-      return false;
+      return undefined;
     }
-    const confirmFreeze = confirming.current === key;
+    // A freeze said about one terminal is not said about another: the terminal is part of what was said.
+    const said = `${session.id}\n${session.generation}\n${key}`;
+    const confirmFreeze = confirming.current === said;
     const started = epoch.current;
     try {
       const { reply } = await hubRequest({
         action: "answer-command",
         sessionId: session.id,
         command,
-        ...(taskId ? { taskId } : {}),
+        ...(from === "runbook" ? { from } : taskId ? { taskId } : {}),
         ...(confirmFreeze ? { confirmFreeze: true } : {}),
       });
       const answer = reply?.answerCommand;
-      if (answer && !answer.sent) {
-        confirming.current = key;
+      if (answer && !answer.cleared) {
+        // Only a warning the person saw counts as said: one that arrives after they left is not shown.
         if (started === epoch.current) {
+          confirming.current = said;
           setNotice("");
           setError(
             `A change freeze holds on ${answer.label ?? session.label} until ${new Date(answer.frozenUntil ?? Date.now()).toLocaleString()}. ` +
@@ -90,14 +95,24 @@ export function useTerminalHandoff(
               "Press Run in Terminal again to run it anyway.",
           );
         }
-        return false;
+        return undefined;
       }
       confirming.current = null;
-      return true;
+      return { ...(answer?.intentId ? { intentId: answer.intentId } : {}) };
     } catch (error) {
       if (started === epoch.current) setError(error instanceof Error ? error.message : String(error));
-      return false;
+      return undefined;
     }
+  }
+
+  /** Types a command the hub cleared, and tells the hub whether the terminal took it: the audit log's second line. */
+  async function runCleared(command: string, key: string, from: "answer" | "runbook"): Promise<boolean> {
+    const go = await cleared(command, key, from);
+    if (!go) return false;
+    const written = await write(command, true);
+    if (go.intentId)
+      void hubRequest({ action: "answer-command-typed", intentId: go.intentId, typed: written }).catch(() => undefined);
+    return written;
   }
 
   const connected = Boolean(draft?.target && session &&
@@ -116,8 +131,7 @@ export function useTerminalHandoff(
     pending.current = true;
     setWriting(true);
     try {
-      if (!(await cleared(draft.text, `${draft.messageId}:${draft.line}:${draft.text}`))) return false;
-      const written = await write(draft.text, true);
+      const written = await runCleared(draft.text, `${draft.messageId}:${draft.line}:${draft.text}`, "answer");
       if (written) setDraft((current) => current === draft ? null : current);
       return written;
     } finally {
@@ -145,7 +159,7 @@ export function useTerminalHandoff(
       },
       run(command: string, line: number): void {
         if (draft?.messageId === messageId && draft.line === line) void runDraft();
-        else void (async () => (await cleared(command, `${messageId}:${line}:${command}`)) && write(command, true))();
+        else void runCleared(command, `${messageId}:${line}:${command}`, "answer");
       },
     };
   }
@@ -154,5 +168,18 @@ export function useTerminalHandoff(
     setDraft((current) => current && { ...current, text });
   }
 
-  return { draft, connected, hasControl, writing, edit, reset, runDraft, forMessage, run: (command: string) => write(command, true) };
+  return {
+    draft,
+    connected,
+    hasControl,
+    writing,
+    edit,
+    reset,
+    runDraft,
+    forMessage,
+    /** A runbook step from the knowledge base: asked about during a freeze and written down, as an answer's command is. */
+    runStep: (command: string) => runCleared(command, `runbook:${command}`, "runbook"),
+    /** The person's own command from the composer (`!command`): typed as they would type it, without asking. */
+    run: (command: string) => write(command, true),
+  };
 }

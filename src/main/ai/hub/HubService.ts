@@ -43,7 +43,7 @@ import { TerminalRegistry, type DetectedCommandActivity } from "./TerminalRegist
 import { ToolBroker } from "./ToolBroker";
 import { type AgentRuntime } from "./AgentRuntime";
 import { ContextService, scopedMemory } from "./ContextService";
-import { AuditLog } from "./AuditLog";
+import { AuditLog, type AuditInput } from "./AuditLog";
 import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
@@ -957,6 +957,11 @@ export class HubService {
    * the tool that waited for the approval reads it once, and it is dropped when that tool ends.
    */
   readonly changeSecrets = new Map<string, Record<string, string>>();
+  /**
+   * Commands from an answer or a runbook that a person was cleared to type, by the id of their first audit
+   * line, until the window says whether they were typed. Memory only; one older than ten minutes is dropped.
+   */
+  readonly answerIntents = new Map<string, { at: number; entry: Omit<AuditInput, "outcome"> }>();
   /** What a setting change made for the person alone (a key, a code), until it is shown once. Memory only. */
   readonly changeReveals = new Map<string, { label: string; value: string; at: number }>();
   readonly writingAudit = new Set<string>();

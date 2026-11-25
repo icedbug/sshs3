@@ -1,5 +1,6 @@
 import { tooLongNote } from "./runs";
 import crypto from "node:crypto";
+import type { AuditInput } from "../AuditLog";
 import { app } from "electron";
 import type {
   AgentMode,
@@ -711,9 +712,10 @@ export class ConversationsPart {
         this.terminals.settleByPerson(request.sessionId);
         break;
       case "answer-command": {
-        // "Run in Terminal" under an AI answer: the person runs the command as their own. A freeze on its
-        // server does not stop a person, but one click must not slip a command the freeze refused past it
-        // unseen: it is asked about first, and every such run is written down.
+        // "Run in Terminal" under an AI answer or a runbook step: the person runs the command as their own.
+        // A freeze on its server does not stop a person, but one click must not slip a command the freeze
+        // refused past it unseen: it is asked about first. That it is about to be typed is written down
+        // before anything is typed, and the window then says whether it was (answer-command-typed).
         const session = this.terminals.get(request.sessionId);
         if (!session || session.state === "disconnected") throw new Error("That terminal is not connected. Select a current terminal first.");
         const command = requiredText(request.command);
@@ -721,21 +723,33 @@ export class ConversationsPart {
         const until = this.resolveSafetyContext({ target } as Pick<AgentTask, "target">).clusterPolicy?.frozenUntil;
         const frozenUntil = until && until > Date.now() ? until : undefined;
         if (frozenUntil && request.confirmFreeze !== true) {
-          reply = { answerCommand: { sent: false, frozenUntil, label: session.label } };
+          reply = { answerCommand: { cleared: false, frozenUntil, label: session.label } };
           break;
         }
         const person = await this.resolveActorName();
-        await this.audit().append({
+        const entry: Omit<AuditInput, "outcome"> = {
           kind: "command",
-          actor: `${person} (from an AI answer, with Run in Terminal)`,
+          actor: `${person} (${request.from === "runbook" ? "from a runbook in the knowledge base, with Run in terminal" : "from an AI answer, with Run in Terminal"})`,
           target: session.label,
           what: maskContext(command),
-          outcome: "sent",
           approvedBy: `${person} (ran it themselves${frozenUntil ? ", during a change freeze" : ""})`,
           ...(frozenUntil ? { detail: `A change freeze held on ${session.label} until ${utcMinute(frozenUntil)}.` } : {}),
           ...(request.taskId ? { taskId: request.taskId } : {}),
-        });
-        reply = { answerCommand: { sent: true, label: session.label } };
+        };
+        await this.audit().append({ ...entry, outcome: "intent" });
+        const now = Date.now();
+        for (const [id, kept] of this.answerIntents) if (now - kept.at > 10 * 60_000) this.answerIntents.delete(id);
+        const intentId = crypto.randomUUID();
+        this.answerIntents.set(intentId, { at: now, entry });
+        reply = { answerCommand: { cleared: true, intentId, label: session.label } };
+        break;
+      }
+      case "answer-command-typed": {
+        // The second line: whether the command the first one was written for reached the terminal.
+        const kept = this.answerIntents.get(requiredText(request.intentId));
+        if (!kept) throw new Error("That run is not known here any more. Nothing was written down for it.");
+        this.answerIntents.delete(request.intentId);
+        await this.audit().append({ ...kept.entry, outcome: request.typed ? "sent" : "failed" });
         break;
       }
       case "arm":
