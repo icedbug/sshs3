@@ -37,7 +37,7 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "terminal_command",
     description:
-      "Run a shell command in an open sshs3 terminal session, to look and to check (ls, cat, systemctl status, journalctl, df, ps, kubectl get/describe/logs, docker ps/logs, git status/diff). It runs at once. Nobody is asked and nothing checks what the command does. Do not make a change with it: make every change to a system with sshs3_change, so a person can read and approve it, and every file edit with file_write.",
+      "Run a shell command in an open sshs3 terminal session, to look and to check (ls, cat, systemctl status, journalctl, df, ps, kubectl get/describe/logs, docker ps/logs, git status/diff). It runs at once. Nobody is asked and nothing checks what the command does. Do not make a change with it: make every change to a system with sshs3_change, so a person can read and approve it, and every file edit with file_write. The terminal is a real one, so systemctl, journalctl, git and psql open a pager there: use systemctl --no-pager, journalctl --no-pager, git --no-pager and psql -P pager=off.",
     parameters: {
       type: "object",
       properties: {

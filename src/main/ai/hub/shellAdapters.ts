@@ -450,6 +450,30 @@ export function lastVisibleLine(text: string): string {
 }
 
 /**
+ * Whether the text a command drew ends in a pager that waits for a key: less at the end of the text
+ * ("end"), less part way through it ("part"), or more part way through it ("more"). Read off the end of
+ * what the terminal was sent, as the pagers draw it: less writes its prompt in reverse video and clears
+ * the rest of the line after it (or writes a bare ":" and clears the line), more writes "--More--" in
+ * reverse video. Output that only says "(END)" ends with a line break, or is not drawn so, and does not
+ * count: a key typed into a command that does not read it would wait, and run with the next command.
+ */
+export function pagerWaiting(drawn: string): "end" | "part" | "more" | undefined {
+  const tail = drawn.slice(-600);
+  // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+  if (/\x1b\[7m--More--(?:\(\d{1,3}%\))?\x1b\[27m$/.test(tail)) return "more";
+  // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+  if (/(?:^|[\r\n]):\x1b\[K$/.test(tail)) return "part";
+  // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+  const prompt = /\x1b\[7m([^\x1b\r\n]{1,300})\x1b\[27m\x1b\[K$/.exec(tail)?.[1].trim();
+  if (!prompt) return undefined;
+  if (/(?:^|\s)\(END\)(?:\s|$)/.test(prompt)) return "end";
+  // less -M ("lines 1-9", "syslog lines 1-47/1203 3%"), less -m ("byte 1200"), and man's own prompt.
+  if (/^(?:\S+ )?(?:lines \d+-\d+|byte \d+)(?:\/\d+)?(?: \d{1,3}%)?$/.test(prompt)) return "part";
+  if (/^Manual page \S+ line \d+(?:\/\d+)?(?: \d{1,3}%)? \(press h for help or q to quit\)$/.test(prompt)) return "part";
+  return undefined;
+}
+
+/**
  * A prompt that names something (`ops@app-01:~$`, `[root@db-01 ~]#`) and is
  * not just a sign: a bare `$`, `#` or `>` ends many lines of ordinary output,
  * so where the output ends before such a prompt is not known from it.

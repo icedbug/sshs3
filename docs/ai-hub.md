@@ -3403,6 +3403,21 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   told that the command is still running, with the last line the terminal
   showed. The command is not run again, and a change card says its rollback
   did not run. A person who wants it stopped presses Ctrl-C in the terminal.
+- A pager that a command's output opens (less, or more) waits for a key that
+  nobody would press: systemctl and journalctl start one by themselves (and
+  less stays open on a line wider than the terminal even when the text fits),
+  psql does for a table wider than the terminal, git for a log, and sudo takes
+  away the settings that would keep it shut. In the lab this ended most of the
+  runs that failed. When a pager's prompt has stood for a second with nothing
+  more drawn, sshs3 presses the key a person would: q where less shows the end
+  of the text; G part way through it, which takes less to the end first, so
+  the command that writes the text is never cut off; and the space bar in
+  more, which ends by itself after the last screen. The agent is told after
+  the output what was pressed, and what to add to keep a pager from opening
+  (the `terminal_command` tool says so too). Only a prompt drawn the way the
+  pagers draw it counts: a key typed into a command that does not read it
+  would wait in the terminal and run with the next command. Covered by
+  `tests/main/terminalPager.test.ts`, with a real bash and less.
 - A terminal whose last command was let go of before it ended (it ran out of
   time, or a person took the terminal back while it ran) is not typed into by
   itself until that command has been seen to end: its own end marker arrives

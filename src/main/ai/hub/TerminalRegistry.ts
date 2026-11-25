@@ -12,6 +12,7 @@ import {
   detectShellFromHint,
   getShellAdapterCapabilities,
   lastVisibleLine,
+  pagerWaiting,
   parseOscMarkers,
   visibleLine,
   type CommandResult,
@@ -208,6 +209,11 @@ interface LiveTerminal {
     /** Set while the command waits for the line editor to switch bracketed paste on: writes it. */
     start?: () => void;
     startTimer?: NodeJS.Timeout;
+    /** Runs while the command's output is quiet: a pager waiting for a key then gets one (see `answerPager`). */
+    pagerTimer?: NodeJS.Timeout;
+    /** The keys sshs3 pressed in a pager for this command, and what it did: the agent is told. */
+    pagerKeys?: number;
+    pager?: { kind: "less" | "more"; skipped: boolean };
   };
 }
 
@@ -232,6 +238,23 @@ function asTyped(envelope: string, paste: boolean): string {
 /** How long a terminal that delivers text late is given after the last text, and at most, before a command's frame is closed. */
 const LATE_QUIET_MS = 150;
 const LATE_MAX_MS = 800;
+
+/**
+ * How long a pager's prompt must stand with nothing more drawn before sshs3 presses a key in it, and how
+ * many keys it presses for one command at most (more is paged one screen a key).
+ */
+const PAGER_QUIET_MS = 1000;
+const PAGER_KEYS_MAX = 100;
+const NO_PAGER_HINT =
+  "To keep a pager from opening, use systemctl --no-pager, journalctl --no-pager, git --no-pager or psql -P pager=off.";
+/** What the agent is told, after the command's output, when sshs3 pressed keys in a pager for it. */
+function pagerNote(pager: { kind: "less" | "more"; skipped: boolean }): string {
+  if (pager.kind === "more")
+    return `[sshs3: the output went to a pager (more), which waited for a key at each screen. sshs3 pressed the space bar until it ended. ${NO_PAGER_HINT}]`;
+  if (pager.skipped)
+    return "[sshs3: the output went to a pager (less) and was longer than the terminal. sshs3 went to its end (G) and then closed it (q), so the lines in between were not shown and are not above. To read all of it, run the command again with systemctl --no-pager, journalctl --no-pager, git --no-pager or psql -P pager=off.]";
+  return `[sshs3: the output went to a pager (less), which waited for a key. sshs3 pressed q to close it once the end was shown. ${NO_PAGER_HINT}]`;
+}
 
 /** Said when something is to be typed into a terminal whose last command was let go of and has not been seen to end. */
 export const STILL_RUNNING =
@@ -496,6 +519,7 @@ export class TerminalRegistry extends EventEmitter {
         }
         if (result) this.finish(id, s, result);
         else if (s.pending.frames.awaitingLate) this.awaitLate(id, s);
+        else if (!s.pending.handshake) this.watchForPager(s);
         return display;
       } catch (error) {
         this.invalidate(
@@ -550,6 +574,7 @@ export class TerminalRegistry extends EventEmitter {
     if (!pending) return;
     clearTimeout(pending.timer);
     clearTimeout(pending.lateTimer);
+    clearTimeout(pending.pagerTimer);
     // After a handshake, which prints nothing, what the terminal shows last is the prompt.
     if (pending.handshake && pending.frames.awaitingLate) s.promptLine = pending.frames.promptSeen() || undefined;
     s.pending = undefined;
@@ -584,9 +609,46 @@ export class TerminalRegistry extends EventEmitter {
     const { printedBefore: own, ...rest } = result;
     const printed = boundedContext([s.printedBeforeHandshake, withoutTrailingPrompt(own)].filter(Boolean).join("\n"), 4000);
     s.printedBeforeHandshake = pending.handshake && printed ? printed : undefined;
-    pending.resolve({ ...rest, output: boundedContext(result.output), ...(!pending.handshake && printed ? { printedBefore: printed } : {}) });
+    // Keys sshs3 pressed in a pager for the command are said after its output, whatever the bound left of it.
+    const output = boundedContext(result.output) + (pending.pager && !pending.handshake ? `${result.output.endsWith("\n") || !result.output ? "" : "\n"}${pagerNote(pending.pager)}` : "");
+    pending.resolve({ ...rest, output, ...(!pending.handshake && printed ? { printedBefore: printed } : {}) });
     if (!pending.handshake) this.emit("executed", id, result.exitCode);
     this.emit("changed");
+  }
+
+  /**
+   * The command's output came: a moment after it is quiet, a pager it shows waiting for a key gets one
+   * (see `answerPager`). Every new text starts the moment again.
+   */
+  private watchForPager(s: LiveTerminal): void {
+    const pending = s.pending;
+    if (!pending || pending.handshake) return;
+    clearTimeout(pending.pagerTimer);
+    if ((pending.pagerKeys ?? 0) >= PAGER_KEYS_MAX) return;
+    pending.pagerTimer = setTimeout(() => this.answerPager(s, pending), PAGER_QUIET_MS);
+  }
+
+  /**
+   * A pager that shows its prompt and has drawn nothing since waits for a key that nobody would press:
+   * systemctl and journalctl start one by themselves, psql for a table wider than the terminal, git for
+   * a log, and sudo takes away any setting that would keep it shut. sshs3 presses the key a person would,
+   * and the command goes on to its own end: q where less shows the end of the text; G part way through
+   * it, which takes less to the end (q follows), so the command that writes the text is never cut off
+   * (q there would stop it part way); and the space bar in more, which ends by itself after the last
+   * screen. Only a prompt drawn as the pagers draw it counts (see `pagerWaiting`): a key typed into a
+   * command that does not read it would wait in the terminal, and run with the next command.
+   */
+  private answerPager(s: LiveTerminal, pending: NonNullable<LiveTerminal["pending"]>): void {
+    if (s.pending !== pending || pending.frames.awaitingLate) return;
+    const waiting = pagerWaiting(pending.frames.shownSoFar());
+    if (!waiting) return;
+    pending.pagerKeys = (pending.pagerKeys ?? 0) + 1;
+    pending.pager = { kind: waiting === "more" ? "more" : "less", skipped: pending.pager?.skipped === true || waiting === "part" };
+    try {
+      s.write(waiting === "end" ? "q" : waiting === "part" ? "G" : " ");
+    } catch {
+      // A terminal that cannot be written to is let go of by its own write path; the command's time runs out as before.
+    }
   }
 
   /**
@@ -1071,6 +1133,7 @@ export class TerminalRegistry extends EventEmitter {
       clearTimeout(s.pending.timer);
       clearTimeout(s.pending.lateTimer);
       clearTimeout(s.pending.startTimer);
+      clearTimeout(s.pending.pagerTimer);
       // A command that was still waiting to be written never ran: there is no end marker to wait for.
       if (!s.pending.handshake && !disconnected && s.pending.typed) {
         // The command's end marker never came. What the terminal showed last is kept (a question for
