@@ -708,6 +708,14 @@ export function InboxView({
                 Approve the plan
               </button>
             )}
+            <button
+              type="button"
+              className="ai-btn-danger"
+              disabled={busy}
+              onClick={() => void send(item.id, { action: "plan-decide", taskId: item.taskId!, approved: false })}
+            >
+              Reject Plan
+            </button>
             <button type="button" onClick={() => onOpenTask(item.taskId!)}>
               Read it
             </button>

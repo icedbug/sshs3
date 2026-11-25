@@ -56,6 +56,11 @@ describe("what is waiting for a person", () => {
     expect(act).toHaveBeenCalledWith({ action: "approve", taskId: "t1", changeId: "c1", approved: true });
     fireEvent.click(within(screen.getByTestId("inbox-plan")).getByRole("button", { name: "Approve the plan" }));
     expect(act).toHaveBeenCalledWith({ action: "plan-decide", taskId: "t2", approved: true });
+    // Found by the security lead tester: the inbox offered no way to say no to a plan.
+    const reject = () => within(screen.getByTestId("inbox-plan")).getByRole("button", { name: "Reject Plan" });
+    await waitFor(() => expect(reject()).toBeEnabled());
+    fireEvent.click(reject());
+    await waitFor(() => expect(act).toHaveBeenCalledWith({ action: "plan-decide", taskId: "t2", approved: false }));
     fireEvent.click(within(screen.getByTestId("inbox-question")).getByRole("button", { name: "Answer" }));
     expect(openTask).toHaveBeenCalledWith("t3");
     // Sending a ticket back needs a note saying what is missing.

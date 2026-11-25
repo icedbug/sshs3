@@ -346,6 +346,20 @@ describe("a plan that takes two people", () => {
     expect(act).toHaveBeenCalledWith({ action: "plan-decide", taskId: "task-1", approved: true });
   });
 
+  // Found by the security lead tester: a plan proposed during a freeze showed an active Approve with no word
+  // of the freeze.
+  it("says on the card that a change freeze holds, before anybody presses Approve", () => {
+    const until = Date.now() + 3_600_000;
+    render(<PlanCard taskId="task-1" plan={plan({ frozen: { on: "web-prod-01", until } })} busy={false} act={vi.fn(async () => undefined)} />);
+    expect(screen.getByTestId("plan-frozen")).toHaveTextContent(
+      `A change freeze holds on web-prod-01 until ${new Date(until).toLocaleString()}. The plan cannot be approved before it ends, unless an administrator ends the freeze sooner.`,
+    );
+    cleanup();
+    // Once the freeze is over, the card says nothing of it.
+    render(<PlanCard taskId="task-1" plan={plan({ frozen: { on: "web-prod-01", until: Date.now() - 1000 } })} busy={false} act={vi.fn(async () => undefined)} />);
+    expect(screen.queryByTestId("plan-frozen")).toBeNull();
+  });
+
   it("waits for a second person once this person has approved, and offers no second approval", () => {
     render(<PlanCard taskId="task-1" plan={plan({ approvals: [{ actor: "Omar Lind", actorId: "user:u1", allowed: true, at: 1 }], askEach: "person" })} busy={false} act={vi.fn(async () => undefined)} />);
     expect(screen.getByTestId("plan-status")).toHaveTextContent("waiting for a second person");

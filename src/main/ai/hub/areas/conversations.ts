@@ -33,6 +33,7 @@ import { answerSourceReply, evidenceSourceReply, messageForView } from "../answe
 import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS, isFromHub, log } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
+import { utcMinute } from "../../../../shared/utcMinute";
 
 /**
  * A person's requests about a conversation, and the settings.
@@ -731,7 +732,7 @@ export class ConversationsPart {
           what: maskContext(command),
           outcome: "sent",
           approvedBy: `${person} (ran it themselves${frozenUntil ? ", during a change freeze" : ""})`,
-          ...(frozenUntil ? { detail: `A change freeze held on ${session.label} until ${new Date(frozenUntil).toISOString()}.` } : {}),
+          ...(frozenUntil ? { detail: `A change freeze held on ${session.label} until ${utcMinute(frozenUntil)}.` } : {}),
           ...(request.taskId ? { taskId: request.taskId } : {}),
         });
         reply = { answerCommand: { sent: true, label: session.label } };

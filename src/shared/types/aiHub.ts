@@ -205,6 +205,11 @@ export interface AgentPlan {
   /** How many different people have to approve it, written when it is proposed and again when somebody answers. */
   requiredApprovals?: number;
   /**
+   * A change freeze held on one of the plan's servers when it was proposed: where, and until when. The card
+   * says so before anybody presses Approve. Whether it still holds is looked at again when somebody does.
+   */
+  frozen?: { on: string; until: number };
+  /**
    * It was a plan for production when it was approved, so the people who approved it were ones who
    * may approve there: their approval then also covers a command on production that the plan lists.
    */

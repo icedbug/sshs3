@@ -209,6 +209,12 @@ export function PlanCard({
             {people}
           </small>
         )}
+        {plan.frozen && plan.frozen.until > Date.now() && (
+          <small className="ai-error" data-testid="plan-frozen" role="status">
+            A change freeze holds on {plan.frozen.on} until {new Date(plan.frozen.until).toLocaleString()}. The plan cannot be
+            approved before it ends, unless an administrator ends the freeze sooner.
+          </small>
+        )}
 
         <div className="ai-plan-actions">
           {!gaveMine && (

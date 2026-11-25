@@ -11,6 +11,7 @@ import type {
   StartAgentTask,
 } from '../../../shared/types/aiHub';
 import type { AiEgressPolicy } from '../../../shared/types/ai';
+import { untilIn } from '../../../shared/utcMinute';
 import { validateChatEgress } from '../../../shared/dataDestination';
 import type { HubRunEvent, RunView } from '../../ai/hub/areas/chatRuns';
 import type { HubService } from '../../ai/hub/HubService';
@@ -955,8 +956,7 @@ export class ChatAgentService {
         if (f.noted.has(change.id) || change.decidedHow !== 'policy' || (change.at ?? 0) < f.since - 1000) continue;
         if (!/change freeze/i.test(change.output ?? '')) continue;
         f.noted.add(change.id);
-        const until = Date.parse(/until (\S+?)\.(?:\s|$)/.exec(change.output ?? '')?.[1] ?? '');
-        await this.say(place, chatText.freeze(change.target, Number.isFinite(until) ? until : undefined));
+        await this.say(place, chatText.freeze(change.target, untilIn(change.output ?? '')));
       }
       if (view.status === 'failed') await this.say(place, chatText.runFailed(view.error));
       else if (view.status !== 'cancelled' && view.text?.trim()) {

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { appendSourceCalls } from "../../../../shared/answerSources";
+import { utcMinute } from "../../../../shared/utcMinute";
 import path from "node:path";
 import type { AgentChange, AgentSchedule, AgentTask, ChatOrigin, MissionAgent, StartAgentTask } from "../../../../shared/types/aiHub";
 import { isPlainCommand } from "../../../../shared/types/aiHub";
@@ -1082,7 +1083,7 @@ export class RunsPart {
         ) {
           change.status = "denied";
           change.decidedHow = "policy";
-          change.output = `A change freeze holds here until ${new Date(safetyCtx.clusterPolicy.frozenUntil).toISOString()}. No change card or file write is run here until it ends.`;
+          change.output = `A change freeze holds here until ${utcMinute(safetyCtx.clusterPolicy.frozenUntil)}. No change card or file write is run here until it ends.`;
           task.changes.push(change);
           this.changed();
           return false;

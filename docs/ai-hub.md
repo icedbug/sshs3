@@ -1093,7 +1093,10 @@ reads them. There are none in the desktop app and none in the demo lab.
   Commands still run. Until it ends, the broker refuses a change card or a
   file write before anything is asked or typed (`ToolBroker`, code
   `change_freeze`), an external agent's action that is not a command is
-  refused, and a plan cannot be approved. Nothing looks at what a command
+  refused, and a plan cannot be approved. A plan proposed during a freeze
+  says so on its card before anybody presses Approve (`AgentPlan.frozen`),
+  and the inbox offers Reject Plan beside Approve the plan. Every message
+  about a freeze gives its end as people read it, in UTC (`utcMinute`). Nothing looks at what a command
   does, so a freeze does not stop an agent that runs a change as a plain
   command: the agent is told not to. An administrator can end a freeze early. A freeze a person set
   for a cluster in their own rules is stopped at the same places. Run in

@@ -33,6 +33,7 @@ import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage
 import { requiredText, integer } from "../hubHelpers";
 import { log, BOOLEAN_POLICY_NAMES, active, fromHub, REVEAL_KEPT_MS } from "../hubShared";
 import { chatServiceLabel } from "../chatFence";
+import { utcMinute } from "../../../../shared/utcMinute";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
@@ -201,6 +202,16 @@ export class SafetyPart {
     return { status, tags: ctx.targetTags ?? [] };
   }
 
+  /** The first of a plan's servers a change freeze holds on now, and until when. */
+  planFreeze(this: HubService, task: AgentTask, plan: NonNullable<AgentTask["plan"]>): { on: string; until: number } | undefined {
+    const targets = Array.from(new Set([task.target?.label, ...plan.steps.map((s) => s.target)].filter((t): t is string => Boolean(t?.trim()))));
+    for (const target of targets.length ? targets : [undefined]) {
+      const until = this.resolveSafetyContext(task, target ?? task.target?.label).clusterPolicy?.frozenUntil;
+      if (until && until > Date.now()) return { on: target ?? task.target?.label ?? "this target", until };
+    }
+    return undefined;
+  }
+
   /** A plan was just proposed: how many people have to approve it is written on it, for whoever reads it. */
   planProposed(this: HubService, task: AgentTask): void {
     const plan = task.plan;
@@ -220,6 +231,10 @@ export class SafetyPart {
     const needs = this.planApprovalStatus(task, plan, plan.approvals ?? []).status.requiredApprovals;
     if (needs > 1) plan.requiredApprovals = needs;
     else delete plan.requiredApprovals;
+    // A freeze on one of its servers: the card says so before anybody presses Approve.
+    const frozen = this.planFreeze(task, plan);
+    if (frozen) plan.frozen = frozen;
+    else delete plan.frozen;
     this.emitRun({ type: "plan", taskId: task.id, planId: plan.id, status: plan.status });
   }
 
@@ -271,14 +286,9 @@ export class SafetyPart {
       if (task.plan !== plan || plan.status !== "proposed") throw new Error(PLAN_REPLACED);
       if (active(task)) throw new Error("The agent is still working; decide when it has stopped");
     }
-    const planTargets = Array.from(new Set([task.target?.label, ...plan.steps.map((s) => s.target)].filter((t): t is string => Boolean(t?.trim()))));
     if (answer.approved) {
-      for (const tgt of planTargets.length ? planTargets : [undefined]) {
-        const tgtCtx = this.resolveSafetyContext(task, tgt ?? task.target?.label);
-        if (tgtCtx.clusterPolicy?.frozenUntil && tgtCtx.clusterPolicy.frozenUntil > Date.now()) {
-          throw new Error(`A change freeze holds on ${tgt ?? task.target?.label ?? "this target"} until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}. The plan cannot be approved before it ends.`);
-        }
-      }
+      const frozen = this.planFreeze(task, plan);
+      if (frozen) throw new Error(`A change freeze holds on ${frozen.on} until ${utcMinute(frozen.until)}. The plan cannot be approved before it ends.`);
       const prevApprovals = [...(plan.approvals ?? [])];
       if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actorId.toLowerCase())) {
         throw new Error("You already approved this plan; it needs the approval of another person.");
@@ -893,7 +903,7 @@ export class SafetyPart {
           const now = next.clusterPolicies ?? {};
           const say = (p: (typeof now)[string] | undefined): string =>
             p
-              ? [p.maxMode ? `at most "${modeLabel(p.maxMode)}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
+              ? [p.maxMode ? `at most "${modeLabel(p.maxMode)}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${utcMinute(p.frozenUntil)}` : ""].filter(Boolean).join(", ") || "no limits"
               : "none";
           for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
@@ -954,7 +964,7 @@ export class SafetyPart {
           const key = freezeKey(request.freeze.cluster);
           const why = typeof request.freeze.why === "string" && request.freeze.why.trim() ? clip(request.freeze.why.trim(), 200) : undefined;
           freezes[key] = { until: now + Math.round(hours * 3_600_000), by: actor, at: now, ...(why ? { why } : {}) };
-          moved.push(`change freeze on ${freezeName(key)} until ${new Date(freezes[key].until).toISOString()}${why ? ` (${why})` : ""}`);
+          moved.push(`change freeze on ${freezeName(key)} until ${utcMinute(freezes[key].until)}${why ? ` (${why})` : ""}`);
         }
         if (!moved.length) break;
         await this.audit().append({ kind: "setting", actor, target: "everyone on this server", what: moved.join("; "), outcome: "intent" });

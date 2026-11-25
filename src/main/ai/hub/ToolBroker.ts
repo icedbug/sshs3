@@ -12,6 +12,7 @@ import type {
   TerminalSession,
 } from "../../../shared/types/aiHub";
 import { isPlainCommand } from "../../../shared/types/aiHub";
+import { utcMinute } from "../../../shared/utcMinute";
 import { CHAT_APP_TOOLS, mayKeepNotes, sensitiveFile, type ChatFenceCheck } from "./chatFence";
 import type { TerminalRegistry } from "./TerminalRegistry";
 import { isProdTag } from "./safetyPolicy";
@@ -2141,7 +2142,7 @@ export class ToolBroker {
         clusterPolicy?.frozenUntil &&
         clusterPolicy.frozenUntil > Date.now()
       ) {
-        const until = new Date(clusterPolicy.frozenUntil).toISOString();
+        const until = utcMinute(clusterPolicy.frozenUntil);
         change.status = "denied";
         change.decidedHow = "policy";
         change.output = `A change freeze holds here until ${until}. No change card or file write is run here until it ends.`;

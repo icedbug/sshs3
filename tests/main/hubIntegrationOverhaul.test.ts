@@ -626,21 +626,28 @@ describe("Wave 2 Hub integration overhaul", () => {
     expect(plan?.approvals?.[0]?.actorId).toBe("local");
 
     // Freeze blocks plan approval
+    const frozenUntil = Date.now() + 3_600_000;
     await hub.request({
       action: "safety-policy-save",
       policy: {
-        clusterPolicies: { "prod-api": { frozenUntil: Date.now() + 3_600_000 } },
+        clusterPolicies: { "prod-api": { frozenUntil } },
       },
     });
-    hub.store.data.tasks.push({
+    const frozenTask: AgentTask = {
       ...planTask,
       id: "task-frozen",
       status: "completed",
       plan: { ...planTask.plan!, id: "plan-frozen", status: "proposed", approvals: undefined } as AgentTask["plan"],
-    });
+    };
+    hub.store.data.tasks.push(frozenTask);
+    // Found by the security lead tester: a plan proposed during a freeze showed an active Approve with no
+    // word of the freeze, and the refusal gave the time as a raw ISO string.
+    hub.planProposed(frozenTask);
+    expect(frozenTask.plan!.frozen).toEqual({ on: "prod-api-1", until: frozenUntil });
+    const readable = `${new Date(frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC`;
     await expect(
       hub.request({ action: "plan-decide", taskId: "task-frozen", approved: true }),
-    ).rejects.toThrow("change freeze");
+    ).rejects.toThrow(`A change freeze holds on prod-api-1 until ${readable}. The plan cannot be approved before it ends.`);
 
     // Handoffs: no limit on how many
     const mkAgent = (id: string, name: string): MissionAgent => ({
