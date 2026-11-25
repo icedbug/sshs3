@@ -57,7 +57,10 @@ export class SourceCapture {
     return this.mark(text, { kind: "memory", id: str(r.id), label: str(r.title), updatedAt: num(r.updatedAt) });
   }
   private terminal(r: Row, text: string, at?: number, attachment = false): string {
-    return this.mark(text, { kind: "terminal", id: str(r.id), label: str(r.label || r.id), observedAt: at, ...(attachment && { attachment: true }) });
+    // One terminal, one id: an attachment names it "terminal:<id>", a command's output "<id>". Two ids
+    // listed one terminal twice among an answer's sources, as if there were two.
+    const id = str(r.id).replace(/^terminal:/, "");
+    return this.mark(text, { kind: "terminal", id, label: str(r.label || id), observedAt: at, ...(attachment && { attachment: true }) });
   }
 
   indexText(text: string, value: object): string {

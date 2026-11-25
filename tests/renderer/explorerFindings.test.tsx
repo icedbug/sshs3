@@ -211,4 +211,20 @@ describe("what the exploring testers found", () => {
       expect(document.body.textContent).toBe("");
     });
   });
+
+  // H10: in the person's own pasted text, every /tmp/... path and URL path such as /api/checkout became a
+  // file chip, which broke the lines up. A file chip is for an answer that points at a file.
+  it("leaves the person's own text as they wrote it, and links files in an answer", () => {
+    const actions = { edit: vi.fn(), retry: vi.fn(), fork: vi.fn(), copy: vi.fn(), saveToMemory: vi.fn(), followUp: vi.fn(), openRef: vi.fn(), openFileRef: vi.fn(), stage: vi.fn(), run: vi.fn() };
+    const row = (message: object) =>
+      render(
+        <MessageRow message={message as never} taskId="task-1" running={false} busy={false} copied={false} isLast={false} canRetry streaming={false} clipped={false} actions={actions} />,
+      );
+    const person = row({ id: "m1", role: "user", at: 1000, text: "for i in 1 2; do echo m-$i >> /tmp/lina-g4.txt; done; GET /api/checkout 502" });
+    expect(person.container.querySelectorAll('[data-testid="ai-file-ref-btn"]')).toHaveLength(0);
+    expect(person.container.textContent).toContain(">> /tmp/lina-g4.txt; done");
+    person.unmount();
+    const answer = row({ id: "m2", role: "assistant", at: 1000, text: "The loop writes to /tmp/lina-g4.txt." });
+    expect(answer.container.querySelectorAll('[data-testid="ai-file-ref-btn"]').length).toBeGreaterThan(0);
+  });
 });

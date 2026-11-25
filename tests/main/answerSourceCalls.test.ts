@@ -36,6 +36,18 @@ describe("the evidence actually sent for an answer", () => {
     expect(expired[0].sources[0].excerpt).toBeUndefined();
   });
 
+  // Found by an exploring tester: the same terminal was listed twice among an answer's sources, once as
+  // "terminal:<id>" (an attachment) and once as "<id>" (a command's output), so it read as two terminals.
+  it("names one terminal by one id, whichever way its text came in", () => {
+    const cap = new SourceCapture(s => s);
+    const attached = cap.context({ attachments: [{ id: "terminal:23b2da32", kind: "terminal", label: "web-02", text: "load average: 0.10", observedAt: 1 }] }) as { attachments: Array<{ text: string }> };
+    const ran = cap.tool("terminal_command", { output: "uptime 12 days", source: "terminal:23b2da32", sourceLabel: "web-02" }, { sessionId: "23b2da32", label: "web-02" }, 2) as { output: string };
+    const call = cap.wire(JSON.stringify({ messages: [{ role: "user", content: attached.attachments[0].text }, { role: "assistant", content: ran.output }] }), 3).call;
+    const ids = call.sources.filter((x) => x.kind === "terminal").map((x) => x.id);
+    expect(ids.length).toBe(2);
+    expect(new Set(ids)).toEqual(new Set(["23b2da32"]));
+  });
+
   it("reports retained legacy tool text without assigning it a current source", () => {
     const cap = new SourceCapture(s => s);
     const old = cap.historical({name: "sshs3_kb_search", output: '{"page":"old","body":"older revision"}'});

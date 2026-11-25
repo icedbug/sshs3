@@ -72,6 +72,8 @@ export interface RichMarkdownContentProps {
   onOpenRef?: (ref: string) => void;
   /** Invoked when the user clicks a parsed `host:/path:line` or `/path:line` citation. */
   onOpenFileRef?: (fileRef: FileRef) => void;
+  /** File names become buttons that open them (default). A person's own text is left as they wrote it. */
+  linkFiles?: boolean;
 }
 
 /**
@@ -85,8 +87,9 @@ export function RichMarkdownContent({
   refs,
   onOpenRef,
   onOpenFileRef,
+  linkFiles = true,
 }: RichMarkdownContentProps) {
-  const linked = linkReportRefs(text, refs);
+  const linked = linkFiles ? linkReportRefs(text, refs) : text;
 
   return (
     <div className="ai-prose">

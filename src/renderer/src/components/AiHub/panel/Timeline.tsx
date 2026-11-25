@@ -185,6 +185,8 @@ export const MessageRow = memo(function MessageRow({
         onOpenRef={actions.openRef}
         terminalActions={terminalActions}
         onOpenFileRef={actions.openFileRef}
+        // What a person pasted (a log, a loop) stays as they wrote it: a file button is for an answer.
+        linkFiles={!fromPerson}
       />
       {message.role === "assistant" && taskId && (
         <AnswerSources key={`${taskId}:${message.id}`} taskId={taskId} messageId={message.id} count={message.sourceCallCount} streaming={streaming} />
