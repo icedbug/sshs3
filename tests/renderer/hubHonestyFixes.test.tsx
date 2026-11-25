@@ -178,6 +178,22 @@ describe("schedules", () => {
     );
   });
 
+  it("on the team's web server offers no \"This computer\", which that server refuses, and starts on a server", () => {
+    // In the lab every new job on the team's web server kept "This computer" and was then "Blocked: This
+    // is a shared sshs3 server: a schedule runs on one of your servers, not on the server itself."
+    (window as unknown as { __SSHS3_WEB_MODE__?: boolean }).__SSHS3_WEB_MODE__ = true;
+    try {
+      render(<Schedules hub={makeHub()} act={vi.fn(async () => makeHub())} />);
+      fireEvent.click(screen.getByRole("button", { name: "New job" }));
+      const where = within(screen.getByTestId("schedule-form")).getByLabelText("Where it runs") as HTMLSelectElement;
+      expect(within(where).queryByRole("option", { name: "This computer" })).not.toBeInTheDocument();
+      expect(where.value).not.toBe("local");
+      expect(where.value).toBe(where.options[0].value);
+    } finally {
+      (window as unknown as { __SSHS3_WEB_MODE__?: boolean }).__SSHS3_WEB_MODE__ = undefined;
+    }
+  });
+
   it("runs a job now, but not a paused one", () => {
     const act = vi.fn(async () => makeHub());
     render(<Schedules hub={makeHub({ schedules: [schedule("on"), schedule("off", { enabled: false })] })} act={act} />);

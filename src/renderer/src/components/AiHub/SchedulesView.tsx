@@ -9,6 +9,7 @@ import {
   type ShellKind,
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
+import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { type Act } from "./panelShared";
 
 interface Draft {
@@ -228,7 +229,7 @@ export function Schedules({
 
   const applyQuietSentinelPreset = (): void => {
     setDraft((prev) => ({
-      ...(prev ?? emptyDraft),
+      ...(prev ?? freshDraft()),
       title: prev?.title.trim() ? prev.title : QUIET_SENTINEL_PRESET.title,
       prompt: prev?.prompt.trim() ? prev.prompt : QUIET_SENTINEL_PRESET.prompt,
       minutes: QUIET_SENTINEL_PRESET.minutes,
@@ -248,10 +249,15 @@ export function Schedules({
   const matchesTargetFilter = (opt: TargetOption): boolean => matches(opt, tf);
   // "This computer" is filtered like any server. Left exempt, it stayed selected
   // while the person typed a server name, and the job saved for the wrong place.
+  // On the team's web server there is none: a job runs on one of the team's servers, and the server
+  // refuses one that would run on itself.
+  const onTeamServer = isWebBrowserMode();
   const allTargets: TargetOption[] = [
-    { id: "local", label: "This computer" },
+    ...(onTeamServer ? [] : [{ id: "local", label: "This computer" }]),
     ...TARGET_GROUPS.flatMap(([key]) => groupedTargets[key]),
   ];
+  /** A new job starts on this computer, or, where there is none, on the first of the servers. */
+  const freshDraft = (): Draft => ({ ...emptyDraft, profileId: allTargets[0]?.id ?? "local" });
   const shownTargets = allTargets.filter(matchesTargetFilter);
   const shownTargetIds = new Set(shownTargets.map((o) => o.id));
   const localShown = shownTargetIds.has("local");
@@ -299,7 +305,7 @@ export function Schedules({
           <button
             type="button"
             className="ai-btn-accent"
-            onClick={() => setDraft(draft ? undefined : { ...emptyDraft })}
+            onClick={() => setDraft(draft ? undefined : freshDraft())}
           >
             {draft ? "Close" : "New job"}
           </button>
