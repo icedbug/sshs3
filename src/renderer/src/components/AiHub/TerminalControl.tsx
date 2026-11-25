@@ -23,6 +23,8 @@ function codeLangForShell(shell?: ShellKind): string {
 
 interface ControlBarViewProps {
   sessionLabel?: string;
+  /** False when the terminal's session has ended: nobody controls it until it is connected again. */
+  connected?: boolean;
   shell?: ShellKind;
   task?: AgentTask;
   pending?: AgentChange;
@@ -36,6 +38,7 @@ interface ControlBarViewProps {
 
 function TerminalControlBar({
   sessionLabel,
+  connected = true,
   shell,
   task,
   pending,
@@ -54,7 +57,9 @@ function TerminalControlBar({
         : stepModeActive
           ? "AI step-by-step"
           : "AI working"
-      : "You control";
+      : connected
+        ? "You control"
+        : "Not connected";
 
   const reasonText = pending?.description;
   const targetLabel = pending?.target || task?.target?.label || sessionLabel;
@@ -308,6 +313,7 @@ function LegacyTerminalControl({
   return (
     <TerminalControlBar
       sessionLabel={session.label}
+      connected={session.state !== "disconnected"}
       shell={session.shell}
       task={task}
       pending={pending}

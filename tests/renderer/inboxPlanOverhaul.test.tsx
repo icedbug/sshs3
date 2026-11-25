@@ -546,3 +546,28 @@ describe("TaskTodos progress bar, status icons, spinner & elapsed timing", () =>
     expect(screen.getByTestId("todo-elapsed-2")).toHaveTextContent("8.1s");
   });
 });
+
+describe("the strip over a terminal", () => {
+  // In the lab, a tab restored after the page was opened again showed "Session ended (code 255)" with
+  // a Reconnect button, and the strip over it still said "You control · web-02": a question asked then
+  // went to the assistant without the server, which answered that no server was selected.
+  const strip = (state: "ready" | "disconnected") =>
+    render(
+      <TerminalControl
+        sessionId="s1"
+        hub={makeHub({ sessions: [{ id: "s1", generation: "g1", label: "web-02", kind: "ssh", shell: "bash", state, updatedAt: 1 }] })}
+        onRequest={vi.fn(async () => makeHub())}
+      />,
+    );
+
+  it("says the person controls a terminal that is connected", () => {
+    strip("ready");
+    expect(screen.getByTestId("terminal-control-bar")).toHaveTextContent("You control · web-02");
+  });
+
+  it("says a terminal whose session ended is not connected, not that the person controls it", () => {
+    strip("disconnected");
+    expect(screen.getByTestId("terminal-control-bar")).toHaveTextContent("Not connected · web-02");
+    expect(screen.getByTestId("terminal-control-bar")).not.toHaveTextContent("You control");
+  });
+});

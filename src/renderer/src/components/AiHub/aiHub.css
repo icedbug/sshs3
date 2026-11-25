@@ -233,7 +233,13 @@
   border-color: var(--danger-solid) !important;
   color: #ffffff !important;
   font-weight: 600;
-  animation: ai-pulse-dot 1s ease-in-out infinite;
+  /* A glow around it, not the dot's pulse: a button that shrinks and fades moves under the pointer. */
+  animation: ai-confirm-glow 1.2s ease-in-out infinite;
+}
+
+@keyframes ai-confirm-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger-solid) 60%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger-solid) 0%, transparent); }
 }
 
 .ai-confirm-wrap {
