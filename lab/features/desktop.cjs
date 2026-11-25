@@ -130,8 +130,13 @@ async function answerHostKey(p, ws, server) {
 }
 
 /** Takes the lab's servers out of the account's known_hosts again, as they were before the run. */
-function forgetHostKeys(ws) {
-  for (const s of ws.servers) execFileSync('ssh-keygen', ['-R', s.ip], { stdio: 'ignore' });
+function forgetHostKeys(ws, hadKnownHosts) {
+  const file = path.join(os.homedir(), '.ssh', 'known_hosts');
+  for (const s of ws.servers) execFileSync('ssh-keygen', ['-R', s.ip, '-f', file], { stdio: 'ignore' });
+  // ssh-keygen keeps the file as it was in known_hosts.old: the lab's keys, which go too. A file the run
+  // made goes when it is empty again.
+  fs.rmSync(`${file}.old`, { force: true });
+  if (!hadKnownHosts && fs.existsSync(file) && fs.statSync(file).size === 0) fs.rmSync(file);
 }
 
 /** The person at the desktop app: the model through the lab's proxy, and the lab's servers saved. */
@@ -255,6 +260,9 @@ async function main() {
   fs.mkdirSync(dir, { recursive: true });
   const runId = `${path.basename(ws.modelCalls.maria, '.jsonl').replace(/-maria$/, '')}-desktop-${stamp}`;
   const callsFile = path.join(path.dirname(ws.modelCalls.maria), `${runId}.jsonl`);
+  // OpenSSH reads the account's own known_hosts whatever HOME says: whether it was there before decides
+  // whether an empty one is taken away at the end.
+  const hadKnownHosts = fs.existsSync(path.join(os.homedir(), '.ssh', 'known_hosts'));
   const { home, key, publicKey } = await homeFor(ws, dir);
   const results = [];
   let app;
@@ -301,7 +309,7 @@ async function main() {
     await app?.close().catch(() => {});
     await forget(ws, publicKey).catch(() => {});
     try {
-      forgetHostKeys(ws);
+      forgetHostKeys(ws, hadKnownHosts);
     } catch {
       // Nothing to take out.
     }
