@@ -347,6 +347,20 @@ describe("a plan that says each change is asked about", () => {
     expect(approvalMessage(covered)).not.toMatch(/destructive/);
     expect(approvalMessage(asks.plan!)).not.toMatch(/destructive/);
   });
+
+  it("says, when the review had findings, that the user saw them and approved the plan as it stands", () => {
+    // In the lab the review asked for changes, the person approved the plan anyway, and the agent
+    // then refused to carry out its own approved plan because of the review. Nothing was done.
+    const findings = ["Step 2's check passes even if nginx did not reload."];
+    const reviewed = plan({ status: "approved", review: { verdict: "revise", findings } });
+    const told = approvalMessage(reviewed);
+    expect(told).toContain("The review's findings were on the plan the user approved:");
+    expect(told).toContain("Step 2's check passes even if nginx did not reload.");
+    expect(told).toContain("The user approved the plan as it stands, so carry it out: do not stop to revise it.");
+    expect(told).toContain("Where a finding shows a step would do harm, say so before that step and ask.");
+    // A plan the review passed has no word about findings.
+    expect(approvalMessage(plan({ status: "approved" }))).not.toMatch(/findings/);
+  });
 });
 
 // ------------------------------------------------------------------ in the run loop

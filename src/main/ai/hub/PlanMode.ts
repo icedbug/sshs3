@@ -547,6 +547,14 @@ export function approvalMessage(plan: AgentPlan, note?: string): string {
       ? `Every change card is asked about before it runs, also the ones the plan lists: ${ASKS_EACH_WHY[plan.askEach]}. Make them one at a time with sshs3_change and wait for each answer. Commands that only look run as usual. Anything the plan does not list is a deviation: say so.`
       : "Make each change with sshs3_change, exactly as the plan lists it: then it runs without asking the user again. Do not tell the user that each change will be approved separately: it will not. Commands that only look run as usual. Anything else you find you need is a deviation: say so, and it will be asked about as usual.",
     ...(note ? [`The user added: ${boundedContext(note, 1000)}`] : []),
+    // The review's findings were on the card the user approved. Without this the agent, told earlier to
+    // fix them, refused in the lab to carry out the plan it had been allowed to, and nothing was done.
+    ...(plan.review.verdict === "revise" && plan.review.findings.length > 0
+      ? [
+          `The review's findings were on the plan the user approved: ${plan.review.findings.map((f) => boundedContext(f, 400)).join(" ")}`,
+          "The user approved the plan as it stands, so carry it out: do not stop to revise it. Where a finding shows a step would do harm, say so before that step and ask.",
+        ]
+      : []),
     "",
     renderPlan(plan),
   ].join("\n");
