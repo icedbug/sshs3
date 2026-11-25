@@ -47,7 +47,7 @@ module.exports = [
     title: 'The agent bot answers in the simulated chat, as it would in Slack or Mattermost',
     doc: 'docs/ai-hub.md, "Agent in chat: the agent bot" ("Try it")',
     expected:
-      'Under Agent in chat, an administrator writes to the agent bot in the simulated chat, as a linked person in a direct message; the bot answers in the thread, about the server asked about.',
+      'An administrator gives the agent bot a model ("Copy my model"), turns on direct messages and "Answer in chat", and writes to it in the simulated chat as a linked person; the bot answers in the thread, about the server asked about.',
     timeoutMs: 900_000,
     async run(ctx) {
       const m = await ctx.as('maria');
@@ -57,18 +57,35 @@ module.exports = [
       await card.waitFor({ state: 'visible', timeout: 15_000 });
       await card.scrollIntoViewIfNeeded();
       await ctx.shot('maria', 'card');
-      const tryForm = m.page.getByTestId('agent-chat-try');
-      if (!(await tryForm.isVisible().catch(() => false))) {
-        const open = card.getByText(/Try it|Try the agent bot|simulated/i).first();
-        if (await open.isVisible().catch(() => false)) await open.click();
-        await m.page.waitForTimeout(800);
-      }
-      if (!ctx.expect(await tryForm.isVisible().catch(() => false), 'the simulated chat can be opened', (await card.innerText()).slice(0, 600))) return;
+      const open = async (summary) => {
+        const fold = card.locator('details').filter({ has: m.page.locator('summary', { hasText: summary }) }).first();
+        if (!(await fold.evaluate((d) => d.open).catch(() => false))) await fold.locator('summary').first().click();
+        await m.page.waitForTimeout(400);
+        return fold;
+      };
+      // Off until an administrator sets it up: it is given a model, and told whom to answer.
+      const model = await open('Model, budget and limits');
+      await model.getByRole('button', { name: 'Copy my model' }).click();
+      await m.page.waitForTimeout(1500);
+      const uses = await card.getByTestId('agent-chat-model-now').innerText().catch(() => '');
+      ctx.expect(/uses/i.test(uses), 'the agent bot gets the administrator\'s model', uses);
+      const dms = await open('Direct messages');
+      const answerDms = dms.getByLabel('Answer direct messages');
+      if (!(await answerDms.isChecked())) await answerDms.check();
+      await dms.getByRole('button', { name: 'Save direct messages' }).click();
+      await m.page.waitForTimeout(1200);
+      const answer = card.getByLabel('Answer in chat');
+      if (!(await answer.isChecked())) await answer.click();
+      await m.page.waitForTimeout(1200);
+      await ctx.shot('maria', 'set-up');
+      const tryIt = await open('Try it');
+      const tryForm = card.getByTestId('agent-chat-try');
+      if (!ctx.expect(await tryForm.isVisible().catch(() => false), 'the simulated chat can be opened', (await tryIt.innerText()).slice(0, 400))) return;
       await tryForm.scrollIntoViewIfNeeded();
-      const noModel = await m.page.getByTestId('agent-chat-try-no-model').innerText().catch(() => '');
+      const noModel = await card.getByTestId('agent-chat-try-no-model').innerText().catch(() => '');
       if (noModel) ctx.note(`It says: ${noModel}`);
-      await tryForm.getByLabel('Channel to try').selectOption({ value: 'dm' }).catch(() => {});
-      await tryForm.getByLabel('Who writes').selectOption({ value: 'me' }).catch(() => {});
+      await tryForm.getByLabel('Channel to try').selectOption({ value: 'dm' });
+      await tryForm.getByLabel('Who writes').selectOption({ value: 'me' });
       await tryForm.getByLabel('Message to the agent bot').fill('How long has web-01 been up?');
       await tryForm.getByRole('button').filter({ hasText: /Send|Post|Try/ }).first().click();
       const until = Date.now() + 600_000;
@@ -107,9 +124,13 @@ module.exports = [
         await editor.locator('select').first().selectOption({ label: 'Webhook (JSON)' });
         const inputs = editor.locator('input[type="text"], input[type="url"], input:not([type])');
         await inputs.nth(0).fill(name);
-        await inputs.nth(1).fill(hook.url);
+        // The address is a secret: it is typed into a password field.
+        await editor.getByLabel('Channel address').fill(hook.url);
         const waits = editor.getByLabel('A command waits for approval');
         if (await waits.count()) await waits.check();
+        // The command text goes along unless it is switched off: here it is, to see that it stays home.
+        const withCommand = editor.getByLabel('Include the command text');
+        if (await withCommand.isChecked().catch(() => false)) await withCommand.uncheck();
         await ctx.shot('maria', 'channel-form');
         await editor.getByRole('button', { name: 'Add channel' }).click();
         await m.page.waitForTimeout(1500);
@@ -156,9 +177,15 @@ module.exports = [
       await m.page.waitForTimeout(600);
       const create = m.page.getByRole('button', { name: 'Create an address to post to' });
       if (await create.isVisible().catch(() => false)) await create.click();
+      else {
+        // An address exists, and it is shown only once: a new one is made, which shows.
+        await m.page.getByRole('button', { name: 'Replace the address' }).click();
+        await m.page.waitForTimeout(500);
+        await m.page.getByRole('button', { name: /Replace it\?/ }).click();
+      }
       await m.page.waitForTimeout(1500);
       await ctx.shot('maria', 'address');
-      const shown = await m.page.getByTestId('alert-address').innerText().catch(async () => m.page.getByTestId('alert-address').inputValue().catch(() => ''));
+      const shown = await m.page.getByTestId('alert-address').inputValue().catch(() => '');
       const pathPart = (shown.match(/\/api\/hooks\/[A-Za-z0-9._-]+/) || [])[0];
       if (!ctx.expect(pathPart, 'an address to post alerts to is shown', shown.replace(/[A-Za-z0-9_-]{20,}/g, '<secret>'))) return;
       const post = (body) =>
