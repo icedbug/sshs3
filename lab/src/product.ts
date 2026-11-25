@@ -68,7 +68,8 @@ const STAMP = path.join(REPO, 'dist-web', 'lab-build.json');
 const PRODUCT_SOURCES = ['src', 'scripts/build-web.mjs', 'package.json', 'package-lock.json'];
 /** The embedding model the product is given: the one the design names for knowledge base search. */
 const EMBEDDING_MODEL = 'text-embedding-3-small';
-const PASSWORDS = { maria: 'lab-maria-password-1', omar: 'lab-omar-password-1', lina: 'lab-lina-password-1' } as const; // pragma: allowlist secret
+/** The lab team's passwords: made up for the lab, the same in every product it starts. */
+export const PASSWORDS = { maria: 'lab-maria-password-1', omar: 'lab-omar-password-1', lina: 'lab-lina-password-1' } as const; // pragma: allowlist secret
 
 function git(args: string[]): Promise<string> {
   return new Promise((resolve, reject) =>

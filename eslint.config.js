@@ -59,6 +59,14 @@ export default tseslint.config(
     },
   },
   {
+    // The lab's testers in a browser: Node scripts whose page.evaluate callbacks run in the page.
+    files: ['lab/**/*.cjs'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: { ...globals.node, ...globals.browser },
+    },
+  },
+  {
     files: ['tests/**/*.{ts,tsx}'],
     languageOptions: {
       globals: { ...globals.node, ...globals.browser },

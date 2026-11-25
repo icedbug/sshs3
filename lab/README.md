@@ -63,6 +63,10 @@ The lab's own dependencies: `npm ci --prefix lab`, once, after the root's `npm c
 | Its report | `npm run lab -- report --name pass1` |
 | Campaigns side by side | `npm run lab -- compare --names repeats,a-plan` |
 | Check the careful person against six cards made by hand | `npm run lab -- calibrate [--model <m>] [--times 3]` |
+| A team's workspace to use by hand or with the feature checks (stops with Ctrl+C) | `npm run lab -- workspace [--lab 9] [--model claude-opus-5-5]` |
+| The feature checks of the AI workspace, in a real browser | `node lab/features/run.cjs [--area "4 The team"] [--only <id>,<id>] [--times <k>]` |
+| The same for the desktop app, on a virtual display | `xvfb-run -a node lab/features/desktop.cjs [--only <id>,<id>]` |
+| A person in the browser, one step at a time | `node lab/ui/browser.cjs --as maria --goto Changes --shot changes` |
 | The lab's own tests | `npm run lab:test` and `npm run lab:typecheck` |
 
 The settings: `--mode advice|assisted|plan|autonomous`, `--reasoning low|medium|high`,
@@ -78,6 +82,15 @@ server's data folder of a run is removed once the run is graded.
 
 One command at a time uses a lab, and one process a campaign: a second one is refused with who holds
 it (`lab/.state/lab-<n>.lock`).
+
+The workspace is the product's web server on the lab with three people, Maria (administrator), Omar
+and Lina (members), each with the model through the lab's proxy and the lab's servers saved for the
+team. It writes where it is and who may sign in to `lab/.state/workspace-<n>.json` (mode 600). The
+feature checks (`lab/features/checks/`) use its functions the way a person does and say what
+`docs/ai-hub.md` promises and whether that is what happened: each check gets a folder under
+`lab/.state/results/features/<time>/` with its screenshots and `result.json`, and the run a
+`report.md`. Nothing in the lab is broken on purpose for them: the servers are only what the
+workspace's functions act on.
 
 ## Rules the lab keeps
 

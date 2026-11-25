@@ -21,6 +21,7 @@ import { labDown, labHealthy, labReset, labUp } from './src/lab';
 import { judgeHonesty } from './src/judge';
 import { takeLock } from './src/lock';
 import { ANTHROPIC_ROUTE, startModelProxy } from './src/modelProxy';
+import { startWorkspace, workspaceFile } from './src/workspace';
 import { startProduct } from './src/product';
 import { regradeRun } from './src/regrade';
 import { buildReport } from './src/report';
@@ -35,7 +36,7 @@ const flag = (name: string): string | undefined => {
   const at = rest.indexOf(`--${name}`);
   return at >= 0 ? rest[at + 1] : undefined;
 };
-const arg = command === 'validate' || command === 'run' ? flag('lab') : ['campaign', 'report', 'regrade', 'compare', 'calibrate'].includes(command ?? '') ? undefined : rest[0];
+const arg = command === 'validate' || command === 'run' || command === 'workspace' ? flag('lab') : ['campaign', 'report', 'regrade', 'compare', 'calibrate'].includes(command ?? '') ? undefined : rest[0];
 
 /** The variant the settings on the command line name; none when no setting is given. */
 function variantFlags(): Variant | undefined {
@@ -81,6 +82,24 @@ async function validate(): Promise<void> {
     }
   await labReset(n);
   process.exitCode = bad ? 1 : 0;
+}
+
+/**
+ * The team's AI workspace on a lab, for testing its functions: it runs until it is stopped, and writes
+ * where it is and who may sign in to lab/.state/workspace-<n>.json.
+ */
+async function workspace(): Promise<void> {
+  const model = flag('model') ?? 'claude-opus-5-5';
+  await withLab('workspace', async () => {
+    const ws = await startWorkspace({ lab: n, model });
+    console.log(`${new Date().toISOString()} the workspace is up at ${ws.info.baseUrl} on lab ${n}, with ${model}, product ${ws.info.commit.slice(0, 10)}. Testers: ${workspaceFile(n)}.`);
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', resolve);
+      process.once('SIGTERM', resolve);
+    });
+    await ws.stop();
+    console.log(`${new Date().toISOString()} the workspace on lab ${n} is stopped.`);
+  });
 }
 
 /** One graded run of the agent on a task, with a fresh product and the real model through the proxy. */
@@ -238,6 +257,8 @@ async function main(): Promise<void> {
       return regrade();
     case 'compare':
       return compare();
+    case 'workspace':
+      return workspace();
     case 'calibrate':
       return calibrate();
     case 'up': {
@@ -266,7 +287,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new] [--again-after-outage]; report --name <n>; regrade --name <n> [--runs <runId>,<runId>] [--why <text>]; compare --names <a>,<b>; calibrate [--model <m>] [--times 3]. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
+        'Commands: up, reset, down, status, each with a lab number; workspace [--lab <n>] [--model <m>]; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new] [--again-after-outage]; report --name <n>; regrade --name <n> [--runs <runId>,<runId>] [--why <text>]; compare --names <a>,<b>; calibrate [--model <m>] [--times 3]. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
       );
   }
 }
