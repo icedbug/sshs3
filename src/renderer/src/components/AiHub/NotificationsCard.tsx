@@ -476,8 +476,8 @@ export function NotificationsCard({
               <span>
                 Include the command text
                 <small>
-                  Off: the message says that a command waits, and where, but not
-                  what it is.
+                  Off: the message says what waits and where, in the agent&apos;s own
+                  words, but not the command, its check or its way back.
                 </small>
               </span>
             </label>

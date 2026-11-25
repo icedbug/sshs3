@@ -86,6 +86,16 @@ describe("notification channels", () => {
     });
   });
 
+  it("says what a channel without the command text is still told", () => {
+    render(<NotificationsCard hub={hub()} act={vi.fn(async () => hub())} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add a channel" }));
+    const label = within(screen.getByTestId("notify-editor")).getByText("Include the command text").closest("label")!;
+    // The agent's description of the change goes; the command, its check and its way back stay.
+    expect(label).toHaveTextContent("in the agent's own words");
+    expect(label).toHaveTextContent("not the command");
+    expect(label).not.toHaveTextContent("not what it is");
+  });
+
   it("saves the address links point at, unless the administrator fixed it", async () => {
     const act = vi.fn(async () => hub());
     const { unmount } = render(<NotificationsCard hub={hub()} act={act} />);

@@ -386,11 +386,16 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     owner: context.owner,
     link,
     items: items.map((item) => {
+      // Without the command text, nothing that carries it goes either: an approval's or a teammate's
+      // detail (the command, a file change's diff, or a plan's steps), nor a title that is the command.
+      const sendsCommand = channel.includeCommand || !item.command;
+      const repeats = (text: string | undefined) => Boolean(text && item.command && text.trim() === item.command.trim());
+      const detail = sendsCommand || (item.kind !== "approval" && item.kind !== "peer" && !repeats(item.detail)) ? item.detail : undefined;
       return {
         id: item.id,
         kind: item.kind,
-        title: shorten(item.title, 300),
-        detail: item.detail ? shorten(item.detail, 600) : undefined,
+        title: !sendsCommand && repeats(item.title) ? "A command (its text is not sent to this channel)." : shorten(item.title, 300),
+        detail: detail ? shorten(detail, 600) : undefined,
         from: item.from,
         target: item.target,
         risk: item.risk,

@@ -112,6 +112,36 @@ describe("what a channel is sent", () => {
     expect(masked).not.toContain("abcdef123456");
   });
 
+  it("keeps the command out of every kind of channel that may not have it, also where the item repeats it", () => {
+    // An approval's detail is its command (or a file change's diff); a teammate's item carries the
+    // command, or the plan's steps with theirs, in its detail; an approval without a description has
+    // the command as its title.
+    const withDetail: NotifyItem = { ...approval, detail: approval.command };
+    const untitled: NotifyItem = { ...approval, title: approval.command!, detail: approval.command };
+    const steps = "1. [low risk] Rotate the logs (on web-01)\n   $ logrotate -f /etc/logrotate.d/nginx";
+    const peerPlan: NotifyItem = { id: "peer:u2:c9", kind: "peer", title: "Plan: Rotate the logs", detail: steps, command: steps, from: "Lina on web-01" };
+    for (const kind of ["slack", "teams", "ntfy", "webhook"] as const) {
+      const quiet = channel({ kind, url: kind === "ntfy" ? "https://ntfy.example.com/ops" : "https://example.com/in", includeCommand: false });
+      for (const items of [[withDetail], [untitled], [peerPlan], [withDetail, peerPlan]]) {
+        const body = renderNotification(quiet, items).body;
+        expect(body, `${kind}, ${items.map((i) => i.id).join(" + ")}`).not.toContain("systemctl");
+        expect(body, `${kind}, ${items.map((i) => i.id).join(" + ")}`).not.toContain("logrotate");
+        expect(body, kind).not.toContain("pg_isready");
+      }
+    }
+    // Still told: what waits, where, and the agent's own words for it.
+    const hook = JSON.parse(renderNotification(channel({ kind: "webhook", url: "https://example.com/in", includeCommand: false }), [withDetail, untitled]).body) as {
+      items: Array<{ title: string; target?: string; command?: string; detail?: string }>;
+    };
+    expect(hook.items[0]).toMatchObject({ title: "Restart pgbouncer", target: "pg-01" });
+    expect(hook.items[0].command).toBeUndefined();
+    expect(hook.items[0].detail).toBeUndefined();
+    expect(hook.items[1].title).toContain("its text is not sent to this channel");
+    // With the command allowed, the webhook has all of it.
+    const loud = JSON.parse(renderNotification(channel({ kind: "webhook", url: "https://example.com/in" }), [withDetail]).body) as { items: Array<{ command?: string; detail?: string }> };
+    expect(loud.items[0]).toMatchObject({ command: "systemctl restart pgbouncer", detail: "systemctl restart pgbouncer" });
+  });
+
   it("speaks ntfy, Teams and a signed webhook", () => {
     const ntfy = renderNotification(channel({ kind: "ntfy", url: "https://ntfy.example.com/team-ops", secret: "tk_x" }), [approval]);
     expect(ntfy.url).toBe("https://ntfy.example.com/");

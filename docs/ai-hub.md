@@ -1665,8 +1665,12 @@ placed before the early return for a pending save); three seconds later
 - **Channels:** Slack (incoming webhook), Teams (Adaptive Card), ntfy (JSON
   publish, push to a phone) and a generic JSON webhook signed with
   `X-Sshs3-Signature` (HMAC SHA-256). Each chooses its events, a lowest alert
-  severity, and whether the command text may leave the installation. All text
-  is masked with `boundedContext`; Slack's control characters are escaped.
+  severity, and whether the command text may leave the installation. Without
+  it, a channel of any kind is told what waits, where, and the agent's own
+  description of it, but not the command, a file change's diff, a plan's steps,
+  the check or the way back; a title that is only the command is replaced by
+  "A command (its text is not sent to this channel)." All text is masked with
+  `boundedContext`; Slack's control characters are escaped.
 - **Signed webhooks.** A generic webhook with a signing key is also signed the
   Standard Webhooks way (standardwebhooks.com): `webhook-id` (`msg_…`, new for
   each message, the same on a retry), `webhook-timestamp` (unix seconds) and
