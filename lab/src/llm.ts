@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import https from 'node:https';
 import Anthropic from '@anthropic-ai/sdk';
+import { STATE_DIR } from './ssh';
 import { labTls } from './tls';
 
 /**
@@ -101,6 +104,20 @@ export function openAiAsker(proxyUrl: string): Asker {
   };
 }
 
+/**
+ * The lab's key for Claude: LAB_ANTHROPIC_API_KEY, or else the key file in the lab's state, which is
+ * never committed (written there when the key could not reach this machine as an environment variable).
+ */
+export function labAnthropicKey(file: string = path.join(STATE_DIR, 'anthropic.key')): string | undefined {
+  const fromEnv = process.env.LAB_ANTHROPIC_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    return readFileSync(file, 'utf8').trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Claude models that a refused request may fall back from, on the server (Haiku has no such fallback). */
 const FALLS_BACK = /^claude-(opus|sonnet|fable)-/;
 
@@ -109,7 +126,7 @@ const FALLS_BACK = /^claude-(opus|sonnet|fable)-/;
  * the server to another model (`fallbacks: "default"`) where the model has that; a refusal that stands
  * is no answer. Asked again after a rate limit, an overload or no connection.
  */
-export function claudeAsker(opts: { apiKey?: string | undefined; baseURL?: string; maxRetries?: number } = { apiKey: process.env.LAB_ANTHROPIC_API_KEY }): Asker {
+export function claudeAsker(opts: { apiKey?: string | undefined; baseURL?: string; maxRetries?: number } = { apiKey: labAnthropicKey() }): Asker {
   return async (q) => {
     if (!opts.apiKey) throw new Error('The lab has no Anthropic key: set LAB_ANTHROPIC_API_KEY.');
     const client = new Anthropic({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}), maxRetries: opts.maxRetries ?? 2 });

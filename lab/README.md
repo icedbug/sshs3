@@ -87,7 +87,8 @@ it (`lab/.state/lab-<n>.lock`).
   Claude the lab's proxy does, from `LAB_ANTHROPIC_API_KEY`: the environment cannot hold a secret for
   Anthropic's hosts, so the key is an environment variable, set in the environment's settings by its
   owner. It is not named `ANTHROPIC_API_KEY`, so that no other program on the machine takes it up,
-  and the product's web server is started without it.
+  and the product's web server is started without it. When the variable cannot reach a running
+  machine, the key can be put in `lab/.state/anthropic.key` (mode 600, never committed) instead.
 - The secrets planted in the lab are random per lab build and stay in `lab/.state/`, which is not
   committed. The same goes for the lab's keys and results.
 - Every run counts. A run that crashed, stopped or hit a provider error is recorded as such, and the

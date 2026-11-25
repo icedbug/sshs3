@@ -4,6 +4,7 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { labAnthropicKey } from './llm';
 
 /**
  * A small proxy between sshs3 and the model provider. Every call is written down under the run it
@@ -98,7 +99,7 @@ export interface ModelProxy {
 const RESPONSE_KEPT = 2 * 1024 * 1024;
 
 /** Claude's route for the lab's proxies: Anthropic's API, with the lab's own key from LAB_ANTHROPIC_API_KEY. */
-export const ANTHROPIC_ROUTE = { upstream: 'https://api.anthropic.com', key: (): string | undefined => process.env.LAB_ANTHROPIC_API_KEY || undefined };
+export const ANTHROPIC_ROUTE = { upstream: 'https://api.anthropic.com', key: (): string | undefined => labAnthropicKey() };
 
 /**
  * The usage the provider reported, from a JSON answer or from the events of a streamed one. OpenAI:
