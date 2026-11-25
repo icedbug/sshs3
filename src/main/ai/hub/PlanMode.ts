@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import type {
   AgentChange,
   AgentChangeApproval,
-  AgentMessage,
   AgentMode,
   AgentPlan,
   AgentPlanStep,
@@ -13,6 +12,8 @@ import type {
   WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
 import { isPlainCommand } from "../../../shared/types/aiHub";
+import { hubWrote } from "../../../shared/hubMessages";
+import { namesWhole } from "../../../shared/namesWhole";
 import { APP_OPS, type AppOpClass } from "./AppGuard";
 import { isProdTag } from "./safetyPolicy";
 import { boundedContext, clip, exactHash, maskContext } from "./privacy";
@@ -313,20 +314,8 @@ export function parseReview(answer: string): AgentPlan["review"] {
 const lastUserText = (task: Pick<AgentTask, "messages">): string =>
   task.messages.filter((m) => m.role === "user").at(-1)?.text ?? "";
 
-/**
- * The words the hub's own messages start with, for a message stored before the hub marked its own
- * (`by`): its word that a plan was approved or sent back, and the line a resumed conversation starts
- * with (areas/conversations.ts, "resume").
- */
-const HUB_WRITTEN = /^(?:\[sshs3\] |Resume on this terminal\.|Resume the conversation\.$|You have \d+ more commands and \d+ more minutes\. Continue where you stopped\.)/;
-
-/**
- * A user message the hub wrote itself, not the person. Told by the mark the hub puts on its own;
- * only a message stored before that mark existed is told by its words. A person who types the hub's
- * words is still the person.
- */
-export const hubWrote = (message: Pick<AgentMessage, "role" | "text" | "by">): boolean =>
-  message.role === "user" && (message.by ? message.by === "hub" : HUB_WRITTEN.test(message.text));
+/** A user message the hub wrote itself, not the person (shared with the chat, which shows it as the hub's). */
+export { hubWrote };
 
 /** What the person last wrote, the hub's own messages left out. */
 export const lastPersonText = (task: Pick<AgentTask, "messages">): string =>
@@ -426,22 +415,8 @@ export function planGate(
   return "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything. Commands still run; make no change.";
 }
 
-/**
- * Whether a name stands in a text as a whole word, as a server's name or address does in a plan
- * step's target: "web-02" does in "web-02 (staging): /tmp/x" and in "ops@web-02:/etc", not in
- * "web-020" or in the other host "web-02.example.com". Letters are compared without case.
- */
-export function namesWhole(text: string, name: string | undefined): boolean {
-  const t = text.toLowerCase();
-  const n = name?.trim().toLowerCase();
-  if (!n) return false;
-  for (let i = t.indexOf(n); i >= 0; i = t.indexOf(n, i + 1)) {
-    const before = i > 0 ? t[i - 1] : "";
-    const after = t.slice(i + n.length, i + n.length + 2);
-    if (!/[a-z0-9_.-]/.test(before) && !/^(?:[a-z0-9_-]|\.[a-z0-9_-])/.test(after)) return true;
-  }
-  return false;
-}
+/** Whether a name stands in a text as a whole word (shared with the chat panel). */
+export { namesWhole };
 
 /** What a terminal is to a plan step: where it is open, and which server, when the workspace knows it. */
 export interface StepTerminal {

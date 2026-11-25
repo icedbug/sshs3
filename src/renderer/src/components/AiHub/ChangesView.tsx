@@ -10,7 +10,7 @@ import { isPlainCommand } from "@shared/types/aiHub";
 import { hubRequest } from "../../lib/aiHub";
 import { useFullTask } from "../../lib/aiHubTasks";
 import { AuditLogView } from "./AuditLogView";
-import { ChangeProof } from "./ChangeProof";
+import { ChangeProof, changeStatusLabel } from "./ChangeProof";
 import { ConfirmButton } from "./ConfirmButton";
 import { AnsiLogView, DiffViewer } from "./DiffViewer";
 import { RecordingPlayer } from "./RecordingPlayer";
@@ -529,11 +529,7 @@ export function ChangesView({
           )}
           {c ? (
             <span className={`ai-badge ${STATUS_TONE[c.status]}`}>
-              {c.rollback?.ran
-                ? c.rollback.exitCode === 0
-                  ? "rolled back"
-                  : "rollback failed"
-                : c.status}
+              {changeStatusLabel(c)}
               {c.exitCode !== undefined && c.exitCode !== 0
                 ? ` · exit ${c.exitCode}`
                 : ""}

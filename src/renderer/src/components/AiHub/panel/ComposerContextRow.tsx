@@ -1,6 +1,7 @@
 import { ChevronDown, ShieldCheck, Terminal } from "lucide-react";
 import { selectAiTerminal } from "../../../lib/aiHub";
 import { composerUsage } from "./panelHelpers";
+import { TargetNotice } from "./TargetNotice";
 import type { PanelState } from "./usePanelState";
 
 /**
@@ -27,6 +28,12 @@ export function ComposerContextRow({ p, hub }: { p: PanelState; hub: NonNullable
   } = p;
   return (
     <>
+                {/* The server the message names, and the one this conversation runs on, when they differ. */}
+                <TargetNotice
+                  text={p.prompt}
+                  target={task?.target?.label ?? terminal?.label}
+                  servers={hub.workspaceServers ?? []}
+                />
                 <div className="ai-context-row">
                   <div className="ai-menu-anchor">
                     <button

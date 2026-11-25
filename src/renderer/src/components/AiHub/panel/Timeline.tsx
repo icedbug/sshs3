@@ -1,3 +1,4 @@
+import { hubWrote } from "@shared/hubMessages";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { GitFork, Pencil, RotateCcw, Terminal } from "lucide-react";
 import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS, type AgentMessage } from "@shared/types/aiHub";
@@ -5,7 +6,7 @@ import type { FileRef } from "../reportRefs";
 import { AnsiLogView, DiffViewer } from "../DiffViewer";
 import { copyToClipboard, RichMarkdownContent } from "../RichMarkdownContent";
 import { AnswerSources } from "../AnswerSources";
-import { ChangeProof } from "../ChangeProof";
+import { ChangeProof, changeStatusLabel } from "../ChangeProof";
 import { ConfirmButton } from "../ConfirmButton";
 import { ChangeReveal, ChangeSecretInputs } from "../ChangeSecrets";
 import { lastUserMessageId } from "./panelHelpers";
@@ -77,19 +78,23 @@ export const MessageRow = memo(function MessageRow({
           },
     [clipped, actions, message.id],
   );
+  // A line the hub wrote to the agent (a plan decision, "Resume on this terminal") is the hub's, not the
+  // person's: it is not called "You", and it cannot be edited or asked again.
+  const fromHub = hubWrote(message);
+  const fromPerson = message.role === "user" && !fromHub;
   return (
     <article
       className={
         "ai-message ai-message-" +
         message.role +
         // What the app told the agent on the user's behalf (a plan decision) is a one-line note.
-        (message.text.startsWith("[sshs3]") ? " ai-message-note" : "")
+        (message.text.startsWith("[sshs3]") || fromHub ? " ai-message-note" : "")
       }
     >
       <div className="ai-message-header">
         <small className="ai-message-author">
-          <span className="ai-avatar-badge">{message.role === "user" ? "Y" : agentIcon || "A"}</span>
-          <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Assistant" : "sshs3"}</span>
+          <span className="ai-avatar-badge">{fromPerson ? "Y" : fromHub ? "S" : agentIcon || "A"}</span>
+          <span>{fromPerson ? "You" : message.role === "assistant" ? "Assistant" : "sshs3"}</span>
           {message.role === "assistant" && agentName && <span className="ai-pill">{agentName}</span>}
         </small>
         <span className="ai-message-meta">
@@ -101,7 +106,7 @@ export const MessageRow = memo(function MessageRow({
               })}
             </span>
           )}
-          {message.role === "user" && !running && (
+          {fromPerson && !running && (
             <>
               <button
                 type="button"
@@ -338,7 +343,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                         >
                           {item.change.status === "pending"
                             ? "Approval needed"
-                            : item.change.status}
+                            : changeStatusLabel(item.change)}
                         </small>
                       </summary>
                       <ChangeProof change={item.change} taskId={task.id} />

@@ -103,12 +103,19 @@ describe("a ticket's detail", () => {
     // Who wrote the result is not on the ticket, so it is not called the agent's.
     expect(within(detail).getByTestId("ticket-report")).toHaveTextContent("Report");
     expect(detail).not.toHaveTextContent("The agent's report");
-    expect(detail).toHaveTextContent("What was wrong and what you did. A scenario's last check reads this.");
+    expect(detail).toHaveTextContent("What was wrong and what you did.");
+    // Found by an exploring tester: a scenario is the demo lab's, and only there does its check read this.
+    expect(detail).not.toHaveTextContent("A scenario's last check reads this.");
     expect(within(detail).getByRole("button", { name: "Save report" })).toBeDisabled();
     fireEvent.change(within(detail).getByLabelText("Your report"), { target: { value: " The archive target was gone. I pointed it at the new one. " } });
     fireEvent.click(within(detail).getByRole("button", { name: "Save report" }));
     expect(act).toHaveBeenCalledWith({ action: "ticket-result", id: "a", result: "The archive target was gone. I pointed it at the new one." });
     await waitFor(() => expect(within(detail).getByLabelText("Your report")).toHaveValue(""));
+  });
+
+  it("says in the demo lab that a scenario's last check reads the report", () => {
+    render(<WorkforceView hub={hub({ demoMode: true, workTickets: [ticket("a")] })} act={vi.fn(async () => undefined)} onOpenTask={() => {}} openTicketId="a" />);
+    expect(screen.getByTestId("ticket-detail")).toHaveTextContent("What was wrong and what you did. A scenario's last check reads this.");
   });
 
   it("offers Undo after a removal, which restores the ticket", async () => {

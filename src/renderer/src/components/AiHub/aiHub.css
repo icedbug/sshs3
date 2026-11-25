@@ -1864,6 +1864,23 @@
   flex-wrap: wrap;
 }
 
+/* Above the composer: the server a message names is not the one the conversation runs on, or that one is production. */
+.ai-hub .ai-target-notice {
+  margin: 0 0 6px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.ai-hub .ai-target-notice-warn {
+  color: var(--ai-warn);
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
 .ai-hub .ai-context-chip {
   padding: 4px 9px;
   border-radius: 999px;

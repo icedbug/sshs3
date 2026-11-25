@@ -3258,6 +3258,11 @@ The chat panel keeps its shared state in `usePanelState`. The terminal hook rece
   the task list (`TaskTodos`) while a run has one, and the approval or question
   that is waiting. A proposed plan (`PlanCard`) sits in the conversation where
   it was proposed and folds once decided.
+- Above the composer (`TargetNotice`): when the message names a saved server
+  other than the one the conversation runs on, and not that one too, it says
+  so, and whether the terminal it runs on is a production server. A
+  conversation runs on the terminal it was started in, whatever its message
+  names. A production terminal is said to be one even when nothing is typed.
 - The left column lists conversations and mission agents. "Active Terminals"
   and "Recent Team Activity" are shown only when they have something in them.
 - The navigation is one row in both the full view and the narrow sidebar; in

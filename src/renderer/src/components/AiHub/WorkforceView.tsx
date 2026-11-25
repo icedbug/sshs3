@@ -1031,7 +1031,7 @@ export function WorkforceView({
                 <textarea rows={3} value={report} onChange={(e) => setReport(e.target.value)} />
               </label>
               <small className="ai-hint">
-                What was wrong and what you did. A scenario&apos;s last check reads this.
+                What was wrong and what you did.{hub.demoMode ? " A scenario's last check reads this." : ""}
                 {openTicket.result ? " Saving replaces the report above." : ""}
               </small>
               <div className="ai-card-actions">

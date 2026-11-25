@@ -41,16 +41,21 @@ export function formatStructuredCheckSummary(
 export function isUncertainOrPartialRollback(
   change: Pick<AgentChange, "status" | "check" | "rollback">,
 ): boolean {
-  if (change.status === "uncertain") return true;
   const rb = change.rollback;
-  if (rb?.ran) {
-    if (rb.exitCode !== undefined && rb.exitCode !== 0) return true;
-    if (rb.restored !== true || !rb.comparedWithBaseline) return true;
-  }
+  // A change is taken back once: after its rollback ran, the hub refuses another, whatever it showed.
+  // Offering it again was a red button that only led to "Only a change that ran can be taken back, once".
+  if (rb?.ran) return false;
+  if (change.status === "uncertain") return true;
   if (rb?.skipped) return true;
   const decided = !["pending", "approved", "running"].includes(change.status);
   if (decided && rb && change.check && change.check.after === undefined) return true;
   return false;
+}
+
+/** A change's state as a person reads it: a change whose rollback ran is "rolled back" (or says it failed). */
+export function changeStatusLabel(change: Pick<AgentChange, "status" | "rollback">): string {
+  if (change.rollback?.ran) return change.rollback.exitCode === 0 ? "rolled back" : "rollback failed";
+  return change.status;
 }
 
 /**
