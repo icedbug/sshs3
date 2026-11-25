@@ -23,6 +23,11 @@ describe('locks on a lab and on a campaign', () => {
       const taken = await takeLock(file, 'lab 9 (reset)');
       await taken();
       await expect(fs.access(file)).rejects.toThrow();
+      // A lock from before the machine restarted is taken over, though its process number is in use
+      // again (numbers start over after a restart): here, this very process's own number.
+      await fs.writeFile(file, JSON.stringify({ pid: process.pid, what: 'lab 9 (campaign pass1)', at: '2026-11-24T23:24:00.000Z', boot: 'an-earlier-boot' }));
+      const afterRestart = await takeLock(file, 'lab 9 (campaign pass1, again)');
+      await afterRestart();
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
