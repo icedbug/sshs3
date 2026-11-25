@@ -377,7 +377,10 @@ explicitly enabled presentation on top of the same terminal authority.
     connection whose ssh stays silent for 45 seconds, with nobody being
     asked anything, is ended.
 - **Prompts.** A person's message that is longer than 16,000 characters loses
-  its middle, with a line saying so, never its start (`boundedPrompt`). The
+  its middle, with a line saying so, never its start (`boundedPrompt`); a reply
+  keeps its first 16,000. Either way a line right under the message tells the
+  person how long it was and which part was left out (`tooLongNote`), since the
+  line in the middle of a long paste is not one a person sees. The
   hub's own prompts (reading, pages, contradictions, reviews, the workforce
   lead) open with their instructions and quote bounded data, and are passed
   whole. An answer with pages that are not in the format asked for fails the

@@ -394,6 +394,29 @@ describe("a reply in a conversation whose terminal another run has taken", () =>
   });
 });
 
+describe("a message too long for the model", () => {
+  // Found by an exploring tester: a pasted log of 30 KB lost 14.6 KB from its middle on its way to the
+  // model; the line saying so stood in the middle of the stored message, and the person never saw it.
+  // The cause of the problem was in the part left out.
+  it("is followed by a line the person sees, saying how much was left out and where", async () => {
+    const hub = await makeHub();
+    vi.stubGlobal("fetch", vi.fn(async () => say("Read it.")));
+    const log = `What is wrong here?\n${"2026-11-25 18:00:01 GET /api/checkout 200 12ms\n".repeat(700)}`;
+    const { started } = (await hub.request({ action: "start", task: { prompt: log, mode: "advice" } })).reply!;
+    const task = hub.store.data.tasks.find((t) => t.id === started!.taskId)!;
+    await inner(hub).whenSettled(task);
+    const note = task.messages.find((m) => m.role === "system" && /left out/.test(m.text));
+    expect(note?.text).toMatch(/This message was [\d,]+ characters long/);
+    expect(note?.text).toMatch(/from its middle/);
+
+    // A reply too long keeps its start: what was left out is its end, and that is said too.
+    await hub.request({ action: "reply", taskId: task.id, text: `And this?\n${"x".repeat(17_000)}` });
+    await inner(hub).whenSettled(task);
+    const second = task.messages.filter((m) => m.role === "system" && /left out/.test(m.text)).at(-1);
+    expect(second?.text).toMatch(/its last [\d,]+ characters were left out/);
+  });
+});
+
 describe("a run nobody sits at", () => {
   function unattended() {
     const opened: string[] = [];

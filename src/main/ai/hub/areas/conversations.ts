@@ -1,3 +1,4 @@
+import { tooLongNote } from "./runs";
 import crypto from "node:crypto";
 import { app } from "electron";
 import type {
@@ -607,6 +608,8 @@ export class ConversationsPart {
         if (again && asked < 0) throw new Error("There is no question here to ask again.");
         // A message is read from its start: what a person says first (or an approval's instruction) is kept.
         const text = again ? "" : clip(requiredText(rawText), 16_000);
+        // Too long for the model: its end is left out, and the person is told where they see it.
+        const cut = !again && rawText.length > 16_000 ? tooLongNote(rawText.length, "end", 16_000) : undefined;
         // The hub's own word (a plan's approval) is told apart from the person's by how it was sent, never by its words.
         const by = isFromHub(request) ? "hub" : "person";
         if (active(task)) {
@@ -619,6 +622,7 @@ export class ConversationsPart {
             by,
             at: Date.now(),
           });
+          if (cut) task.messages.push({ id: crypto.randomUUID(), role: "system", text: cut, at: Date.now() });
           // This agent takes words only while it works: said at once, not found out from its answer.
           if (replyImages.length > 0 && picturesTaken === false)
             task.messages.push({
@@ -659,7 +663,7 @@ export class ConversationsPart {
             // before it, and the model knows what was already done.
             task.messages.splice(asked + 1);
             task.messages[asked] = { ...task.messages[asked], at: Date.now() };
-          } else
+          } else {
             task.messages.push({
               id: crypto.randomUUID(),
               role: "user",
@@ -668,6 +672,8 @@ export class ConversationsPart {
               by,
               at: Date.now(),
             });
+            if (cut) task.messages.push({ id: crypto.randomUUID(), role: "system", text: cut, at: Date.now() });
+          }
           await this.launch(task);
         }
         break;

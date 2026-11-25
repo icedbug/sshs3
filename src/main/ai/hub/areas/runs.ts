@@ -65,6 +65,18 @@ function cachedTokens(task: AgentTask): number {
  * A part of HubService. These are the hub's own methods, kept in a file of their own: `this` is the hub,
  * and they are copied onto its class where it is declared (HubService.ts).
  */
+/**
+ * The line a person sees after a message too long for the model: how long it was, how much the model
+ * gets, and which part was left out. A new conversation keeps a message's start and end; a reply keeps
+ * its start.
+ */
+export function tooLongNote(length: number, left: "middle" | "end", max = PERSON_PROMPT_MAX): string {
+  const n = (x: number) => x.toLocaleString("en-US");
+  return left === "middle"
+    ? `This message was ${n(length)} characters long. The model gets ${n(max)} of them: about ${n(length - max)} characters from its middle were left out. Put what matters at its start or its end.`
+    : `This message was ${n(length)} characters long. The model gets its first ${n(max)}: its last ${n(length - max)} characters were left out. Put what matters at its start.`;
+}
+
 export class RunsPart {
   /**
    * A terminal the hub opened for this run is closed when the run ends: it is
@@ -231,6 +243,11 @@ export class RunsPart {
           ...(startImages.length > 0 ? { images: startImages } : {}),
           at: now,
         },
+        // A message too long for the model loses its middle; the line saying so stands in the middle of
+        // the message, where a person does not see it. Said here too, where they do.
+        ...(!readOnly && rawPrompt.trim().length > PERSON_PROMPT_MAX
+          ? [{ id: crypto.randomUUID(), role: "system" as const, text: tooLongNote(rawPrompt.trim().length, "middle"), at: now }]
+          : []),
       ],
       changes: [],
       sources: rawAttachments
