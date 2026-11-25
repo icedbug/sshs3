@@ -564,6 +564,35 @@ describe("keys the assistant makes on a team server", () => {
     expect(await revoke).toEqual({ ok: true, revoked: "From the workspace" });
     expect(store.list("u1").map((k) => k.name)).toEqual(["From settings"]);
   });
+
+  // Found by the review of that fix: keys of the hub's own local listener (which an administrator may switch
+  // on on a team server) could no longer be listed or taken back from a conversation, and still worked.
+  it("still lists and takes back the keys of the hub's own listener, apart from the server's", async () => {
+    const { McpTokenStore } = await import("../../src/main/web/McpTokenStore");
+    const storeDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-server-keys-"));
+    disposals.push(() => fs.rm(storeDir, { recursive: true, force: true }));
+    const store = new McpTokenStore(storeDir);
+    await store.create({ userId: "u1", name: "Server key", createdBy: "Jacob", scopes: ["read"] });
+    const mcpKeys = {
+      list: () => store.list("u1"),
+      create: (input: Parameters<typeof store.create>[0]) => store.create({ ...input, userId: "u1" }),
+      revoke: (id: string) => store.revoke("u1", id),
+    };
+    const { hub } = await makeHub([], { mcpKeys });
+    await hub.mcpTokens().create({ userId: "local", name: "Listener key", createdBy: "Jacob", scopes: ["read"] });
+    const { call, pending, approve } = await startRun(hub);
+    const listed = (await call("sshs3_agent_and_mcp_manage", { operation: "list_mcp_keys" })) as {
+      keys: Array<{ name: string }>;
+      listenerKeys?: Array<{ name: string }>;
+    };
+    expect(listed.keys.map((k) => k.name)).toEqual(["Server key"]);
+    expect(listed.listenerKeys?.map((k) => k.name)).toEqual(["Listener key"]);
+    const revoke = call("sshs3_agent_and_mcp_manage", { operation: "revoke_mcp_key", idOrName: "Listener key" });
+    await approve((await pending()).id);
+    expect(await revoke).toEqual({ ok: true, revoked: "Listener key" });
+    expect(hub.mcpTokens().list("local")).toEqual([]);
+    expect(store.list("u1").map((k) => k.name)).toEqual(["Server key"]);
+  });
 });
 
 describe("what belongs to a team server", () => {

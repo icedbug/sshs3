@@ -515,7 +515,14 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
       const keys = snap.reply?.mcpKeys;
       // On a team server the keys are the server's for this account: the app's own listener plays no part.
       if (keys?.where === "server")
-        return { ok: true, keys: keys.keys, note: "These are your keys on this server. Your own agents use one with the server's MCP address, /api/mcp." };
+        return {
+          ok: true,
+          keys: keys.keys,
+          ...(keys.listenerKeys?.length ? { listenerKeys: keys.listenerKeys } : {}),
+          note: `These are your keys on this server. Your own agents use one with the server's MCP address, /api/mcp.${
+            keys.listenerKeys?.length ? " listenerKeys are keys of this workspace's own local listener: they work only there." : ""
+          }`,
+        };
       return { ok: true, localMcp: snap.localMcp ?? null };
     }
     if (op === "create_mcp_key") {
@@ -545,7 +552,7 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
     if (op === "revoke_mcp_key") {
       const query = need(p, "idOrName", op);
       const listed = await hub.request({ action: "mcp-key-list" });
-      const keys = ((listed.reply?.mcpKeys?.keys ?? listed.localMcp?.keys ?? []) as Array<{ id?: string; name?: string }>).filter((k) => k && typeof k === "object");
+      const keys = ((listed.reply?.mcpKeys ? [...listed.reply.mcpKeys.keys, ...(listed.reply.mcpKeys.listenerKeys ?? [])] : listed.localMcp?.keys ?? []) as Array<{ id?: string; name?: string }>).filter((k) => k && typeof k === "object");
       const found = keys.find((k) => k.id === query || (k.name !== undefined && same(k.name, query)));
       if (!found?.id) throw new Error(`No key is called "${query}".`);
       await hub.request({ action: "mcp-key-revoke", id: found.id });

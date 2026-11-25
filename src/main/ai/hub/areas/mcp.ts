@@ -230,10 +230,12 @@ export class McpPart {
    * The keys a person's own agents use. On a team server they are the server's keys for this account, which its
    * MCP address checks; the hub's own store would make keys nothing on the server reads.
    */
-  async mcpKeyList(this: HubService): Promise<{ where: "server" | "app"; keys: McpTokenView[] }> {
-    if (this.host.mcpKeys) return { where: "server", keys: this.host.mcpKeys.list() };
+  async mcpKeyList(this: HubService): Promise<{ where: "server" | "app"; keys: McpTokenView[]; listenerKeys?: McpTokenView[] }> {
     await this.mcpTokens().initialize();
-    return { where: "app", keys: this.mcpTokens().list("local") };
+    const local = this.mcpTokens().list("local");
+    if (!this.host.mcpKeys) return { where: "app", keys: local };
+    // The hub's own listener, which an administrator may switch on here too, keeps keys of its own.
+    return { where: "server", keys: this.host.mcpKeys.list(), ...(local.length ? { listenerKeys: local } : {}) };
   }
 
   /** A key made or taken back is written down with who did it, whether in Settings or from a conversation. */
@@ -442,8 +444,10 @@ export class McpPart {
       }
       case "mcp-key-revoke": {
         const id = requiredText(request.id);
-        const named = (await this.mcpKeyList()).keys.find((k) => k.id === id)?.name ?? id;
-        const gone = this.host.mcpKeys ? await this.host.mcpKeys.revoke(id) : await this.mcpTokens().revoke("local", id);
+        const listed = await this.mcpKeyList();
+        const named = [...listed.keys, ...(listed.listenerKeys ?? [])].find((k) => k.id === id)?.name ?? id;
+        // The server's key by that id, or else one of the hub's own listener.
+        const gone = (this.host.mcpKeys ? await this.host.mcpKeys.revoke(id) : false) || (await this.mcpTokens().revoke("local", id));
         if (gone) await this.noteMcpKey({ revoked: named });
         reply = { mcpKeys: await this.mcpKeyList() };
         break;

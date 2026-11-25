@@ -2230,7 +2230,12 @@ export interface HubReply {
    * The keys a person's own agents use to reach sshs3. On a team server ("server"): the server's keys for this
    * account, which its MCP address checks. In the desktop app ("app"): the keys of its local listener.
    */
-  mcpKeys?: { where: "server" | "app"; keys: unknown[] };
+  mcpKeys?: {
+    where: "server" | "app";
+    keys: unknown[];
+    /** On a team server: keys of this hub's own local listener, which an administrator may switch on. They work only there. */
+    listenerKeys?: unknown[];
+  };
   audit?: { entries: AuditEntryView[]; verification: AuditVerificationView };
   /** `sealed`: it matches the hash the audit log kept when it was finished; false: it does not; absent: no seal (still being made, or older). */
   recording?: { id: string; cast: string; sealed?: boolean };
