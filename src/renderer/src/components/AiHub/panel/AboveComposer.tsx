@@ -89,6 +89,8 @@ export function AboveComposer({ p }: { p: PanelState }): JSX.Element {
                       </button>
                       <button
                         type="button"
+                        // The hub masks what it recognizes before any model reads it, whichever button was pressed.
+                        title="Your copy of the conversation keeps the text as you typed it. sshs3 still hides what it recognizes as a password, key or token before the model reads the message."
                         onClick={() => {
                           setPrompt("");
                           setAttachments([]);
@@ -100,7 +102,7 @@ export function AboveComposer({ p }: { p: PanelState }): JSX.Element {
                           });
                         }}
                       >
-                        Send Anyway
+                        Send as typed
                       </button>
                       <button
                         type="button"

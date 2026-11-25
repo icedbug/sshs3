@@ -106,9 +106,20 @@ describe("a message sent past the secret warning", () => {
     return field;
   };
 
-  it("'Send Anyway': the text is back in the composer when it did not go", async () => {
+  // Found by the security lead tester: "Send Anyway" read as if the secret went to the model, while sshs3
+  // still hid it there. The button says what it does.
+  it("'Send as typed' says that sshs3 still hides what it recognizes from the model", async () => {
+    await warn();
+    const button = screen.getByRole("button", { name: "Send as typed" });
+    expect(button).toHaveAttribute(
+      "title",
+      "Your copy of the conversation keeps the text as you typed it. sshs3 still hides what it recognizes as a password, key or token before the model reads the message.",
+    );
+  });
+
+  it("'Send as typed': the text is back in the composer when it did not go", async () => {
     const field = await warn();
-    fireEvent.click(screen.getByRole("button", { name: "Send Anyway" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send as typed" }));
     await waitFor(() => expect(request).toHaveBeenCalled());
     await waitFor(() => expect(field.value).toBe(secret));
     expect(screen.getByText(/connection to the server was lost/)).toBeInTheDocument();
@@ -131,7 +142,7 @@ describe("a message sent past the secret warning", () => {
     fireEvent.change(field, { target: { value: secret } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await screen.findByTestId("ai-dlp-warning");
-    fireEvent.click(screen.getByRole("button", { name: "Send Anyway" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send as typed" }));
     await waitFor(() => expect(request).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByTestId("ai-dlp-warning")).toBeNull());
     expect(field.value).toBe("");
