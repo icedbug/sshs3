@@ -18,6 +18,7 @@ export const AREA_OF = {
   "task-read": "conversations",
   takeover: "conversations",
   "terminal-settle": "conversations",
+  "answer-command": "conversations",
   arm: "conversations",
   approve: "safety",
   "change-reveal": "safety",

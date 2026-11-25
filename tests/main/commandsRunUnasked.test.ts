@@ -307,6 +307,29 @@ describe("a change card and a file write", () => {
     unrated();
   });
 
+  // Found by the security lead tester: "Run in Terminal" under an AI answer typed the very command a
+  // freeze had just refused into the terminal, with only "Sent to web-02." and nothing in the audit log.
+  it("are not slipped past by a person's Run in Terminal: it asks during a freeze, and it is written down", async () => {
+    const { hub } = await hubWith();
+    hub.store.data.safetyPolicy = { requireApprovalOnProdTags: true, clusterPolicies: { web: { frozenUntil: Date.now() + 3_600_000 } } };
+    const asked = await hub.request({ action: "answer-command", sessionId: "term-web", command: "echo x > /tmp/frozen" });
+    expect(asked.reply?.answerCommand).toMatchObject({ sent: false, frozenUntil: expect.any(Number), label: "web-1" });
+    const read = async () => (await hub.request({ action: "audit-read" } as never)).reply!.audit!.entries.filter((e) => e.what === "echo x > /tmp/frozen");
+    expect(await read()).toEqual([]);
+
+    const ran = await hub.request({ action: "answer-command", sessionId: "term-web", command: "echo x > /tmp/frozen", confirmFreeze: true });
+    expect(ran.reply?.answerCommand).toMatchObject({ sent: true });
+    await vi.waitFor(async () => expect(await read()).toHaveLength(1));
+    const [entry] = await read();
+    expect(entry.actor).toMatch(/from an AI answer/);
+    expect(entry.approvedBy).toMatch(/ran it themselves, during a change freeze/);
+    expect(entry.target).toBe("web-1");
+
+    // Outside a freeze it is not asked about, and still written down.
+    const plain = await hub.request({ action: "answer-command", sessionId: "term-api", command: "uptime" });
+    expect(plain.reply?.answerCommand).toMatchObject({ sent: true });
+  });
+
   it("wait for a second person on production where the two-person rule is on, and a command there waits for nobody", async () => {
     const { hub, run, ran, unrated } = await hubWith({ team: { requirePeerApprovalOnProd: true } });
     const { task, invoke, waiting, answer } = await run("assisted", "api");

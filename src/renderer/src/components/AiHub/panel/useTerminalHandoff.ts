@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { TerminalSession } from "@shared/types/aiHub";
+import { hubRequest } from "../../../lib/aiHub";
 
 interface TerminalDraft {
   taskId: string;
@@ -21,10 +22,13 @@ export function useTerminalHandoff(
   const [writing, setWriting] = useState(false);
   const pending = useRef(false);
   const epoch = useRef(0);
+  // The command a person was told about during a change freeze. Pressing Run in Terminal on it again runs it.
+  const confirming = useRef<string | null>(null);
 
   const reset = useCallback((): void => {
     epoch.current++;
     pending.current = false;
+    confirming.current = null;
     setWriting(false);
     setDraft(null);
   }, []);
@@ -56,6 +60,46 @@ export function useTerminalHandoff(
     }
   }
 
+  /**
+   * A command from an answer is run as the person, so no approval is asked. The hub still checks it against a
+   * change freeze on the terminal's server, asks the person once more during one, and writes the run in the audit log.
+   */
+  async function cleared(command: string, key: string): Promise<boolean> {
+    if (!session) {
+      setError("The selected terminal is no longer available. Select a current terminal first.");
+      return false;
+    }
+    const confirmFreeze = confirming.current === key;
+    const started = epoch.current;
+    try {
+      const { reply } = await hubRequest({
+        action: "answer-command",
+        sessionId: session.id,
+        command,
+        ...(taskId ? { taskId } : {}),
+        ...(confirmFreeze ? { confirmFreeze: true } : {}),
+      });
+      const answer = reply?.answerCommand;
+      if (answer && !answer.sent) {
+        confirming.current = key;
+        if (started === epoch.current) {
+          setNotice("");
+          setError(
+            `A change freeze holds on ${answer.label ?? session.label} until ${new Date(answer.frozenUntil ?? Date.now()).toLocaleString()}. ` +
+              "Run in Terminal types the command as you, past the freeze, and it is written in the audit log. " +
+              "Press Run in Terminal again to run it anyway.",
+          );
+        }
+        return false;
+      }
+      confirming.current = null;
+      return true;
+    } catch (error) {
+      if (started === epoch.current) setError(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
+
   const connected = Boolean(draft?.target && session &&
     draft.target.id === session.id && draft.target.generation === session.generation);
   const hasControl = Boolean(draft && Array.from(draft.text).some((ch) =>
@@ -72,6 +116,7 @@ export function useTerminalHandoff(
     pending.current = true;
     setWriting(true);
     try {
+      if (!(await cleared(draft.text, `${draft.messageId}:${draft.line}:${draft.text}`))) return false;
       const written = await write(draft.text, true);
       if (written) setDraft((current) => current === draft ? null : current);
       return written;
@@ -100,7 +145,7 @@ export function useTerminalHandoff(
       },
       run(command: string, line: number): void {
         if (draft?.messageId === messageId && draft.line === line) void runDraft();
-        else void write(command, true);
+        else void (async () => (await cleared(command, `${messageId}:${line}:${command}`)) && write(command, true))();
       },
     };
   }

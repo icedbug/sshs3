@@ -540,7 +540,7 @@ parts that define the same method name are refused when the file loads.
 | --- | --- | --- |
 | `HubService.ts` | The hub's state (every field), its start and end, the snapshot, the clock (`tick`), `changed`, and the handing out of requests | none of its own |
 | `areas/routes.ts` | The table of which part answers which request, and its types | |
-| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log, a terminal a person uses again after a stopped command | 20 |
+| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log, a terminal a person uses again after a stopped command, a command a person runs from an answer | 21 |
 | `areas/runs.ts` | A run: starting it, its events, what it spends, stopping it; runs on an external agent | none: started by other parts |
 | `areas/chatRuns.ts` | Conversations asked for from a chat thread: the fence they run inside (`chatFence.ts`), starting and going on, their own terminals, and following a run without a browser (`onRun`, `runView`) | none: called by the chat agent |
 | `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 12 |
@@ -1093,7 +1093,12 @@ reads them. There are none in the desktop app and none in the demo lab.
   refused, and a plan cannot be approved. Nothing looks at what a command
   does, so a freeze does not stop an agent that runs a change as a plain
   command: the agent is told not to. An administrator can end a freeze early. A freeze a person set
-  for a cluster in their own rules is stopped at the same places.
+  for a cluster in their own rules is stopped at the same places. Run in
+  Terminal under an answer types a command as the person, so it is not
+  refused, but the hub is asked first (`answer-command`): during a freeze
+  on the terminal's server the person is told until when, and presses it
+  again to run it anyway. Every such run is written in the audit log as the
+  person's, with the freeze when one held.
 - **Where they are kept.** One file in the server's shared folder
   (`shared-workspace/team-rules.json`), read into memory when the server
   starts. Every account's hub reads the same set (`HubHost.teamRules`). A
@@ -3227,7 +3232,7 @@ the panel state and terminal draft hooks, and fourteen components in `panel/`.
 | --- | --- |
 | `AiHubPanel.tsx` | Calls the hook and lays the pieces out |
 | `panel/usePanelState.tsx` | Everything the panel holds and does before it draws: which conversation is open, what is typed, the menus, attachments, and the handlers for sending, stopping, forking and the rest. Returns it as one object, `p` |
-| `panel/useTerminalHandoff.ts` | Stages, edits and sends a command from a chat code block. A draft belongs to its conversation, message, block and terminal session. |
+| `panel/useTerminalHandoff.ts` | Stages, edits and sends a command from a chat code block. A draft belongs to its conversation, message, block and terminal session. Run in Terminal asks the hub first, for a change freeze and the audit log. |
 | `panel/PanelHeader.tsx`, `PanelNav.tsx`, `ScenarioBar.tsx` | The top bar; the history menu, the tabs of the views, an error or a notice; and the persistent demo lab incident bar |
 | `panel/WorkSidebar.tsx` | The full view's sidebar: conversations, agents, recent team activity |
 | `panel/Welcome.tsx` | What a new chat shows before anything is said |

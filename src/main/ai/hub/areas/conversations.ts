@@ -709,6 +709,34 @@ export class ConversationsPart {
         // The person connects it again by hand: the stopped command is over, they say.
         this.terminals.settleByPerson(request.sessionId);
         break;
+      case "answer-command": {
+        // "Run in Terminal" under an AI answer: the person runs the command as their own. A freeze on its
+        // server does not stop a person, but one click must not slip a command the freeze refused past it
+        // unseen: it is asked about first, and every such run is written down.
+        const session = this.terminals.get(request.sessionId);
+        if (!session || session.state === "disconnected") throw new Error("That terminal is not connected. Select a current terminal first.");
+        const command = requiredText(request.command);
+        const target = { sessionId: session.id, generation: session.generation, label: session.label };
+        const until = this.resolveSafetyContext({ target } as Pick<AgentTask, "target">).clusterPolicy?.frozenUntil;
+        const frozenUntil = until && until > Date.now() ? until : undefined;
+        if (frozenUntil && request.confirmFreeze !== true) {
+          reply = { answerCommand: { sent: false, frozenUntil, label: session.label } };
+          break;
+        }
+        const person = await this.resolveActorName();
+        await this.audit().append({
+          kind: "command",
+          actor: `${person} (from an AI answer, with Run in Terminal)`,
+          target: session.label,
+          what: maskContext(command),
+          outcome: "sent",
+          approvedBy: `${person} (ran it themselves${frozenUntil ? ", during a change freeze" : ""})`,
+          ...(frozenUntil ? { detail: `A change freeze held on ${session.label} until ${new Date(frozenUntil).toISOString()}.` } : {}),
+          ...(request.taskId ? { taskId: request.taskId } : {}),
+        });
+        reply = { answerCommand: { sent: true, label: session.label } };
+        break;
+      }
       case "arm":
         if (!SHELL_KINDS.includes(request.shell))
           throw new Error("Unsupported shell");

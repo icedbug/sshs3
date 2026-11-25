@@ -446,7 +446,8 @@ describe("Shell Integration Overhaul", () => {
       fireEvent.click(stage());
       fireEvent.change(draft(), { target: { value: "echo first\r\necho second" } });
       fireEvent.click(codeRun());
-      expect(writePod).toHaveBeenCalledWith("term-1", "echo first\necho second\n");
+      // The hub is asked first (a change freeze, the audit log), then the command is typed.
+      await waitFor(() => expect(writePod).toHaveBeenCalledWith("term-1", "echo first\necho second\n"));
       expect(screen.getByRole("button", { name: "Sending…" })).toBeDisabled();
       expect(screen.queryByText("Sent to prod-web-01.")).not.toBeInTheDocument();
       fireEvent.click(codeRun());
@@ -488,19 +489,20 @@ describe("Shell Integration Overhaul", () => {
       fireEvent.click(buttons("Stage in Terminal")[0]);
       fireEvent.change(editor(), { target: { value: "echo only-the-first" } });
       for (const index of [1, 2]) {
+        mockState.terminalWrite.mockClear();
         fireEvent.click(buttons("Run in Terminal")[index]);
-        expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n");
+        await waitFor(() => expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n"));
         expect(editor()).toHaveValue("echo only-the-first");
       }
       fireEvent.click(buttons("Run in Terminal")[0]);
-      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo only-the-first\n");
+      await waitFor(() => expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo only-the-first\n"));
       await waitFor(() => expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).toBeNull());
       fireEvent.click(buttons("Stage in Terminal")[0]);
       fireEvent.change(editor(), { target: { value: "echo previous-task" } });
       rerender(<AiHubPanel {...props} initialTaskId={other.id} />);
       expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).toBeNull();
       fireEvent.click(buttons("Run in Terminal")[0]);
-      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n");
+      await waitFor(() => expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n"));
       await waitFor(() => expect(screen.getByText("Sent to prod-web-01.")).toBeVisible());
     });
 
@@ -524,10 +526,34 @@ describe("Shell Integration Overhaul", () => {
       expect(screen.queryByTestId("ai-streaming-message")).toBeNull();
       const run = () => screen.getAllByRole("button", { name: "Run in Terminal" });
       fireEvent.click(run()[0]);
-      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n");
+      await waitFor(() => expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n"));
       fireEvent.click(run()[1]);
-      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo edited-stream\n");
+      await waitFor(() => expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo edited-stream\n"));
       await waitFor(() => expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).toBeNull());
+    });
+
+    // Found by the security lead tester: Run in Terminal under an answer typed a command that a change
+    // freeze had refused for the agent, with no word and no record.
+    it("asks before Run in Terminal types a command during a change freeze, and has the hub write it down", async () => {
+      const until = Date.now() + 3_600_000;
+      mockState.hubRequest.mockImplementation(async (req: HubRequest) =>
+        req.action === "answer-command" && !req.confirmFreeze
+          ? { ...mockState.hub!, reply: { answerCommand: { sent: false, frozenUntil: until, label: "prod-web-01" } } }
+          : { ...mockState.hub!, reply: { answerCommand: { sent: true, label: "prod-web-01" } } },
+      );
+      render(<AiHubPanel mode="panel" setMode={vi.fn()} initialTaskId="task-1" />);
+      const run = () => screen.getAllByRole("button", { name: "Run in Terminal" })[0];
+      const asked = { action: "answer-command", sessionId: "term-1", command: "sudo systemctl reload nginx", taskId: "task-1" };
+      fireEvent.click(run());
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /^A change freeze holds on prod-web-01 until .+\. Run in Terminal types the command as you, past the freeze, and it is written in the audit log\. Press Run in Terminal again to run it anyway\.$/,
+      );
+      expect(mockState.hubRequest).toHaveBeenCalledWith(asked);
+      expect(mockState.terminalWrite).not.toHaveBeenCalled();
+      fireEvent.click(run());
+      await waitFor(() => expect(mockState.terminalWrite).toHaveBeenCalledWith("term-1", "sudo systemctl reload nginx\n"));
+      expect(mockState.hubRequest).toHaveBeenLastCalledWith({ ...asked, confirmFreeze: true });
+      expect(mockState.terminalWrite).toHaveBeenCalledTimes(1);
     });
 
     it("warns about matching secrets in demo when a real remote model is selected", () => {
@@ -569,7 +595,10 @@ describe("Shell Integration Overhaul", () => {
       expect(mockState.terminalWrite).toHaveBeenCalledWith("term-1", "sudo systemctl reload nginx");
 
       fireEvent.click(screen.getAllByRole("button", { name: "Run in Terminal" })[0]);
-      expect(mockState.terminalWrite).toHaveBeenCalledWith("term-1", "sudo systemctl reload nginx\n");
+      await waitFor(() => expect(mockState.terminalWrite).toHaveBeenCalledWith("term-1", "sudo systemctl reload nginx\n"));
+      // Run in Terminal asked the hub about a change freeze and had it written down. Nothing else asks the hub below.
+      expect(mockState.hubRequest).toHaveBeenCalledWith(expect.objectContaining({ action: "answer-command", command: "sudo systemctl reload nginx" }));
+      mockState.hubRequest.mockClear();
 
       // ! quick command executes directly in terminal without calling hubRequest('start'/'reply').
       const composer = screen.getByTestId("ai-composer");

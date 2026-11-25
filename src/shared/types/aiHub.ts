@@ -2188,6 +2188,11 @@ export interface KbSearchHit {
 
 /** What one request asked for, beside the snapshot. Present only on that request's answer. */
 export interface HubReply {
+  /**
+   * A command from an AI answer that a person runs with "Run in Terminal": sent, or not sent because a
+   * change freeze holds on its server until then (the person is asked, and sends it again to run it).
+   */
+  answerCommand?: { sent: boolean; frozenUntil?: number; label?: string };
   /** A new alert hook's address (the path on this server), shown this once. Empty where there is no address. */
   alertHook?: { path: string };
   /** Tickets an alert request created or updated. */
@@ -2501,6 +2506,8 @@ export type HubRequest =
   | { action: "takeover"; sessionId: string }
   /** A person says a terminal whose command was stopped before its end was seen is at its prompt again. */
   | { action: "terminal-settle"; sessionId: string }
+  /** A person runs a command from an AI answer in a terminal: checked against a freeze, and written down. */
+  | { action: "answer-command"; sessionId: string; command: string; taskId?: string; confirmFreeze?: boolean }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | {
       action: "approve";
