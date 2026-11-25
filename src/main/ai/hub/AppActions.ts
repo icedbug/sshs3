@@ -2065,9 +2065,13 @@ export async function handleAppAction(
           const role = srv.nodeRole || srv.role || "unspecified";
           roleCounts[role] = (roleCounts[role] ?? 0) + 1;
         }
-        const roleSummary = Object.entries(roleCounts)
-          .map(([role, count]) => `${role}:${count}`)
-          .join(", ");
+        // Roles only where some server has one: "unspecified:6" said nothing.
+        const roleSummary = Object.keys(roleCounts).some((role) => role !== "unspecified")
+          ? Object.entries(roleCounts)
+              .map(([role, count]) => `${role}:${count}`)
+              .join(", ")
+          : "";
+        const nodes = `${matchedServers.length} ${matchedServers.length === 1 ? "node" : "nodes"}`;
         const hasProdMarker = (values: Array<string | undefined>): boolean =>
           values.some(
             (v) =>
@@ -2096,9 +2100,9 @@ export async function handleAppAction(
           id: crypto.randomUUID(),
           kind: "command",
           target: targetSummary,
-          blastRadius: `${matchedServers.length} nodes (${roleSummary})${isProdTarget ? " [PROD]" : ""}`,
+          blastRadius: `${nodes}${roleSummary ? ` (${roleSummary})` : ""}${isProdTarget ? " [PROD]" : ""}`,
           description: clip(
-            `[${isProdTarget ? "PROD · " : ""}Staged Cluster Exec (${planSummary}) · ${matchedServers.length} nodes · roles: ${roleSummary}] ${description}`,
+            `[${isProdTarget ? "PROD · " : ""}Staged Cluster Exec (${planSummary}) · ${nodes}${roleSummary ? ` · roles: ${roleSummary}` : ""}] ${description}`,
             400,
           ),
           command: shown.text,

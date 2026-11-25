@@ -590,6 +590,27 @@ describe("AppActions overhaul", () => {
   });
 
   describe("3. sshs3_cluster_exec staged execution & prod role/count reporting", () => {
+    // Found by an exploring tester: a look across one server read "1 nodes (unspecified:1)".
+    it("says one node in the singular, and leaves out roles no server has", async () => {
+      const servers: WorkspaceServerSummary[] = [makeServer({ id: "w1", name: "web-01", host: "10.0.2.1" })];
+      const { hub } = createHarness({
+        servers,
+        terminals: [{ id: "term-w1", generation: "g1", label: "web-01", profileId: "w1", state: "ready" }],
+        execResult: async () => ({ exitCode: 0, output: "ok" }),
+      });
+      let seen: AgentChange | undefined;
+      await handleAppAction(
+        hub,
+        makeTask(),
+        { action: "sshs3_cluster_exec", payload: { serverIdsOrNames: ["web-01"], command: "uptime", description: "Look" } },
+        vi.fn(async (change: AgentChange) => {
+          seen = { ...change };
+        }),
+      );
+      expect(seen?.blastRadius).toBe("1 node");
+      expect(seen?.description).not.toContain("unspecified");
+    });
+
     it("reports target node roles & count before execution and stops after canary failure", async () => {
       const servers: WorkspaceServerSummary[] = [
         makeServer({ id: "n1", name: "db-primary", host: "10.0.1.1", cluster: "Prod-DB", nodeRole: "primary", tags: ["prod"] }),

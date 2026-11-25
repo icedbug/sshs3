@@ -118,18 +118,24 @@ export function isRestorableChange(c: AgentChange | undefined): boolean {
   );
 }
 
-/** Synthesizes a concise AI change summary for a grouped Change Set. */
-export function summarizeChangeSet(
-  entries: ChangeTimelineEntry[],
-  taskTitle?: string,
-): string {
+/** What a group holds, by kind: "1 file edit, 2 commands". A command that only looked is not a change. */
+export function countEntries(entries: ChangeTimelineEntry[]): string {
   const fileCount = entries.filter((e) => e.change?.kind === "file").length;
   const cmdCount = entries.filter((e) => e.change?.kind === "command").length;
   const parts: string[] = [];
   if (fileCount > 0) parts.push(`${fileCount} file ${fileCount === 1 ? "edit" : "edits"}`);
   if (cmdCount > 0) parts.push(`${cmdCount} ${cmdCount === 1 ? "command" : "commands"}`);
-  if (parts.length === 0) parts.push(`${entries.length} ${entries.length === 1 ? "change" : "changes"}`);
-  const counts = parts.join(", ");
+  const rest = entries.length - fileCount - cmdCount;
+  if (rest > 0 || parts.length === 0) parts.push(`${rest || entries.length} ${(rest || entries.length) === 1 ? "change" : "changes"}`);
+  return parts.join(", ");
+}
+
+/** Synthesizes a concise AI change summary for a grouped Change Set. */
+export function summarizeChangeSet(
+  entries: ChangeTimelineEntry[],
+  taskTitle?: string,
+): string {
+  const counts = countEntries(entries);
   if (taskTitle) return `${taskTitle} (${counts})`;
   const firstSummary = entries[0]?.summary ?? "Change set";
   return entries.length === 1 ? firstSummary : `${firstSummary} (+${entries.length - 1} more · ${counts})`;
@@ -159,7 +165,9 @@ export function groupChangeEntries(
     const taskTitle = sorted.find((e) => e.taskTitle)?.taskTitle;
     const changeSetId = sorted.find((e) => e.change?.changeSetId)?.change?.changeSetId;
     const taskId = sorted.find((e) => e.taskId)?.taskId;
-    const targets = [...new Set(sorted.map((e) => e.target).filter(Boolean))];
+    // One entry's target may name several servers ("web-02, cache-01"): each server is named once.
+    // ("Cluster prod (web-01, web-02)" stays whole).
+    const targets = [...new Set(sorted.flatMap((e) => (/[()]/.test(e.target ?? "") ? [e.target ?? ""] : (e.target ?? "").split(/,\s*/))).map((t) => t.trim()).filter(Boolean))];
     const actors = [...new Set(sorted.map((e) => e.who).filter(Boolean))];
     const blastRadius = [
       ...new Set(
@@ -818,10 +826,7 @@ export function ChangesView({
                       </small>
                     </div>
                     <div className="ai-tags">
-                      <span className="ai-badge">
-                        {group.entries.length}{" "}
-                        {group.entries.length === 1 ? "change" : "changes"}
-                      </span>
+                      <span className="ai-badge">{countEntries(group.entries)}</span>
                       {group.blastRadius.map((br) => (
                         <span
                           key={br}

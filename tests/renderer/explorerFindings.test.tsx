@@ -7,7 +7,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentChange, AgentTask, HubSnapshot } from "../../src/shared/types/aiHub";
-import { ChangesView } from "../../src/renderer/src/components/AiHub/ChangesView";
+import { ChangesView, groupChangeEntries } from "../../src/renderer/src/components/AiHub/ChangesView";
 import { composerUsage } from "../../src/renderer/src/components/AiHub/panel/panelHelpers";
 import { linkFileRefs } from "../../src/renderer/src/components/AiHub/reportRefs";
 import { RichMarkdownContent } from "../../src/renderer/src/components/AiHub/RichMarkdownContent";
@@ -113,5 +113,21 @@ describe("what the exploring testers found", () => {
     render(<RichMarkdownContent text={linkFileRefs(body)} />);
     expect(document.body.textContent).not.toContain("](#file-");
     expect(screen.getAllByTestId("ai-file-ref-btn").length).toBeGreaterThanOrEqual(2);
+  });
+
+  // E6: a health check that only looked showed as "6 changes" beside a summary of "6 commands", and its
+  // header listed every server twice: one entry's target was "web-02, cache-01, ..." and another's the
+  // same servers in another order.
+  it("counts a group of commands as commands and names each of its servers once", () => {
+    const cmd = (id: string, target: string): AgentChange => ({ id, kind: "command", target, description: "Look", command: "uptime", status: "completed", at: 1000, decidedHow: "policy" });
+    const changes = [cmd("a", "web-02, cache-01, db-01"), cmd("b", "db-01, web-02, cache-01"), cmd("c", "web-01")];
+    render(<ChangesView hub={hubWith({ tasks: [taskWith(changes)] })} onOpenTask={vi.fn()} request={vi.fn()} />);
+    const card = document.querySelector('[data-testid^="change-set-"]')!;
+    expect(card.textContent).toContain("3 commands");
+    expect(card.textContent).not.toMatch(/3 changes/);
+    const group = groupChangeEntries(
+      changes.map((c) => ({ id: c.id, at: c.at, kind: "agent", actor: "Assistant", target: c.target, summary: c.description, taskId: "task-1", change: c })) as never,
+    )[0];
+    expect(group.targets).toEqual(["web-02", "cache-01", "db-01", "web-01"]);
   });
 });
