@@ -36,7 +36,7 @@ describe("what is waiting for a person", () => {
     const items = inboxItems(full);
     // An alert assigned to an agent that has not started on it still waits for a person (feature 6 review).
     expect(items.map((i) => i.kind)).toEqual(["approval", "plan", "question", "alert", "blocked", "alert", "review", "knowledge"]);
-    expect(items.find((i) => i.id === "alert:k4")?.detail).toBe("With an agent, not started yet");
+    expect(items.find((i) => i.id === "alert:k4")?.detail).toBe("With an agent; it waits for a person to start it");
     expect(items[0]).toMatchObject({ title: "Restart nginx", detail: "systemctl restart nginx", from: "Operator on web-01" });
     // Nothing rates a change: an approval carries no risk. (An alert's `risk` is its severity.)
     expect(items[0]).not.toHaveProperty("risk");

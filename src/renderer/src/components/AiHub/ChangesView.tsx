@@ -79,6 +79,14 @@ function decision(c: AgentChange): string {
       hour: "2-digit",
       minute: "2-digit",
     });
+  // A change that needed more than one person names each who allowed it, the second person marked:
+  // naming only the last made a two-person approval read as one.
+  const allowedBy = (c.approvals ?? []).filter((a) => a.allowed);
+  if (c.decidedBy?.allowed && allowedBy.length > 1) {
+    const names = allowedBy.map((a) => `${a.actor}${a.peer ? " (second person)" : ""}`);
+    const list = names.length === 2 ? names.join(" and ") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+    return `Allowed by ${list} at ${at(c.decidedBy.at)}`;
+  }
   if (c.decidedBy) {
     return `${c.decidedBy.allowed ? "Allowed" : "Refused"} by ${c.decidedBy.name} at ${at(c.decidedBy.at)}`;
   }

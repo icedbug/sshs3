@@ -2809,7 +2809,10 @@ How pages come to be and stay right:
   succeeded, or a hypothesis the run marked confirmed
   (`confirmedSomething`). An advice chat in which the assistant only said
   things teaches no page. It also follows the preference for saving what is
-  learned without asking.
+  learned without asking. When the record's own command output shows that a
+  page says something that is no longer so (a setting, a version, a count),
+  the statement is corrected and the record named, not left beside the new
+  value; on a page a person edited, the correction is added under their text.
 - **What a page claims is checked** (`KbCheck`). A model writes the pages and
   agents run what they say; a command it made up looks like one it copied. So
   after every change, every line in the page's code blocks is looked for in

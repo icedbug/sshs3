@@ -196,6 +196,6 @@ describe("in the hub", () => {
     await nightly(NOW);
     const first = hub.store.data.dailyReport!.at;
     await nightly(NOW + 3 * 24 * HOUR);
-    expect(hub.store.data.dailyReport!.text).toContain(`Since ${new Date(first).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`);
+    expect(hub.store.data.dailyReport!.text).toContain(`From ${new Date(first).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} to `);
   });
 });

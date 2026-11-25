@@ -1,6 +1,7 @@
 import { ChevronDown, ShieldCheck } from "lucide-react";
 import { AGENT_MODES } from "@shared/types/aiHub";
 import { modes } from "../panelShared";
+import { plural } from "../../../lib/plural";
 import type { PanelState } from "./usePanelState";
 
 /**
@@ -94,7 +95,7 @@ export function ComposerFooter({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                     })()}
                   </button>
                   {attachments.length > 0 && (
-                    <small>{attachments.length} sources</small>
+                    <small>{plural(attachments.length, "source")}</small>
                   )}
                 </div>
                 <input

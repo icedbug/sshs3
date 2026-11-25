@@ -51,7 +51,7 @@ describe("an alert in the inbox", () => {
       alert: { fingerprint: "f", source: "Alertmanager", severity: "critical", firstAt: 1, lastAt: 1, count: 1 },
     };
     const items = inboxItems({ tasks: [], workTickets: [ticket] } as never);
-    expect(items.find((i) => i.id === "alert:t1")).toMatchObject({ detail: "With DBA, not started yet" });
+    expect(items.find((i) => i.id === "alert:t1")).toMatchObject({ detail: "With DBA; it waits for a person to start it" });
     expect(inboxItems({ tasks: [], workTickets: [{ ...ticket, status: "in_progress" }] } as never).find((i) => i.id === "alert:t1")).toBeUndefined();
   });
 });

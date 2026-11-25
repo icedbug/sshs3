@@ -68,8 +68,10 @@ const KB_WORTH_A_LOOK = new Set(["gap", "contradiction", "dead-target", "lost-so
  */
 /** What the inbox is built from: the same on screen and where notifications are sent from. */
 export type InboxInput = Pick<HubSnapshot, "tasks"> &
-  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport" | "inboxState" | "peerApprovals">> & {
+  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport" | "inboxState" | "peerApprovals" | "workforcePaused">> & {
     serverFacts?: Pick<NonNullable<HubSnapshot["serverFacts"]>, "servers">;
+    /** Whether tickets start by themselves: what an alert an agent has waits for. */
+    preferences?: Pick<HubSnapshot["preferences"], "workforceAutopilot">;
   };
 
 export interface InboxFilterOptions {
@@ -123,6 +125,16 @@ export function planPeopleLine(plan: Pick<NonNullable<AgentTask["plan"]>, "appro
   if (mine) return `You approved. It waits for ${needs - yes.length > 1 ? `${needs - yes.length} more people` : "one more person"}: the others who may approve are asked in their inbox.`;
   if (others.length > 0) return `Approved by ${others.join(" and ")}. It waits for your own answer.`;
   return `${needs === 2 ? "Two" : needs} people have to approve this plan: you and ${needs === 2 ? "one more" : `${needs - 1} more`}. The others who may approve are asked in their inbox.`;
+}
+
+/**
+ * What an alert an agent has, and has not started, waits for: the heartbeat takes it by itself, critical
+ * ones first, unless it is off or the Workforce is paused, and then a person has to press Start.
+ */
+function alertWaitsFor(hub: InboxInput): string {
+  if (hub.preferences?.workforceAutopilot !== true) return "it waits for a person to start it";
+  if (hub.workforcePaused) return "the Workforce is paused, so it waits";
+  return "it starts by itself, critical alerts first";
 }
 
 export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): InboxItem[] {
@@ -188,7 +200,7 @@ export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): Inbox
         id: `alert:${t.id}`,
         kind: "alert",
         title: t.title,
-        detail: `${t.assigneeAgentId ? `With ${t.assigneeName ?? "an agent"}, not started yet` : "Nobody has it"}${t.alert.count > 1 ? ` · fired ${t.alert.count} times` : ""}`,
+        detail: `${t.assigneeAgentId ? `With ${t.assigneeName ?? "an agent"}; ${alertWaitsFor(hub)}` : "Nobody has it"}${t.alert.count > 1 ? ` · fired ${t.alert.count} times` : ""}`,
         from: t.alert.source,
         at: t.alert.lastAt,
         // The current firing: one that comes back after it had resolved is news again.

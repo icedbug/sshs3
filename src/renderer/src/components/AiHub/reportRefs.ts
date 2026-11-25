@@ -274,11 +274,14 @@ export function decodeFileRefHref(href: string | undefined): FileRef | null {
  * leaving fenced code blocks, URLs, timestamps, and existing markdown links untouched.
  */
 export function linkFileRefs(text: string): string {
-  return text
-    .split(/(```[\s\S]*?```|`[^`\n]*`)/)
+  const parts = text.split(/(```[\s\S]*?```|`[^`\n]*`)/);
+  return parts
     .map((part, i) => {
       if (i % 2 === 1) {
         if (part.startsWith("```")) return part;
+        // Already the text of a link (this text was linked once before): linking it again nests a
+        // link in a link, which shows as its markup.
+        if (parts[i - 1]?.endsWith("[") && parts[i + 1]?.startsWith("](")) return part;
         const inner = part.slice(1, -1);
         const direct = parseFileRef(inner);
         return direct ? `[${part}](${encodeFileRefHref(direct)})` : part;

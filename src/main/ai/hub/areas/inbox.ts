@@ -94,6 +94,9 @@ export class InboxPart {
     return inboxItems({
       tasks: this.store.data.tasks,
       workTickets: live(this.store.data.workTickets),
+      // What an alert an agent has waits for: the heartbeat, or a person.
+      preferences: { workforceAutopilot: this.store.data.preferences.workforceAutopilot },
+      workforcePaused: this.storeDataExtra().workforcePaused,
       dailyReport: this.store.data.dailyReport,
       // Other members' changes that need a second person and that this member may answer.
       ...(this.host.peerWaiting ? { peerApprovals: this.host.peerWaiting() } : {}),

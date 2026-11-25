@@ -1,6 +1,7 @@
 import path from "node:path";
-import type { HubReply } from "../../../../shared/types/aiHub";
+import type { AgentChange, HubReply } from "../../../../shared/types/aiHub";
 import { isPlainCommand } from "../../../../shared/types/aiHub";
+import { modeLabel } from "../../../../shared/modeLabels";
 import { isDemoMode } from "../demoWorkspace";
 import { AuditLog } from "../AuditLog";
 import { SessionRecorder } from "../SessionRecorder";
@@ -10,6 +11,21 @@ import { requiredText } from "../hubHelpers";
 import { log, DECIDED_HOW, active } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
+
+/**
+ * Who decided a change, as the audit log says it. A change that needed more than one person names each
+ * who allowed it, the second person marked: the last name alone read as a single approval to whoever
+ * read the log, the team's agents too.
+ */
+export function whoDecided(change: Pick<AgentChange, "approvals" | "decidedBy">, withOutcome = true): string {
+  const allowed = (change.approvals ?? []).filter((a) => a.allowed);
+  if (change.decidedBy?.allowed && allowed.length > 1)
+    return allowed
+      .map((a) => (withOutcome ? `${a.actor} (${a.peer ? "second person, " : ""}allowed)` : `${a.actor}${a.peer ? " (second person)" : ""}`))
+      .join(", ");
+  if (!change.decidedBy) return "";
+  return withOutcome ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})` : change.decidedBy.name;
+}
 
 /**
  * The audit log and terminal recordings.
@@ -75,13 +91,13 @@ export class AuditPart {
         void this.audit()
           .append({
             kind: change.kind === "setting" ? "setting" : change.kind === "file" ? "file-write" : change.check ? "change" : task.fromOutside ? "mcp" : "command",
-            actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
+            actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${modeLabel(task.mode)})`,
             target: change.target,
             what: change.command || change.description,
             outcome: rolledBack ? "rolled-back" : attempted ? "rollback-unverified" : change.status,
             exitCode: change.exitCode,
             approvedBy: change.decidedBy
-              ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})`
+              ? whoDecided(change)
               : change.decidedHow === "policy" && change.status !== "denied" && isPlainCommand(change)
                 ? // No rule let it through: a plain command is never asked about.
                   "nobody: a command runs without asking"

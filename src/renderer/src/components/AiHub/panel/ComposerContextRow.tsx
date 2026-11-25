@@ -1,5 +1,6 @@
 import { ChevronDown, ShieldCheck, Terminal } from "lucide-react";
 import { selectAiTerminal } from "../../../lib/aiHub";
+import { composerUsage } from "./panelHelpers";
 import type { PanelState } from "./usePanelState";
 
 /**
@@ -202,21 +203,14 @@ export function ComposerContextRow({ p, hub }: { p: PanelState; hub: NonNullable
                       </div>
                     )}
                   </div>
-                  {task && (task.usage || task.runUsage) && (() => {
-                    // While a run goes on, what it has spent so far is counted in.
-                    const running = ["queued", "running", "waiting"].includes(task.status) ? task.runUsage : undefined;
-                    const input = (task.usage?.inputTokens ?? 0) + (running?.inputTokens ?? 0);
-                    const output = (task.usage?.outputTokens ?? 0) + (running?.outputTokens ?? 0);
-                    if (!input && !output) return null;
-                    return (
-                      <small
-                        className="ai-usage"
-                        title={`${input} input / ${output} output tokens${running ? " (the run in progress included)" : ""}`}
-                      >
-                        {((input + output) / 1000).toFixed(1)}k
-                        {task.usage?.costUsd !== undefined ? " · $" + task.usage.costUsd.toFixed(3) : ""}
+                  {(() => {
+                    // The same count as the header's, the run going on and the prompt cache included.
+                    const used = composerUsage(task);
+                    return used ? (
+                      <small className="ai-usage" title={used.title}>
+                        {used.label}
                       </small>
-                    );
+                    ) : null;
                   })()}
                   {terminal?.owner && (
                     <button

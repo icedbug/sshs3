@@ -775,7 +775,19 @@ export async function handleSettingsOp(hub: AppActionHost, tool: SettingsTool, o
             watchPaths: snap.serverFacts.watchPaths,
           }
         : null,
-      alertIntake: snap.alertIntake ?? null,
+      // The address is this person's own. Read alone, "received: 0" was taken for "the alert on the
+      // board never came in": it came through a teammate's address. The board's alerts are counted beside it.
+      alertIntake: snap.alertIntake
+        ? {
+            ...snap.alertIntake,
+            scope:
+              "This is your own alert address only. Alerts on the team's board can come in through another member's address: each alert ticket lists its alerts and where they came from.",
+            onTheTeamsBoard: (() => {
+              const open = (snap.workTickets ?? []).filter((t) => t.alert && t.status !== "done");
+              return { open: open.length, sources: [...new Set(open.map((t) => t.alert!.source).filter(Boolean))] };
+            })(),
+          }
+        : null,
     };
   }
   if (op === "save_notify_channel") {

@@ -16,6 +16,7 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceRule,
 } from "../../../../shared/types/aiHub";
+import { modeLabel } from "../../../../shared/modeLabels";
 import { DEFAULT_SAFETY_POLICY, isProdTag } from "../safetyPolicy";
 import { lowerMode } from "../AppGuard";
 import {
@@ -892,7 +893,7 @@ export class SafetyPart {
           const now = next.clusterPolicies ?? {};
           const say = (p: (typeof now)[string] | undefined): string =>
             p
-              ? [p.maxMode ? `at most "${({ advice: "Advice", plan: "Plan", assisted: "Ask first", autonomous: "Auto" } as Record<string, string>)[p.maxMode] ?? p.maxMode}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
+              ? [p.maxMode ? `at most "${modeLabel(p.maxMode)}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
               : "none";
           for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);

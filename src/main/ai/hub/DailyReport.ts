@@ -297,7 +297,10 @@ export function buildDailyReport(input: DailyReportInput): string {
     ...(contradictions ? [`${contradictions} place${contradictions === 1 ? "" : "s"} where knowledge base pages disagree`] : []),
   ]);
 
-  const period = `Since ${new Date(since).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}.`;
+  // The whole period, up to when the report was made: "since" alone read as "today was quiet" for a
+  // report made early in the day, beside what happened after it.
+  const when = (t: number): string => new Date(t).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const period = `From ${when(since)} to ${when(input.now)}.`;
   return lines.length
     ? `${period}\n\n${lines.join("\n").trim()}`
     : `${period} Nothing was recorded: no alerts, no changes, no tickets.`;

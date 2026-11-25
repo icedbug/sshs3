@@ -18,6 +18,7 @@ import type {
   WorkspaceServerSummary,
   FactChange,
 } from "../../../shared/types/aiHub";
+import { modeLabel } from "../../../shared/modeLabels";
 import { AiConfigStore } from "../AiConfigStore";
 import { HermesManager } from "../HermesManager";
 import { HubStore } from "./HubStore";
@@ -66,7 +67,7 @@ import { AlertsPart } from "./areas/alerts";
 import { nextScheduleTime, SchedulesPart } from "./areas/schedules";
 import { disposeSimulation, SimulationPart } from "./areas/simulation";
 import { EvalsPart } from "./areas/evals";
-import { AuditPart } from "./areas/audit";
+import { AuditPart, whoDecided } from "./areas/audit";
 import { McpPart } from "./areas/mcp";
 import { AgentsPart } from "./areas/agents";
 import { MemoryPart } from "./areas/memory";
@@ -298,7 +299,7 @@ export class HubService {
           actor: task.agentName ?? "Assistant", target: change.target, taskId: task.id, changeId: change.id,
           what: rollback ? change.rollback?.command ?? change.description : change.command ?? change.description,
           outcome: rollback ? "rollback-intent" : "intent",
-          approvedBy: change.decidedBy?.name, detail: change.adminException?.reason, userId: change.adminException?.actorId,
+          approvedBy: whoDecided(change, false) || undefined, detail: change.adminException?.reason, userId: change.adminException?.actorId,
         }, Date.now(), true);
       },
       recordStarted: (task, change) => this.recordStarted(task, change),
@@ -1286,7 +1287,7 @@ export class HubService {
     void this.audit()
       .append({
         kind: task.fromOutside ? "mcp" : "command",
-        actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
+        actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${modeLabel(task.mode)})`,
         target: change.target, taskId: task.id, changeId: change.id,
         what: change.command || change.description,
         outcome: "started",

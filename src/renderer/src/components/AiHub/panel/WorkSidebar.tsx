@@ -1,4 +1,5 @@
 import { MessageSquare, Plus, Terminal } from "lucide-react";
+import { modeLabel } from "@shared/modeLabels";
 import { selectAiTerminal } from "../../../lib/aiHub";
 import { isConversation } from "../workforceModel";
 import { ChatOriginBadge } from "../ChatOriginBadge";
@@ -140,7 +141,7 @@ export function WorkSidebar({ p, hub }: { p: PanelState; hub: NonNullable<PanelS
                           <div>
                             <span>{ag.name}</span>
                             <small>
-                              {ag.targetCluster || ag.role} · {ag.defaultMode}
+                              {ag.targetCluster || ag.role} · {modeLabel(ag.defaultMode)}
                             </small>
                           </div>
                         </button>

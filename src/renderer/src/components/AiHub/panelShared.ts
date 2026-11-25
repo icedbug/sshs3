@@ -1,3 +1,4 @@
+import { MODE_LABEL } from "@shared/modeLabels";
 import type { AgentMode, HubRequest, HubSnapshot } from "@shared/types/aiHub";
 
 /** The panel's request helper: it shows a failed request in the panel and resolves with nothing. */
@@ -12,13 +13,8 @@ export type Act = (request: HubRequest) => Promise<HubSnapshot | undefined>;
 export const DEMO_MODE_SET_BY_SERVER =
   "Demo mode is set when the sshs3 server starts and can't be changed here.";
 
-export const modes: Record<AgentMode, string> = {
-  // "Ask" next to "Ask first" was read as the same thing.
-  advice: "Advice",
-  assisted: "Ask first",
-  autonomous: "Auto",
-  plan: "Plan",
-};
+// "Ask" next to "Ask first" was read as the same thing: the names are shared with the main process.
+export const modes: Record<AgentMode, string> = MODE_LABEL;
 
 /** Internal view identifiers used across AiHub navigation and view routing. */
 export type HubViewId =

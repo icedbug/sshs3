@@ -2,7 +2,7 @@ import { dataDestination, isLoopbackHostname } from "@shared/dataDestination";
 // Small functions and constants of the chat panel: moved here from AiHubPanel.tsx as they were.
 import { type AgentTask, type AgentToolRecord, type HubSnapshot } from "@shared/types/aiHub";
 import * as aiHubModule from "../../../lib/aiHub";
-import { ALL_HUB_VIEWS, type HubViewId } from "../panelShared";
+import { ALL_HUB_VIEWS, formatCompactTokens, type HubViewId } from "../panelShared";
 import { LABS_ENABLED_STORAGE_KEY } from "../panelShared";
 
 export type View = HubViewId;
@@ -154,6 +154,24 @@ export function getTaskUsageSummary(task?: AgentTask): { totalTokens: number; ca
     totalTokens: sum((u) => u.inputTokens) + sum((u) => u.outputTokens) + cachedTokens,
     cachedTokens,
     costUsd: sum((u) => u.costUsd),
+  };
+}
+
+/**
+ * What the row under the composer says a conversation used: the same count as the header's, the tokens
+ * of the prompt cache included, so the two never show different totals for one cost.
+ */
+export function composerUsage(task?: AgentTask): { label: string; title: string } | undefined {
+  if (!task || !(task.usage || task.runUsage)) return undefined;
+  const used = getTaskUsageSummary(task);
+  if (!used.totalTokens) return undefined;
+  const running = ["queued", "running", "waiting"].includes(task.status) && Boolean(task.runUsage);
+  const priced = task.usage?.costUsd !== undefined || (running && task.runUsage?.costUsd !== undefined);
+  const cost = priced ? ` · $${used.costUsd.toFixed(3)}` : "";
+  const cached = used.cachedTokens > 0 ? `, ${formatCompactTokens(used.cachedTokens)} of them read from or written to the prompt cache, which costs less` : "";
+  return {
+    label: `${formatCompactTokens(used.totalTokens)}${cost}`,
+    title: `${used.totalTokens} tokens${cached}${running ? " (the run in progress included)" : ""}`,
   };
 }
 
