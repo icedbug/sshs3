@@ -1018,7 +1018,10 @@ because a change would wait for an answer that cannot come.
 - **A change.** The run's own person approves in their inbox as usual; that
   counts as one. The same change is in the inbox of everybody else who may
   answer it, as "Needs a second person", with the command, the server, whose
-  run it is and who has approved so far. It runs when as many different
+  run it is and who has approved so far. The card in the conversation, the
+  terminal's bar and the inbox all say how many different people have to
+  approve and who has so far (`approvalProgress`), so a first Approve that
+  leaves the change waiting says why. It runs when as many different
   people have approved as it needs. Anybody's no ends it. The record names
   each person (`approvals`, with `peer` on the ones given by somebody else),
   and one person counts once, by account and not by name.

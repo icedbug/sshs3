@@ -18,6 +18,7 @@ import { SECRETS_ELSEWHERE, takesSecrets } from "./ChangeSecrets";
 import { ChatWaitingList } from "./AgentInChatCard";
 import { TABULAR_NUMS_CLASS, TABULAR_NUMS_STYLE, type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
+import { approvalProgress } from "./approvalProgress";
 
 export interface InboxViewProps {
   hub: HubSnapshot;
@@ -655,13 +656,11 @@ export function InboxView({
                   <button type="button" disabled={busy || !reason.trim()} onClick={() => approveChange(item, { adminException: true, note: reason.trim() })}>Approve this change alone</button>
                 </label>;
               }
-              if (needs < 2) return null;
-              const by = (change?.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor);
+              const progress = change && needs >= 2 ? approvalProgress({ ...change, status: "pending" }) : undefined;
+              if (!progress) return null;
               return (
                 <small className="ai-muted" data-testid={`approval-count-${item.changeId}`}>
-                  {by.length > 0
-                    ? `Approved so far by ${by.join(", ")}. ${needs} different people have to approve: the others who may are asked in their inbox.`
-                    : `${needs} different people have to approve. Your approval counts as one; the others who may are asked in their inbox.`}
+                  {progress}
                 </small>
               );
             })()}

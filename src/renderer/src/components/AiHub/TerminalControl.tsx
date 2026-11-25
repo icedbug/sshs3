@@ -5,6 +5,7 @@ import type { NativeToolState } from "@shared/types/nativeHermes";
 import { hubRequest, useHub } from "../../lib/aiHub";
 import { HighlightedCode } from "./DiffViewer";
 import { SECRETS_ELSEWHERE, takesSecrets } from "./ChangeSecrets";
+import { approvalProgress } from "./approvalProgress";
 
 export interface TerminalControlProps {
   sessionId: string | null;
@@ -205,6 +206,11 @@ function TerminalControlBar({
           {pending.dryRunOutput && (
             <small className="text-app-ink-faint" data-testid="terminal-approval-dryrun">
               Preflight: {pending.dryRunOutput}
+            </small>
+          )}
+          {approvalProgress(pending) && (
+            <small className="text-app-ink-soft" data-testid="terminal-approval-count">
+              {approvalProgress(pending)}
             </small>
           )}
 

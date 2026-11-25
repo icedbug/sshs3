@@ -12,6 +12,7 @@ import { ChangeReveal, ChangeSecretInputs } from "../ChangeSecrets";
 import { lastUserMessageId } from "./panelHelpers";
 import { memoryFromAnswer } from "./memoryFromAnswer";
 import type { PanelState } from "./usePanelState";
+import { approvalProgress } from "../approvalProgress";
 
 /** What a message row can ask of the panel. One object for the whole conversation, the same on every render. */
 interface RowActions {
@@ -486,6 +487,9 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                             Deny
                           </button>
                         </div>
+                      )}
+                      {approvalProgress(item.change) && (
+                        <small className="ai-hint" data-testid="ai-change-approvals">{approvalProgress(item.change)}</small>
                       )}
                       {item.change.decisionNote && (
                         <small className="ai-hint">Note with the answer: {item.change.decisionNote}</small>

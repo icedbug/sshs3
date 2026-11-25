@@ -522,6 +522,29 @@ describe("TerminalControl inline pending approval bar & controls", () => {
     expect(onRequest).toHaveBeenCalledWith({ action: "takeover", sessionId: "s1" });
   });
 
+  // Found by the security lead tester: with two people required on production, Approve Once on the terminal's
+  // bar changed nothing anybody could see, and nothing said the change needed somebody else as well.
+  it("says on the terminal's bar that a change needs two people, and who has approved so far", () => {
+    const twoPeople = (approvals: Array<{ actor: string; allowed: boolean; at: number }>) =>
+      makeHub({
+        sessions: [{ id: "s1", generation: "g1", label: "prod-db-01", kind: "ssh", state: "ready", owner: "t1", updatedAt: 1 }],
+        tasks: [
+          {
+            id: "t1", title: "Run op", status: "running", mode: "assisted", messages: [], sources: [],
+            changes: [{ id: "c-1", kind: "command", target: "prod-db-01", description: "Op", command: "systemctl reload nginx", status: "pending", at: 1, requiredApprovals: 2, approvals }],
+          },
+        ] as unknown as HubSnapshot["tasks"],
+      });
+    const { rerender } = render(<TerminalControl sessionId="s1" hub={twoPeople([])} onRequest={vi.fn()} />);
+    expect(screen.getByTestId("terminal-approval-count")).toHaveTextContent(
+      "2 different people have to approve. Your approval counts as one; the others who may are asked in their inbox.",
+    );
+    rerender(<TerminalControl sessionId="s1" hub={twoPeople([{ actor: "Omar", allowed: true, at: 2 }])} onRequest={vi.fn()} />);
+    expect(screen.getByTestId("terminal-approval-count")).toHaveTextContent(
+      "Approved so far by Omar. 2 different people have to approve: the others who may are asked in their inbox.",
+    );
+  });
+
   it("shows the same approval bar whatever the command is: no rating, no second step, no Always Allow", () => {
     const makeCmdHub = (command: string) =>
       makeHub({

@@ -175,6 +175,29 @@ describe("Retry", () => {
   });
 });
 
+// Found by the security lead tester: after Approve on a production change that needs two people, the card
+// looked the same, and nothing said somebody else had to approve as well.
+describe("a change that needs two people", () => {
+  it("says so on the conversation's card, with who has approved so far", () => {
+    fixture.tasks = [
+      makeTask({
+        status: "running",
+        changes: [
+          {
+            id: "two", kind: "command", target: "prod-web-01", description: "Reload nginx", command: "systemctl reload nginx",
+            status: "pending", at: 4, requiredApprovals: 2, approvals: [{ actor: "Omar", allowed: true, at: 5 }],
+          } as unknown as AgentTask["changes"][number],
+        ],
+      }),
+    ];
+    render(<Harness />);
+    openTask();
+    expect(screen.getByTestId("ai-change-approvals")).toHaveTextContent(
+      "Approved so far by Omar. 2 different people have to approve: the others who may are asked in their inbox.",
+    );
+  });
+});
+
 describe("a failure about the model", () => {
   it("offers a way to the AI settings", () => {
     fixture.tasks = [
