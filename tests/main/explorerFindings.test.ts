@@ -168,4 +168,17 @@ describe("what the exploring testers found", () => {
     expect(prompt).toMatch(/no longer so/);
     expect(prompt).toMatch(/do not leave the old value standing beside the new one/);
   });
+
+  // The inbox's review card showed a ticket's report cut in the middle of a table row ("overlay on
+  // /dev/vda (e"), with empty columns after it.
+  it("cuts a report shown in the inbox at a whole line, not inside a table row", () => {
+    const rows = Array.from({ length: 12 }, (_, i) => `| /dev/vda${i} | overlay on /dev/vda (ext4) | ${40 + i}G | ${10 + i}G | ${30 - i}G |`);
+    const result = ["Disk use on web-02, as df shows it:", "", "| Device | Mounted | Size | Used | Free |", "| --- | --- | --- | --- | --- |", ...rows].join("\n");
+    const ticket = { id: "t-r", title: "Disk use of web-02", description: "", status: "review", result, createdAt: 1, updatedAt: 1 };
+    const detail = inboxItems({ tasks: [], workTickets: [ticket] } as never).find((i) => i.id === "review:t-r")!.detail!;
+    expect(result.startsWith(detail.replace(/\n…$/, ""))).toBe(true);
+    expect(detail.replace(/\n…$/, "").split("\n").every((line) => result.split("\n").includes(line))).toBe(true);
+    expect(detail).toMatch(/\n…$/);
+    expect(detail.length).toBeLessThanOrEqual(242);
+  });
 });

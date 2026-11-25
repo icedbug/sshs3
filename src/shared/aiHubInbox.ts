@@ -128,6 +128,17 @@ export function planPeopleLine(plan: Pick<NonNullable<AgentTask["plan"]>, "appro
 }
 
 /**
+ * The start of a report as the inbox shows it: whole lines only, so a table is not cut inside a row,
+ * and "…" on a line of its own when more follows. A first line longer than the room is cut as before.
+ */
+export function leadLines(text: string | undefined, max = 240): string | undefined {
+  if (!text || text.length <= max) return text;
+  const room = text.slice(0, max - 2);
+  const end = room.lastIndexOf("\n");
+  return `${(end > 0 ? room.slice(0, end) : room).trimEnd()}\n…`;
+}
+
+/**
  * What an alert an agent has, and has not started, waits for: the heartbeat takes it by itself, critical
  * ones first, unless it is off or the Workforce is paused, and then a person has to press Start.
  */
@@ -191,9 +202,9 @@ export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): Inbox
   }
   for (const t of hub.workTickets ?? []) {
     if (t.status === "review")
-      out.push({ id: `review:${t.id}`, kind: "review", title: t.title, detail: t.result?.slice(0, 240), from: t.assigneeName, at: t.updatedAt, since: t.statusAt ?? t.updatedAt, target: t.target, ticketId: t.id, taskId: t.taskId });
+      out.push({ id: `review:${t.id}`, kind: "review", title: t.title, detail: leadLines(t.result), from: t.assigneeName, at: t.updatedAt, since: t.statusAt ?? t.updatedAt, target: t.target, ticketId: t.id, taskId: t.taskId });
     else if (t.status === "blocked")
-      out.push({ id: `blocked:${t.id}`, kind: "blocked", title: t.title, detail: t.result?.slice(0, 240), from: t.assigneeName, at: t.updatedAt, since: t.statusAt ?? t.updatedAt, target: t.target, ticketId: t.id, taskId: t.taskId });
+      out.push({ id: `blocked:${t.id}`, kind: "blocked", title: t.title, detail: leadLines(t.result), from: t.assigneeName, at: t.updatedAt, since: t.statusAt ?? t.updatedAt, target: t.target, ticketId: t.id, taskId: t.taskId });
     // An alert waits for a person until a run has taken it: assigned to an agent is not the same as being worked.
     else if (t.alert && !t.alert.resolvedAt && (t.status === "backlog" || t.status === "todo"))
       out.push({
