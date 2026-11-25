@@ -84,7 +84,8 @@ module.exports = [
       if (ctx.expect(task, 'the ticket has the agent\'s run')) {
         const report = await lina.answer(task.id);
         ctx.expect(/web-01/.test(report) && /%|GiB|G\b|full/i.test(report), 'the report is about web-01\'s disks', report.slice(0, 600));
-        ctx.expect(!(task.changes || []).some((c) => c.status === 'completed'), 'the agent changed nothing');
+        // Commands that only look are recorded too ("Not asked"); a change is a card or a file write.
+        ctx.expect(!(task.changes || []).some((c) => c.status === 'completed' && (c.kind === 'file' || c.decidedHow !== 'policy')), 'the agent changed nothing', JSON.stringify((task.changes || []).map((c) => [c.kind, c.status, c.decidedHow])));
       }
     },
   },
@@ -112,7 +113,7 @@ module.exports = [
       ctx.expect(helpers.length >= 2, 'several agents looked', String(helpers.length));
       const report = await omar.answer(lead.id);
       ctx.expect(/web-0|db-0/.test(report), 'one report says what they found about the servers', report.slice(0, 700));
-      ctx.expect(!helpers.some((h) => (h.changes || []).some((c) => c.status === 'completed')), 'the review changed nothing');
+      ctx.expect(!helpers.some((h) => (h.changes || []).some((c) => c.status === 'completed' && (c.kind === 'file' || c.decidedHow !== 'policy'))), 'the review changed nothing');
     },
   },
   {
