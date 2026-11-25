@@ -225,9 +225,14 @@ describe("a change card and a file write", () => {
     expect(ran("term-web", "systemctl restart app")).toBe(true);
     expect(change).toMatchObject({ status: "completed", decidedHow: "person" });
 
-    // A no: nothing more is typed.
+    // A no: nothing more is typed. The agent reads that a person said no, to what, and what to do now.
+    // (Found by the security lead tester: it was told only "Action not approved or task stopped".)
     const before = typedCount();
-    const refused = expect(invoke(card("systemctl restart other"))).rejects.toMatchObject({ code: "approval_denied" });
+    const refused = expect(invoke(card("systemctl restart other"))).rejects.toMatchObject({
+      code: "approval_denied",
+      message:
+        "Not approved: the person said no to this, so it did not run: systemctl restart other. Do not ask for it again in this run unless the person asks you to. Go on with what does not need it, and say in your report that it was refused.",
+    });
     await answer(await waiting(), false);
     await refused;
     expect(typedCount()).toBe(before);

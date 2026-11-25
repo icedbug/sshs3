@@ -2300,7 +2300,10 @@ export class ToolBroker {
               : answer.how === "timeout"
                 ? // Said as it is, with the command: "not approved" read as a person's no, and the report then left out what waited.
                   `Nobody answered within ${minutes(this.deps.approvalWaitMs?.() ?? 0)}, so this did not run: ${change.command ?? change.description}. It was not refused; nobody was there. Do not ask for it again in this run. Go on with what does not need it, and name this command in your report as waiting for a person's approval.`
-                : "Action not approved or task stopped",
+                : !allowed && answer.how === "person"
+                  ? // A no without a reason is still a person's no: said as one, with what was refused and what to do now.
+                    `Not approved: the person said no to this, so it did not run: ${change.command ?? change.description}. Do not ask for it again in this run unless the person asks you to. Go on with what does not need it, and say in your report that it was refused.`
+                  : "Not run: the run was stopped, or the approval ran out, before this could run.",
             { code: answer.how === "timeout" ? "approval_timeout" : "approval_denied" },
           );
         }
