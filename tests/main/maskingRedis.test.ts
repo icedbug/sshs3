@@ -27,6 +27,17 @@ describe("Redis passwords are masked where Redis keeps them", () => {
     expect(maskContext(`redis-cli ACL SETUSER app on '>${PASSWORD}' '~shop:*'`)).toBe("redis-cli ACL SETUSER app on '>[redacted]' '~shop:*'");
   });
 
+  it("shows code as it is: a variable, a command substitution or a runbook's placeholder is no password", () => {
+    for (const text of [
+      "requirepass {{password}}",
+      'redis-cli CONFIG SET masterauth "$REDIS_PASSWORD"',
+      "masterauth $(cat /run/secrets/redis)",
+      "user app on >{{password}} ~shop:* +@read",
+      "redis-cli ACL SETUSER app on \">$APP_PASS\"",
+    ])
+      expect(maskContext(text)).toBe(text);
+  });
+
   it("leaves sentences about them alone", () => {
     for (const text of ["Set requirepass in redis.conf and restart.", "masterauth is set on the replica", "requirepass and masterauth must match."])
       expect(maskContext(text)).toBe(text);

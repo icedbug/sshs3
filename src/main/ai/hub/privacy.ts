@@ -555,9 +555,10 @@ export function maskSecrets(value: string): string {
     .replace(/\b(crypto\s+isakmp\s+key\s+(?:[0-9]\s+)?)\S+/gi, "$1[redacted]")
     // Redis: `requirepass <password>` and `masterauth <password>` (redis.conf, CONFIG SET), the value
     // CONFIG GET prints on the line after the name, and `>password` in an ACL rule. A sentence about
-    // them ("set requirepass in redis.conf") is left as it is.
+    // them ("set requirepass in redis.conf") is left as it is, and so is code: a variable, a command
+    // substitution or a runbook's placeholder in that place.
     .replace(
-      /\b((?:requirepass|masterauth)[ \t]+)(?!\[redacted\])("[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'<>]+)/gi,
+      /\b((?:requirepass|masterauth)[ \t]+)(?!\[redacted\]|["']?\$[({A-Za-z_]|["']?`|["']?\{\{)("[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'<>]+)/gi,
       (match: string, prefix: string, value: string, offset: number, whole: string) =>
         (PROSE_WORD.test(value) || /^(?:is|was|are|has|had|must|should|can|will|needs?|does|do)$/i.test(value)) &&
         /^ +[A-Za-z]/.test(whole.slice(offset + match.length, offset + match.length + 8))
@@ -565,9 +566,9 @@ export function maskSecrets(value: string): string {
           : `${prefix}${/^["']/.test(value) ? `${value[0]}[redacted]${value[0]}` : "[redacted]"}`,
     )
     // eslint-disable-next-line security/detect-unsafe-regex -- anchored at a line start on a keyword, each part bounded or separated by fixed characters, so it cannot backtrack
-    .replace(/^((?:\d+\)[ \t]*)?["']?(?:requirepass|masterauth)["']?[ \t]*\r?\n(?:\d+\)[ \t]*)?)("?)(?!\[redacted\])([^\r\n"]+)("?)$/gim, "$1$2[redacted]$4")
+    .replace(/^((?:\d+\)[ \t]*)?["']?(?:requirepass|masterauth)["']?[ \t]*\r?\n(?:\d+\)[ \t]*)?)("?)(?!\[redacted\]|\{\{)([^\r\n"]+)("?)$/gim, "$1$2[redacted]$4")
     .replace(/^([ \t]*(?:user[ \t]+\S+|.*\bACL[ \t]+SETUSER[ \t]+\S+)[ \t].*)$/gim, (line: string) =>
-      line.replace(/([ \t]['"]?[<>])(?!\[redacted\])[^\s'"]+/g, "$1[redacted]"),
+      line.replace(/([ \t]['"]?[<>])(?!\[redacted\]|\$[({A-Za-z_]|`|\{\{)[^\s'"]+/g, "$1[redacted]"),
     )
     .replace(/\b(Bearer|Basic)\s+(?!(?:auth|authentication|token|tokens|scheme|realm|access|header|credentials?)\b)[^\s"']+/gi, "$1 [redacted]")
     // kubeconfig keys and certificates' private halves, and a docker config's auth.
