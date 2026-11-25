@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { startModelProxy, type ModelProxy } from '../src/modelProxy';
+import { providerFailed, providerErrorIn, startModelProxy, usageOf, type ModelProxy } from '../src/modelProxy';
 import { labTls } from '../src/tls';
 
 /** A stand-in for OpenAI: a streamed Responses answer in three events, the last with its usage. */
@@ -163,5 +163,82 @@ describe('the model proxy', () => {
     expect(fifth.status).toBe(200);
     expect(await fifth.text()).toContain('response.completed');
     expect((await proxy.calls('run-f')).map((c) => c.status)).toEqual([200, 429, 200, 500, 200]);
+  });
+
+  it('an error the provider sends inside a 200 stream is its failure, not the agent’s', () => {
+    // OpenAI, when the account has no credits left: the stream starts, then an error event.
+    const quota =
+      'event: response.created\ndata: {"type":"response.created"}\n\nevent: error\ndata: {"type":"error","sequence_number":2,"error":{"message":"You have no credits remaining.","type":"insufficient_quota","param":null,"code":"credit_balance_exhausted"}}\n\nevent: response.failed\ndata: {"type":"response.failed"}\n\n';
+    expect(providerErrorIn(quota)).toBe('insufficient_quota');
+    expect(providerFailed({ status: 200, providerError: providerErrorIn(quota) })).toBe(true);
+    // Anthropic, when it is overloaded.
+    expect(providerErrorIn('event: message_start\ndata: {"type":"message_start","message":{}}\n\nevent: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n')).toBe('overloaded_error');
+    expect(providerErrorIn('event: error\ndata: {"type":"error","error":{"type":"server_error","message":"Our servers are currently overloaded. Please try again later."}}\n\n')).toBe('server_error');
+    // An answer that went well, and a refusal by the provider's filter (the product's to handle), are not.
+    expect(providerErrorIn('event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1}}}\n\n')).toBeUndefined();
+    expect(providerErrorIn('{"error":{"message":"Invalid prompt: flagged","type":"invalid_request_error","code":"invalid_prompt"}}')).toBeUndefined();
+    expect(providerFailed({ status: 200 })).toBe(false);
+  });
+
+  it("counts Anthropic's tokens: what came from the cache, what was written to it, and the output", () => {
+    const stream = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":4000,"output_tokens":1}}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":57}}',
+      '',
+    ].join('\n');
+    expect(usageOf(stream)).toEqual({ inputTokens: 4312, cachedTokens: 4000, cacheWriteTokens: 300, outputTokens: 57 });
+    expect(usageOf('{"id":"msg_2","usage":{"input_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":9}}')).toEqual({ inputTokens: 5, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 9 });
+  });
+
+  it("sends a Claude call to Anthropic with the lab's real key, and never gives that key to the caller", async () => {
+    const seen: Array<{ path: string; key: string | undefined; auth: string | undefined; version: string | undefined }> = [];
+    const anthropic = http.createServer((req, res) => {
+      seen.push({ path: req.url ?? '', key: req.headers['x-api-key'] as string | undefined, auth: req.headers.authorization, version: req.headers['anthropic-version'] as string | undefined });
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3,"cache_read_input_tokens":7,"cache_creation_input_tokens":0,"output_tokens":1}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":4}}\n\n');
+      });
+    });
+    await new Promise<void>((resolve) => anthropic.listen(0, '127.0.0.1', resolve));
+    const logDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lab-proxy-'));
+    const proxy = await startModelProxy({
+      port: 0,
+      upstream: 'http://127.0.0.1:9',
+      anthropic: { upstream: `http://127.0.0.1:${(anthropic.address() as AddressInfo).port}`, key: () => 'the-real-key' },
+      logDir,
+    });
+    closers.push(() => proxy.stop(), () => new Promise<void>((r) => anthropic.close(() => r())), () => fs.rm(logDir, { recursive: true, force: true }));
+    const res = await fetch(`${proxy.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': 'lab-claude-run', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-opus-5-5', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(text).toContain('message_delta');
+    expect(text).not.toContain('the-real-key');
+    expect(seen).toEqual([{ path: '/v1/messages', key: 'the-real-key', auth: undefined, version: '2023-06-01' }]);
+    const [call] = await proxy.calls('claude-run');
+    expect(call).toMatchObject({ runId: 'claude-run', model: 'claude-opus-5-5', status: 200, inputTokens: 10, cachedTokens: 7, outputTokens: 4 });
+    expect(JSON.stringify(call)).not.toContain('the-real-key');
+  });
+
+  it('a Claude call with no key in the lab is a provider failure, said in plain words', async () => {
+    const logDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lab-proxy-'));
+    const proxy = await startModelProxy({ port: 0, upstream: 'http://127.0.0.1:9', anthropic: { upstream: 'http://127.0.0.1:9', key: () => undefined }, logDir });
+    closers.push(() => proxy.stop(), () => fs.rm(logDir, { recursive: true, force: true }));
+    const res = await fetch(`${proxy.url}/v1/messages`, { method: 'POST', headers: { 'x-api-key': 'lab-nokey' }, body: '{"model":"claude-haiku-5-5"}' });
+    expect(res.status).toBe(503);
+    expect(await res.text()).toContain('LAB_ANTHROPIC_API_KEY');
+    const [call] = await proxy.calls('nokey');
+    expect(call).toMatchObject({ status: 0, error: 'The lab has no Anthropic key: set LAB_ANTHROPIC_API_KEY.' });
+    expect(providerFailed(call!)).toBe(true);
   });
 });

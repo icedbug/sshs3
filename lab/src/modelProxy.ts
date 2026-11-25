@@ -10,8 +10,11 @@ import type { AddressInfo } from 'node:net';
  * belongs to (to count tokens and to look for planted secrets in what was sent), and a run can be
  * given faults: a 429, a 500, or a stream cut in the middle.
  *
- * A run is known by the dummy key sshs3 is given for it: `Bearer lab-<runId>`. That key never goes on:
- * the provider gets `Bearer proxy-injected`, which the environment's own proxy replaces with the real key.
+ * A run is known by the dummy key sshs3 is given for it: `Bearer lab-<runId>` (OpenAI) or
+ * `x-api-key: lab-<runId>` (Anthropic). That key never goes on. OpenAI gets `Bearer proxy-injected`,
+ * which the environment's own proxy replaces with the real key. Anthropic's hosts get no key from the
+ * environment's proxy, so a call to Claude (`/v1/messages`) is sent with the lab's own key, read from
+ * LAB_ANTHROPIC_API_KEY when the call is made; the product under test never sees it.
  */
 
 export interface FaultRule {
@@ -40,10 +43,46 @@ export interface ModelCall {
   error?: string;
   /** The answer's stream broke in the middle (the provider's, or a cut the lab made). */
   broken?: boolean;
+  /** Anthropic only: the tokens written to the prompt cache (billed above plain input). */
+  cacheWriteTokens?: number;
+  /** The provider sent an error inside an answer that began well (status 200): its type. */
+  providerError?: string;
 }
 
-/** A call the provider failed: no answer (status 0), a rate limit, a server error, or a broken stream. */
-export const providerFailed = (c: Pick<ModelCall, 'status' | 'broken'>): boolean => c.status === 0 || c.status === 429 || c.status >= 500 || c.broken === true;
+/**
+ * A call the provider failed: no answer (status 0), a rate limit, a server error, a broken stream, or
+ * an error the provider sent inside its stream (no credits left, overloaded).
+ */
+export const providerFailed = (c: Pick<ModelCall, 'status' | 'broken' | 'providerError'>): boolean =>
+  c.status === 0 || c.status === 429 || c.status >= 500 || c.broken === true || Boolean(c.providerError);
+
+/** Errors of the provider's own making. A refusal by its filter, or a bad request, is not one of them. */
+const PROVIDER_ERROR_TYPES = ['insufficient_quota', 'rate_limit_exceeded', 'rate_limit_error', 'server_error', 'service_unavailable', 'overloaded_error', 'api_error'];
+
+/** Every JSON object of an answer: the answer itself, or each `data:` line of a streamed one. */
+function jsonPieces(text: string): unknown[] {
+  const pieces: unknown[] = [];
+  const tryParse = (s: string): void => {
+    try {
+      pieces.push(JSON.parse(s));
+    } catch {
+      // Not JSON.
+    }
+  };
+  if (text.trimStart().startsWith('{')) tryParse(text);
+  else for (const line of text.split('\n')) if (line.startsWith('data:')) tryParse(line.slice(5).trim());
+  return pieces;
+}
+
+/** The type of an error event the provider put in its stream, when it is one of the provider's own. */
+export function providerErrorIn(text: string): string | undefined {
+  for (const piece of jsonPieces(text)) {
+    const event = piece as { type?: unknown; error?: { type?: unknown } };
+    const type = typeof event?.error?.type === 'string' ? event.error.type : undefined;
+    if (event?.type === 'error' && type && PROVIDER_ERROR_TYPES.includes(type)) return type;
+  }
+  return undefined;
+}
 
 export interface ModelProxy {
   /** The address on this machine's loopback. The shared web server reaches it at a private address of this machine instead. */
@@ -58,8 +97,13 @@ export interface ModelProxy {
 
 const RESPONSE_KEPT = 2 * 1024 * 1024;
 
-/** The usage the provider reported, from a JSON answer or from the events of a streamed one (the last wins). */
-export function usageOf(text: string): { inputTokens: number; cachedTokens: number; outputTokens: number } {
+/**
+ * The usage the provider reported, from a JSON answer or from the events of a streamed one. OpenAI:
+ * the last usage wins, its input counts the cached part too. Anthropic: the start of the message and
+ * its last delta each carry part of it, and its input, cache reads and cache writes are counted apart;
+ * here they are added up, so that `inputTokens` means all the input in both.
+ */
+export function usageOf(text: string): { inputTokens: number; cachedTokens: number; outputTokens: number; cacheWriteTokens?: number } {
   const found: Array<Record<string, unknown>> = [];
   const visit = (value: unknown): void => {
     if (!value || typeof value !== 'object') return;
@@ -67,17 +111,15 @@ export function usageOf(text: string): { inputTokens: number; cachedTokens: numb
     if (record.usage && typeof record.usage === 'object') found.push(record.usage as Record<string, unknown>);
     for (const child of Object.values(record)) if (child && typeof child === 'object') visit(child);
   };
-  const tryParse = (s: string): void => {
-    try {
-      visit(JSON.parse(s));
-    } catch {
-      // Not JSON.
-    }
-  };
-  if (text.trimStart().startsWith('{')) tryParse(text);
-  else for (const line of text.split('\n')) if (line.startsWith('data:')) tryParse(line.slice(5).trim());
-  const u = found.at(-1) ?? {};
+  for (const piece of jsonPieces(text)) visit(piece);
   const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  if (found.some((u) => 'cache_read_input_tokens' in u || 'cache_creation_input_tokens' in u)) {
+    const most = (key: string): number => Math.max(0, ...found.map((u) => num(u[key])));
+    const read = most('cache_read_input_tokens');
+    const write = most('cache_creation_input_tokens');
+    return { inputTokens: most('input_tokens') + read + write, cachedTokens: read, cacheWriteTokens: write, outputTokens: most('output_tokens') };
+  }
+  const u = found.at(-1) ?? {};
   const details = (u.input_tokens_details ?? u.prompt_tokens_details ?? {}) as Record<string, unknown>;
   return {
     inputTokens: num(u.input_tokens ?? u.prompt_tokens),
@@ -106,7 +148,15 @@ function fromThisMachine(socket: { remoteAddress?: string; localAddress?: string
  * answers only calls made from this machine itself (from one of its own addresses): a lab server,
  * where an agent runs commands, never gets to spend the real key.
  */
-export async function startModelProxy(opts: { port: number; upstream: string; logDir: string; host?: string; tls?: { key: string; cert: string } }): Promise<ModelProxy> {
+export async function startModelProxy(opts: {
+  port: number;
+  upstream: string;
+  logDir: string;
+  host?: string;
+  tls?: { key: string; cert: string };
+  /** Where Claude calls (`/v1/messages`) go, and the lab's key for them, read at each call. */
+  anthropic?: { upstream: string; key: () => string | undefined };
+}): Promise<ModelProxy> {
   await fs.mkdir(opts.logDir, { recursive: true });
   const faults = new Map<string, Array<FaultRule & { used: number }>>();
   const counts = new Map<string, number>();
@@ -139,7 +189,8 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
   async function handle(req: http.IncomingMessage, res: http.ServerResponse, body: Buffer): Promise<void> {
     const started = Date.now();
     const auth = String(req.headers.authorization ?? '');
-    const runId = /^Bearer lab-(.+)$/.exec(auth)?.[1] ?? 'unknown';
+    const runId = /^Bearer lab-(.+)$/.exec(auth)?.[1] ?? /^lab-(.+)$/.exec(String(req.headers['x-api-key'] ?? ''))?.[1] ?? 'unknown';
+    const toClaude = Boolean(opts.anthropic) && (req.url ?? '').startsWith('/v1/messages');
     const n = (counts.get(runId) ?? 0) + 1;
     counts.set(runId, n);
     const requestText = body.toString('utf8');
@@ -155,7 +206,11 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
 
     if (rule?.kind === '429' || rule?.kind === '500') {
       const status = rule.kind === '429' ? 429 : 500;
-      const answer = JSON.stringify({ error: { message: status === 429 ? 'Rate limit reached (lab fault).' : 'Server error (lab fault).', type: status === 429 ? 'rate_limit_exceeded' : 'server_error' } });
+      const message = status === 429 ? 'Rate limit reached (lab fault).' : 'Server error (lab fault).';
+      // In the provider's own shape, so the product reads it as it would the provider's.
+      const answer = toClaude
+        ? JSON.stringify({ type: 'error', error: { type: status === 429 ? 'rate_limit_error' : 'api_error', message } })
+        : JSON.stringify({ error: { message, type: status === 429 ? 'rate_limit_exceeded' : 'server_error' } });
       // A fault answer closes its connection, so a client never reuses a connection the lab broke.
       res.writeHead(status, { 'Content-Type': 'application/json', Connection: 'close', ...(status === 429 ? { 'retry-after': '1' } : {}) });
       res.end(answer);
@@ -165,11 +220,25 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
 
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers))
-      if (typeof v === 'string' && !['host', 'authorization', 'content-length', 'connection', 'accept-encoding'].includes(k.toLowerCase())) headers[k] = v;
-    headers.authorization = 'Bearer proxy-injected';
+      if (typeof v === 'string' && !['host', 'authorization', 'x-api-key', 'content-length', 'connection', 'accept-encoding'].includes(k.toLowerCase())) headers[k] = v;
+    if (toClaude) {
+      const key = opts.anthropic!.key();
+      if (!key) {
+        const why = 'The lab has no Anthropic key: set LAB_ANTHROPIC_API_KEY.';
+        res.writeHead(503, { 'Content-Type': 'application/json', Connection: 'close' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `lab model proxy: ${why}` } }));
+        await log({ ...base, status: 0, ms: Date.now() - started, inputTokens: 0, cachedTokens: 0, outputTokens: 0, response: '', error: why });
+        return;
+      }
+      headers['x-api-key'] = key;
+    } else headers.authorization = 'Bearer proxy-injected';
     let upstream: Response;
     try {
-      upstream = await fetch(new URL(req.url ?? '/', opts.upstream), { method: req.method, headers, body: req.method === 'GET' || req.method === 'HEAD' ? undefined : new Uint8Array(body) });
+      upstream = await fetch(new URL(req.url ?? '/', toClaude ? opts.anthropic!.upstream : opts.upstream), {
+        method: req.method,
+        headers,
+        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : new Uint8Array(body),
+      });
     } catch (error) {
       // The provider could not be reached: written down like any call, then answered 502 below.
       await log({ ...base, status: 0, ms: Date.now() - started, inputTokens: 0, cachedTokens: 0, outputTokens: 0, response: '', error: errorText(error) });
@@ -212,7 +281,8 @@ export async function startModelProxy(opts: { port: number; upstream: string; lo
       }
     }
     res.end();
-    await log({ ...base, status: upstream.status, ms: Date.now() - started, ...usageOf(kept), response: kept.slice(0, RESPONSE_KEPT) });
+    const providerError = upstream.status === 200 ? providerErrorIn(kept) : undefined;
+    await log({ ...base, status: upstream.status, ms: Date.now() - started, ...usageOf(kept), response: kept.slice(0, RESPONSE_KEPT), ...(providerError ? { providerError } : {}) });
   }
 
   await new Promise<void>((resolve, reject) => {

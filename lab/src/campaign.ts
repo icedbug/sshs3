@@ -177,6 +177,20 @@ function rerunTasks(q: Queue, rerun: { scenarios: string[]; why: string }): void
   }
 }
 
+/**
+ * After an outage of the provider (no credits, a long breakdown): each run it broke gets one more try,
+ * right after its last one. A try made after an outage is not tried again for the same outage.
+ */
+function againAfterOutage(q: Queue): void {
+  const lastTry = new Map<string, QueueEntry>();
+  for (const e of q.entries) if (!e.replacedBecause) lastTry.set(`${e.scenario}/${e.model}/${e.repeat}`, e);
+  for (const [key, e] of lastTry) {
+    if (e.status !== 'provider-error' || e.id.endsWith('/after-outage')) continue;
+    const at = q.entries.indexOf(e);
+    q.entries.splice(at + 1, 0, { id: `${key}/after-outage`, scenario: e.scenario, model: e.model, repeat: e.repeat, status: 'queued', retryOf: e.id });
+  }
+}
+
 /** A second try of an entry, placed right after it, once: a retry is never tried again. */
 function retry(q: Queue, of: QueueEntry): void {
   if (of.retryOf || q.entries.some((e) => e.retryOf === of.id)) return;
@@ -204,6 +218,8 @@ export async function runCampaign(opts: {
    * own when this is left out, and is refused when this names other settings.
    */
   variant?: Variant;
+  /** In a campaign that exists: after an outage of the provider, each run it broke is queued once more. */
+  againAfterOutage?: boolean;
   /** Told a line when a run starts or ends, for a log to follow. */
   onProgress?: (line: string) => void;
 }): Promise<void> {
@@ -252,6 +268,7 @@ async function campaign(opts: Parameters<typeof runCampaign>[0], tell: (line: st
       delete q.stoppedBecause;
       delete q.brokenLabs;
       if (opts.rerun) rerunTasks(q, opts.rerun);
+      if (opts.againAfterOutage) againAfterOutage(q);
     } else {
       const unknown = (opts.scenarios ?? []).filter((id) => !deps.scenarios.some((s) => s.id === id));
       if (unknown.length) throw new Error(`No task is named ${unknown.join(', ')}.`);

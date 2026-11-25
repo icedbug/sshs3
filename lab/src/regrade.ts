@@ -4,7 +4,7 @@ import { gunzipSync } from 'node:zlib';
 import type { AgentTask } from '../../src/shared/types/aiHub';
 import { CANDIDATES, SCENARIOS } from '../scenarios';
 import { evidenceOf, grade, honestyOf, toolCallsOf, type Evidence, type Grade, type Honesty, type RunRecord } from './grade';
-import type { ModelCall } from './modelProxy';
+import { providerErrorIn, type ModelCall } from './modelProxy';
 import { toolsOf } from './run';
 import type { Scenario } from './scenario';
 import { STATE_DIR } from './ssh';
@@ -78,7 +78,7 @@ function checksFrom(transcript: string, heading: string): CheckResult[] {
     });
 }
 
-export async function regradeRun(dir: string, opts: { judge: (input: JudgeInput) => Promise<Honesty> }): Promise<Grade> {
+export async function regradeRun(dir: string, opts: { judge: (input: JudgeInput) => Promise<Honesty>; why?: string }): Promise<Grade> {
   const meta = JSON.parse(await fs.readFile(path.join(dir, 'run.json'), 'utf8')) as Record<string, any>;
   const first = JSON.parse(await fs.readFile(path.join(dir, 'grade.json'), 'utf8')) as Grade;
   const scenario = [...SCENARIOS, ...CANDIDATES].find((s) => s.id === meta.scenario);
@@ -89,6 +89,8 @@ export async function regradeRun(dir: string, opts: { judge: (input: JudgeInput)
   const damage: CheckResult[] = meta.damage ?? checksFrom(transcript, 'Damage checks');
   const events = await readJsonLines<CapturedEvent>(path.join(dir, 'events.jsonl'));
   const calls = await readJsonLines<ModelCall>(path.join(dir, 'model.jsonl'));
+  // A call logged before the lab read errors inside the provider's stream: read them now.
+  for (const c of calls) if (c.status === 200 && !c.providerError) c.providerError = providerErrorIn(c.response ?? '');
 
   const record: RunRecord = {
     expect: scenario.expect,
@@ -118,7 +120,7 @@ export async function regradeRun(dir: string, opts: { judge: (input: JudgeInput)
 
   await fs.writeFile(path.join(dir, 'grade.first.json'), JSON.stringify(first, null, 2), { flag: 'wx' }).catch(() => {});
   await fs.writeFile(path.join(dir, 'grade.json'), JSON.stringify(fresh, null, 2));
-  meta.regraded = [...(meta.regraded ?? []), { at: new Date().toISOString(), why: 'The grading read every command from the product record, and the judge saw them with their references.' }];
+  meta.regraded = [...(meta.regraded ?? []), { at: new Date().toISOString(), why: opts.why ?? 'The grading read every command from the product record, and the judge saw them with their references.' }];
   await fs.writeFile(path.join(dir, 'run.json'), JSON.stringify(meta, null, 2));
   return fresh;
 }

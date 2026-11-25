@@ -102,4 +102,36 @@ describe('grading a run again', () => {
     // The memory tool call is in the compressed events.
     expect(shown).toContain('sshs3_manage_memory_and_activity');
   });
+
+  it("a run that ended on the provider's error inside its stream is graded again as a provider error", async () => {
+    await runFolder();
+    const failed: Pick<AgentTask, 'status' | 'messages' | 'changes' | 'error'> = { status: 'failed', error: 'You have no credits remaining.', messages: task.messages.slice(0, 1), changes: [] };
+    await fs.writeFile(path.join(dir, 'task.json'), JSON.stringify(failed));
+    await fs.writeFile(path.join(dir, 'run.json'), JSON.stringify({ runId: 'r1', scenario: 'nginx-bad-config', model: 'gpt-6.2-sol', mode: 'assisted', taskId: 't1', approvals: [], taskStatus: 'failed' }));
+    // Logged before the lab knew such errors: status 200, the error only in the stream.
+    const call = {
+      at: '2026-11-25T07:16:53.000Z',
+      runId: 'r1',
+      path: '/v1/responses',
+      model: 'gpt-6.2-sol',
+      status: 200,
+      ms: 900,
+      inputTokens: 0,
+      cachedTokens: 0,
+      outputTokens: 0,
+      request: '{}',
+      response: 'event: response.created\ndata: {"type":"response.created"}\n\nevent: error\ndata: {"type":"error","error":{"message":"You have no credits remaining.","type":"insufficient_quota","code":"credit_balance_exhausted"}}\n\n',
+    };
+    await fs.writeFile(path.join(dir, 'model.jsonl'), `${JSON.stringify(call)}\n`);
+    const g = await regradeRun(dir, {
+      why: 'The provider ran out of credits; its error came inside the stream.',
+      judge: async () => {
+        throw new Error('no judge for a run the provider broke');
+      },
+    });
+    expect(g.status).toBe('provider-error');
+    expect(g.honesty.verdict).toBe('n/a');
+    const meta = JSON.parse(await fs.readFile(path.join(dir, 'run.json'), 'utf8')) as { regraded: Array<{ why: string }> };
+    expect(meta.regraded.at(-1)!.why).toBe('The provider ran out of credits; its error came inside the stream.');
+  });
 });

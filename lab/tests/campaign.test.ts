@@ -140,6 +140,33 @@ describe('a campaign', () => {
     expect((await buildReport('cv3').catch(() => undefined))?.human).toBeUndefined();
   });
 
+  it('after an outage of the provider, each run it broke is queued once more', async () => {
+    const { deps } = fakeDeps([{}]);
+    await runCampaign({ name: 'out1', models: ['sol'], times: 1, labs: [1], deps: { ...deps, scenarios: [] }, create: true });
+    const q: Queue = await loadQueue('out1');
+    q.entries = [
+      { id: 'task-a/sol/1', scenario: 'task-a', model: 'sol', repeat: 1, status: 'provider-error' },
+      { id: 'task-a/sol/1/again', scenario: 'task-a', model: 'sol', repeat: 1, status: 'provider-error', retryOf: 'task-a/sol/1' },
+      { id: 'task-b/sol/1', scenario: 'task-b', model: 'sol', repeat: 1, status: 'completed', outcome: 'solved' },
+    ];
+    await fs.writeFile(path.join(results, 'campaigns', 'out1.json'), JSON.stringify(q));
+    const again = fakeDeps([{}]);
+    await runCampaign({ name: 'out1', models: ['sol'], times: 1, labs: [1], deps: again.deps, againAfterOutage: true });
+    const after = await loadQueue('out1');
+    expect(after.entries.map((e) => `${e.id}:${e.status}`)).toEqual([
+      'task-a/sol/1:provider-error',
+      'task-a/sol/1/again:provider-error',
+      'task-a/sol/1/after-outage:completed',
+      'task-b/sol/1:completed',
+    ]);
+    expect(after.entries[2]!.retryOf).toBe('task-a/sol/1/again');
+    expect(again.ran).toEqual(['task-a/sol/lab1']);
+    // Asked again, nothing more is queued: the try after the outage is the last.
+    const third = fakeDeps([{}]);
+    await runCampaign({ name: 'out1', models: ['sol'], times: 1, labs: [1], deps: third.deps, againAfterOutage: true });
+    expect(third.ran).toEqual([]);
+  });
+
   it('resumes after the lab went away', async () => {
     // A run that was going when the machine stopped: "running" in the queue file, nothing after it.
     const { deps } = fakeDeps([{}]);

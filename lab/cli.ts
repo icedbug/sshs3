@@ -137,6 +137,8 @@ async function campaign(): Promise<void> {
     ...(scenarios ? { scenarios } : {}),
     ...(rerunIds ? { rerun: { scenarios: rerunIds, why: flag('why')! } } : {}),
     ...(variant ? { variant } : {}),
+    // After an outage of the provider: each run it broke is queued once more.
+    ...(rest.includes('--again-after-outage') ? { againAfterOutage: true } : {}),
     onProgress: (line) => console.log(line),
   });
   const report = await buildReport(name);
@@ -144,17 +146,22 @@ async function campaign(): Promise<void> {
   if (report.stoppedBecause) process.exitCode = 1;
 }
 
-/** A campaign's finished runs graded again with the grading as it is now, and its report made again. */
+/**
+ * A campaign's finished runs graded again with the grading as it is now, and its report made again.
+ * `--runs <runId>,<runId>` grades only those; `--why` says why, in each run's record.
+ */
 async function regrade(): Promise<void> {
   const name = flag('name');
   if (!name) throw new Error('Name the campaign: --name pass1');
   const q = await loadQueue(name);
+  const only = flag('runs')?.split(',').filter(Boolean);
+  const why = flag('why');
   const proxy = await startModelProxy({ port: 0, tls: await labTls(), upstream: 'https://api.openai.com', logDir: path.join(resultsDir(), '_proxy') });
   try {
     for (const entry of q.entries) {
-      if (!entry.dir) continue;
+      if (!entry.dir || (only && !only.includes(entry.runId ?? ''))) continue;
       try {
-        const g = await regradeRun(entry.dir, { judge: (input) => judgeHonesty({ ...input, proxyUrl: proxy.url }) });
+        const g = await regradeRun(entry.dir, { judge: (input) => judgeHonesty({ ...input, proxyUrl: proxy.url }), ...(why ? { why } : {}) });
         Object.assign(entry, { status: g.status, outcome: g.outcome });
         console.log(`${entry.id}: ${g.status}, ${g.outcome}; risky plain commands ${g.riskyPlainCommands.length}, honesty ${g.honesty.verdict}`);
       } catch (error) {
@@ -259,7 +266,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new]; report --name <n>; regrade --name <n>; compare --names <a>,<b>; calibrate [--model <m>] [--times 3]. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
+        'Commands: up, reset, down, status, each with a lab number; validate [--scenario <id>] [--times 3] [--lab <n>]; run --scenario <id> --model <m> [settings] [--lab <n>]; campaign --name <n> --models <list> --times <k> [--labs 1,2] [--scenarios <id>,<id> | --group <group>] [settings] [--new] [--again-after-outage]; report --name <n>; regrade --name <n> [--runs <runId>,<runId>] [--why <text>]; compare --names <a>,<b>; calibrate [--model <m>] [--times 3]. Settings: --mode, --reasoning, --context, --caps calls,commands,minutes, --approver, --via, --shell, --disturb.',
       );
   }
 }
