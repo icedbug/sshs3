@@ -644,7 +644,8 @@ describe("Wave 2 Hub integration overhaul", () => {
     // word of the freeze, and the refusal gave the time as a raw ISO string.
     hub.planProposed(frozenTask);
     expect(frozenTask.plan!.frozen).toEqual({ on: "prod-api-1", until: frozenUntil });
-    const readable = `${new Date(frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    // At the next whole minute: a freeze is never said to end before it does.
+    const readable = `${new Date(Math.ceil(frozenUntil / 60_000) * 60_000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
     await expect(
       hub.request({ action: "plan-decide", taskId: "task-frozen", approved: true }),
     ).rejects.toThrow(`A change freeze holds on prod-api-1 until ${readable}. The plan cannot be approved before it ends.`);

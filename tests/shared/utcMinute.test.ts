@@ -10,4 +10,13 @@ describe("a time in a message the hub writes", () => {
     expect(untilIn("A change freeze holds here until 2026-11-25T20:15:00.000Z. No change card or file write is run here until it ends.")).toBe(at);
     expect(untilIn("Nothing to read here.")).toBeUndefined();
   });
+
+  // Found by the review of the fix: a freeze ending 20:15:45 was said to end at 20:15, so at 20:15:30 a
+  // refusal named a time already past. An end is said at the next whole minute, never before it is.
+  it("says an end within a minute at the next whole minute, never earlier than it is", () => {
+    const at = Date.UTC(2026, 10, 25, 20, 15, 45, 120);
+    expect(utcMinute(at)).toBe("2026-11-25 20:16 UTC");
+    expect(untilIn(`until ${utcMinute(at)}.`)!).toBeGreaterThanOrEqual(at);
+    expect(utcMinute(Date.UTC(2026, 10, 25, 23, 59, 1))).toBe("2026-11-26 00:00 UTC");
+  });
 });

@@ -1,9 +1,10 @@
 /**
- * A time as people read it in a message that may reach anybody, anywhere: "2026-11-25 20:15 UTC". A message
- * the hub writes does not know the reader's time zone; this says which one it is in.
+ * When something ends, as people read it in a message that may reach anybody, anywhere: "2026-11-25 20:15 UTC".
+ * A message the hub writes does not know the reader's time zone; this says which one it is in. An end within
+ * a minute is said at the next whole minute, so it is never said to have ended before it does.
  */
 export function utcMinute(at: number): string {
-  return `${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return `${new Date(Math.ceil(at / 60_000) * 60_000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 /** The time after "until " in a message, written by `utcMinute` or as an ISO string (as older messages are). */
