@@ -130,7 +130,8 @@ module.exports = [
       await lina.page.getByRole('button', { name: 'New job' }).click();
       await lina.page.waitForTimeout(800);
       await lina.page.getByPlaceholder('Morning check of the storage cluster').fill(`Daily web check ${mark}`);
-      await lina.page.locator('textarea').first().fill('Say which of the shop\'s web servers the workspace knows about, and nothing else.');
+      // The job's own field: the first text area on the page is the chat's.
+      await lina.page.getByLabel('What it should do').fill('Say which of the shop\'s web servers the workspace knows about, and nothing else.');
       await lina.page.getByRole('button', { name: 'Create job' }).click();
       await lina.page.waitForTimeout(2000);
       await ctx.shot('lina', 'created');

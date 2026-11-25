@@ -36,18 +36,19 @@ async function makeKey(p, ctx, { name, run }) {
   await panel.scrollIntoViewIfNeeded();
   await panel.getByLabel('What the key is for').fill(name);
   if (run) {
-    const runBox = panel.locator('label').filter({ hasText: /Run|command/i }).locator('input[type="checkbox"]').first();
+    const runBox = panel.locator('label').filter({ hasText: 'Run commands on one server' }).locator('input[type="checkbox"]').first();
     await runBox.check();
     await panel.getByLabel('The one server it may run on').fill(run);
   }
-  await panel.getByRole('button', { name: 'Make a key' }).click();
+  // "Make a key" heads the form; its button is "Make the key".
+  await panel.getByRole('button', { name: 'Make the key' }).click();
   await p.page.waitForTimeout(1500);
   const text = await panel.innerText();
   await ctx.shot(p.who, `key-${name.replace(/\W+/g, '-')}`);
   const token = (text.match(/Bearer\s+([A-Za-z0-9._~+/=-]{24,})/) || [])[1] || (text.match(/\b([A-Za-z0-9]{8,}\.[A-Za-z0-9_-]{30,})\b/) || [])[1];
   await p.page.keyboard.press('Escape');
   await p.page.waitForTimeout(400);
-  return { token, shownOnce: /only time it is shown/i.test(text) };
+  return { token, shownOnce: /shown once|only time it is shown|will not be shown again/i.test(text) };
 }
 
 module.exports = [
