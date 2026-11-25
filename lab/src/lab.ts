@@ -133,7 +133,27 @@ async function imageExists(tag: string): Promise<boolean> {
   return (await run('docker', ['image', 'inspect', tag], { timeoutMs: 30_000 })).code === 0;
 }
 
+/**
+ * An image the lab is built from, pulled from Docker Hub, or from a mirror when Docker Hub refuses (it
+ * limits how often a machine may pull) and then named as the Dockerfile names it.
+ */
+export async function pullWithMirrors(ref: string, mirrors: string[], dockerRun: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>): Promise<void> {
+  const first = await dockerRun(['pull', ref]);
+  if (first.code === 0) return;
+  for (const mirror of mirrors) {
+    if ((await dockerRun(['pull', mirror])).code !== 0) continue;
+    const tagged = await dockerRun(['tag', mirror, ref]);
+    if (tagged.code === 0) return;
+  }
+  throw new Error(`Could not pull ${ref}${mirrors.length ? ` (tried ${mirrors.join(', ')} too)` : ''}: ${(first.stderr || first.stdout).trim().slice(0, 300)}`);
+}
+
+/** Where the images the lab starts from can be found besides Docker Hub. SeaweedFS has none. */
+const MIRRORS: Record<string, string[]> = { 'ubuntu:24.04': ['mirror.gcr.io/library/ubuntu:24.04'], [S3_IMAGE]: [] };
+
 async function buildImages(): Promise<void> {
+  for (const [ref, mirrors] of Object.entries(MIRRORS))
+    if (!(await imageExists(ref))) await pullWithMirrors(ref, mirrors, (args) => run('docker', args, { timeoutMs: 15 * 60_000 }));
   if (!(await imageExists(BASE_IMAGE))) await docker(['build', '-q', '-t', BASE_IMAGE, path.join(IMAGES, 'base')], 'Building the base image');
   for (const role of ['web', 'app', 'db', 'cache'])
     if (!(await imageExists(`sshs3lab/role-${role}:${IMAGE_TAG}`)))
