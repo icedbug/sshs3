@@ -63,10 +63,10 @@ module.exports = [
       const ticket = ((await lina.snapshot()).workTickets || []).find((t) => t.title.includes(mark));
       if (!ctx.expect(ticket, 'the ticket is on the board')) return;
       await ctx.shot('lina', 'board');
-      const card = lina.page.locator(`[data-testid="ticket-${ticket.id}"], [data-testid="ticket-card-${ticket.id}"]`).first();
-      const start = (await card.count()) ? card.getByRole('button', { name: /Start|Run/ }).first() : lina.page.getByRole('button', { name: /Start/ }).first();
-      if (await start.isVisible().catch(() => false)) await start.click();
-      else await lina.hub({ action: 'ticket-start', id: ticket.id });
+      // The ticket's own Start on the board; never another ticket's.
+      const start = lina.page.getByTestId(`ticket-start-${ticket.id}`);
+      if (!ctx.expect(await start.isVisible().catch(() => false), 'the ticket on the board has Start')) return;
+      await start.click();
       const until = Date.now() + 900_000;
       let now = ticket;
       while (Date.now() < until) {

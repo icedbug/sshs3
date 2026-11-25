@@ -98,6 +98,11 @@ function personOn(page, { who, ws, errors = watchErrors(page), close = async () 
     const tab = page.locator('[data-testid^="tab-term-"]').filter({ hasText: server }).first();
     if ((await tab.count()) > 0) {
       await tab.click();
+      // A tab restored after the page was opened again may have lost its session ("Session ended"):
+      // it is connected again, as a person would with Reconnect.
+      await page.waitForTimeout(800);
+      const reconnect = page.getByRole('button', { name: 'Reconnect', exact: true }).filter({ visible: true }).first();
+      if (await reconnect.isVisible().catch(() => false)) await reconnect.click();
     } else {
       const card = page.getByTestId(`workspace-server-card-${server}`);
       if (await card.isVisible().catch(() => false)) {
@@ -120,6 +125,13 @@ function personOn(page, { who, ws, errors = watchErrors(page), close = async () 
       }
     }
     await page.getByText(`You control · ${server}`).first().waitFor({ state: 'visible', timeout: 30_000 });
+    // What the panel sends a question with is the workspace's own list of terminals: it waits until
+    // the workspace has the server's terminal connected, not only until the page says so.
+    const until = Date.now() + 30_000;
+    while (!((await p.snapshot()).sessions || []).some((s) => s.label === server && s.state !== 'disconnected')) {
+      if (Date.now() > until) throw new Error(`The workspace has no connected terminal on ${server}.`);
+      await sleep(500);
+    }
     await page.waitForTimeout(1500);
   };
 
