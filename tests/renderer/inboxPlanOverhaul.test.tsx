@@ -391,6 +391,35 @@ describe("a plan that takes two people", () => {
   });
 });
 
+describe("TerminalControl while another conversation's run holds the terminal", () => {
+  // Found by an exploring tester: an empty new chat showed "AI working · web-02 · Return Control", and
+  // Return Control there stopped another conversation's run without saying whose it was.
+  it("names the conversation whose run it is", () => {
+    const hub = makeHub({
+      sessions: [{ id: "s1", generation: "g1", label: "web-02", kind: "ssh", shell: "bash", state: "busy", owner: "t9", updatedAt: 1 }],
+      tasks: [
+        {
+          id: "t9",
+          title: "G4-test on web-02: count the lines",
+          status: "running",
+          mode: "autonomous",
+          target: { sessionId: "s1", generation: "g1", label: "web-02" },
+          messages: [],
+          sources: [],
+          changes: [],
+          createdAt: 1,
+          updatedAt: 1,
+          maxCommands: 10,
+          maxMinutes: 5,
+        },
+      ] as unknown as HubSnapshot["tasks"],
+    });
+    render(<TerminalControl sessionId="s1" hub={hub} onRequest={vi.fn(async () => hub)} />);
+    expect(screen.getByTestId("terminal-control-bar")).toHaveTextContent("AI working for “G4-test on web-02: count the lines” · web-02");
+    expect(screen.getByTestId("terminal-return-control-btn")).toHaveAttribute("title", "Stops the run of “G4-test on web-02: count the lines” and gives you the terminal");
+  });
+});
+
 describe("TerminalControl over a terminal whose command was stopped", () => {
   // Found by an exploring tester: after Stop, the terminal never became usable again, and nothing on
   // the screen said why or offered a way to use it again.

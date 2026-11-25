@@ -68,6 +68,7 @@ function TerminalControlBar({
         : "Not connected";
 
   const reasonText = pending?.description;
+  const runTitle = (task?.title ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || "a conversation";
   const targetLabel = pending?.target || task?.target?.label || sessionLabel;
 
   return (
@@ -82,6 +83,8 @@ function TerminalControlBar({
         <div className="flex min-w-0 items-center gap-2">
           <span aria-live="polite" className="font-medium">
             {statusText}
+            {/* Whose run it is: the bar shows in every chat bound to this terminal, not only the run's own. */}
+            {task && !pending ? ` for “${runTitle}”` : ""}
             {sessionLabel ? ` · ${sessionLabel}` : ""}
           </span>
           {pending?.guard && (
@@ -119,6 +122,7 @@ function TerminalControlBar({
               type="button"
               className="rounded px-2 py-0.5 font-medium hover:bg-app-surface-hover"
               data-testid="terminal-return-control-btn"
+              title={`Stops the run of “${runTitle}” and gives you the terminal`}
               disabled={busy}
               onClick={onReturnControl}
             >

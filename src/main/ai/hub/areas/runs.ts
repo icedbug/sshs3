@@ -164,6 +164,15 @@ export class RunsPart {
       : undefined;
     if (input.sessionId && (!terminal || terminal.state === "disconnected"))
       throw new Error("Target unavailable");
+    // A new conversation is not started on a terminal another run is working in: the person picked
+    // that terminal, and is told whose run has it. (A reply in a conversation whose terminal another run
+    // took since does run: its agent uses another terminal, or says what waits there.)
+    if (terminal?.owner) {
+      const other = this.store.data.tasks.find((t) => t.id === terminal.owner);
+      throw new Error(
+        `Another task owns this terminal${other ? `: “${clip(other.title.replace(/\s+/g, " "), 80)}” is running in it` : ""}. Pick another terminal, or wait until that run is done.`,
+      );
+    }
     const now = Date.now();
     const rawAttachments = (input.attachments ?? []).slice(0, 10);
     const startImages = rawAttachments
@@ -426,7 +435,9 @@ export class RunsPart {
     modelConfig.zdrConfirmed = config.zdrConfirmed;
     if (task.target && task.mode !== "advice") {
       const live = this.terminals.get(task.target.sessionId);
-      if (live && live.state === "ready" && live.shell) {
+      // Held by another run (it took the terminal after this conversation began): not taken from it.
+      // This run goes on, and its agent uses another terminal or says what waits in this one.
+      if (live && live.state === "ready" && live.shell && (!live.owner || live.owner === task.id)) {
         this.terminals.claim(
           task.target.sessionId,
           live.generation,

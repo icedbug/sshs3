@@ -373,6 +373,27 @@ describe("a conversation that cannot be started", () => {
   });
 });
 
+describe("a reply in a conversation whose terminal another run has taken", () => {
+  // Found by an exploring tester: a follow-up was refused at once with "Another task owns this
+  // terminal", in red, while the person's other conversation held the terminal; nothing waited or tried
+  // again. The conversation's first question, asked while its terminal was busy, got another terminal.
+  it("runs, and leaves the other run's terminal to it", async () => {
+    const hub = await makeHub();
+    shell(hub, "t1", "web-02");
+    await hub.terminals.arm("t1", "bash");
+    vi.stubGlobal("fetch", vi.fn(async () => say("Done.")));
+    const { started } = (await hub.request({ action: "start", task: { prompt: "Disk use on web-02?", mode: "assisted", sessionId: "t1" } })).reply!;
+    const task = hub.store.data.tasks.find((t) => t.id === started!.taskId)!;
+    await inner(hub).whenSettled(task);
+    // Another conversation now runs in the terminal.
+    hub.terminals.claim("t1", hub.terminals.get("t1")!.generation, "somebody-else");
+    await expect(hub.request({ action: "reply", taskId: task.id, text: "And free memory?" })).resolves.toBeDefined();
+    await inner(hub).whenSettled(task);
+    expect(task.error ?? "").not.toMatch(/Another task owns this terminal/);
+    expect(hub.terminals.get("t1")!.owner).toBe("somebody-else");
+  });
+});
+
 describe("a run nobody sits at", () => {
   function unattended() {
     const opened: string[] = [];
