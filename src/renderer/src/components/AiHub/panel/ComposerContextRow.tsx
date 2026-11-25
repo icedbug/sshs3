@@ -1,7 +1,7 @@
 import { ChevronDown, ShieldCheck, Terminal } from "lucide-react";
 import { selectAiTerminal } from "../../../lib/aiHub";
 import { composerUsage } from "./panelHelpers";
-import { TargetNotice } from "./TargetNotice";
+import { TargetNotice } from "../TargetNotice";
 import type { PanelState } from "./usePanelState";
 
 /**

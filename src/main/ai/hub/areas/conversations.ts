@@ -699,6 +699,10 @@ export class ConversationsPart {
       case "takeover":
         this.terminals.takeover(request.sessionId);
         break;
+      case "terminal-settle":
+        // The person connects it again by hand: the stopped command is over, they say.
+        this.terminals.settleByPerson(request.sessionId);
+        break;
       case "arm":
         if (!SHELL_KINDS.includes(request.shell))
           throw new Error("Unsupported shell");

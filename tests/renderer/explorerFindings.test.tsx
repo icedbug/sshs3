@@ -13,7 +13,7 @@ import { composerUsage } from "../../src/renderer/src/components/AiHub/panel/pan
 import { linkFileRefs } from "../../src/renderer/src/components/AiHub/reportRefs";
 import { RichMarkdownContent } from "../../src/renderer/src/components/AiHub/RichMarkdownContent";
 import { MessageRow } from "../../src/renderer/src/components/AiHub/panel/Timeline";
-import { TargetNotice, targetMismatch } from "../../src/renderer/src/components/AiHub/panel/TargetNotice";
+import { TargetNotice, targetMismatch } from "../../src/renderer/src/components/AiHub/TargetNotice";
 
 afterEach(() => {
   cleanup();

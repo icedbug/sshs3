@@ -32,6 +32,11 @@ export interface TerminalSession {
   cwd?: string;
   state: "unknown" | "ready" | "busy" | "disconnected";
   owner?: string;
+  /**
+   * A command of the agent's was stopped or let go of before sshs3 saw it end: nothing is typed here
+   * until it ends, or until a person who sees the shell's prompt says the terminal may be used again.
+   */
+  unsettled?: boolean;
   updatedAt: number;
 }
 export interface ContextSource {
@@ -2494,6 +2499,8 @@ export type HubRequest =
   | { action: "task-read"; taskId: string; detail: "answer-sources"; messageId: string }
   | { action: "task-read"; taskId: string; detail: "evidence-source"; callId: string; ref: string; digest: string }
   | { action: "takeover"; sessionId: string }
+  /** A person says a terminal whose command was stopped before its end was seen is at its prompt again. */
+  | { action: "terminal-settle"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | {
       action: "approve";

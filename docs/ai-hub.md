@@ -537,7 +537,7 @@ parts that define the same method name are refused when the file loads.
 | --- | --- | --- |
 | `HubService.ts` | The hub's state (every field), its start and end, the snapshot, the clock (`tick`), `changed`, and the handing out of requests | none of its own |
 | `areas/routes.ts` | The table of which part answers which request, and its types | |
-| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log | 19 |
+| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log, a terminal a person uses again after a stopped command | 20 |
 | `areas/runs.ts` | A run: starting it, its events, what it spends, stopping it; runs on an external agent | none: started by other parts |
 | `areas/chatRuns.ts` | Conversations asked for from a chat thread: the fence they run inside (`chatFence.ts`), starting and going on, their own terminals, and following a run without a browser (`onRun`, `runView`) | none: called by the chat agent |
 | `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 12 |
@@ -3467,7 +3467,11 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   agent is told "The last command in this terminal has not ended" and to use
   another terminal. A person who stopped the command with Ctrl-C, in a shell
   without prompt markers, connects the terminal again by hand: the shell drops
-  the rest of the line, so no end marker comes.
+  the rest of the line, so no end marker comes. The bar over such a terminal
+  says that its last command was stopped before sshs3 saw it end, and offers
+  "The prompt is back: use it again" (`terminal-settle`, `settleByPerson`); it
+  is refused while the terminal shows a question for a password. The session
+  list marks such a terminal `unsettled`.
   `tests/main/terminalAfterTimeout.test.ts` holds this, also in a real bash and
   dash where they are installed.
 - Which shell a terminal runs is read from what it shows and what it was

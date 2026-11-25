@@ -391,6 +391,23 @@ describe("a plan that takes two people", () => {
   });
 });
 
+describe("TerminalControl over a terminal whose command was stopped", () => {
+  // Found by an exploring tester: after Stop, the terminal never became usable again, and nothing on
+  // the screen said why or offered a way to use it again.
+  it("says the last command was stopped before its end was seen, and lets the person use it again", async () => {
+    const onRequest = vi.fn(async () => makeHub());
+    const hub = makeHub({
+      sessions: [{ id: "s1", generation: "g2", label: "web-02", kind: "ssh", shell: "bash", state: "unknown", unsettled: true, updatedAt: 1 }],
+      tasks: [],
+    });
+    render(<TerminalControl sessionId="s1" hub={hub} onRequest={onRequest} />);
+    const bar = screen.getByTestId("terminal-control");
+    expect(bar).toHaveTextContent("The last command here was stopped before sshs3 saw it end.");
+    fireEvent.click(screen.getByTestId("terminal-use-again-btn"));
+    await waitFor(() => expect(onRequest).toHaveBeenCalledWith({ action: "terminal-settle", sessionId: "s1" }));
+  });
+});
+
 describe("TerminalControl inline pending approval bar & controls", () => {
   it("shows blast radius, host, reason, the command with its check and rollback, Approve Once, Deny, Return Control & Step-by-step", async () => {
     const onRequest = vi.fn(async () => makeHub());

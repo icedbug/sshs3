@@ -25,6 +25,10 @@ interface ControlBarViewProps {
   sessionLabel?: string;
   /** False when the terminal's session has ended: nobody controls it until it is connected again. */
   connected?: boolean;
+  /** A command of the agent's was stopped before its end was seen: nothing is typed here until it is settled. */
+  unsettled?: boolean;
+  /** The person says the shell's prompt is back: the terminal may be used again. */
+  onUseAgain?: () => void;
   shell?: ShellKind;
   task?: AgentTask;
   pending?: AgentChange;
@@ -39,6 +43,8 @@ interface ControlBarViewProps {
 function TerminalControlBar({
   sessionLabel,
   connected = true,
+  unsettled = false,
+  onUseAgain,
   shell,
   task,
   pending,
@@ -84,6 +90,18 @@ function TerminalControlBar({
             </span>
           )}
         </div>
+        {!task && unsettled && connected && onUseAgain && (
+          <button
+            type="button"
+            className="shrink-0 rounded px-2 py-0.5 font-medium hover:bg-app-surface-hover"
+            data-testid="terminal-use-again-btn"
+            title="Only when the shell's prompt is back: the stopped command must be over."
+            disabled={busy}
+            onClick={onUseAgain}
+          >
+            The prompt is back: use it again
+          </button>
+        )}
         {task && (
           <div className="flex shrink-0 items-center gap-1.5">
             <button
@@ -109,6 +127,13 @@ function TerminalControlBar({
           </div>
         )}
       </div>
+
+      {!task && unsettled && connected && (
+        <div className="border-t border-divider px-2 py-1 text-app-ink-soft" data-testid="terminal-unsettled-note">
+          The last command here was stopped before sshs3 saw it end. Nothing is typed here until it ends, or until
+          you say the shell&apos;s prompt is back.
+        </div>
+      )}
 
       {pending && (
         <div
@@ -314,6 +339,13 @@ function LegacyTerminalControl({
     <TerminalControlBar
       sessionLabel={session.label}
       connected={session.state !== "disconnected"}
+      unsettled={session.unsettled === true}
+      onUseAgain={() => {
+        setBusy(true);
+        void dispatch({ action: "terminal-settle", sessionId: session.id })
+          .catch(() => {})
+          .finally(() => setBusy(false));
+      }}
       shell={session.shell}
       task={task}
       pending={pending}

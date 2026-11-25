@@ -467,11 +467,31 @@ export class TerminalRegistry extends EventEmitter {
   }
 
   list(): TerminalSession[] {
-    return Array.from(this.sessions.values(), (s) => ({ ...s.view }));
+    return Array.from(this.sessions.values(), (s) => this.viewOf(s));
   }
   get(id: string): TerminalSession | undefined {
     const s = this.sessions.get(id);
-    return s ? { ...s.view } : undefined;
+    return s ? this.viewOf(s) : undefined;
+  }
+  /** What a terminal is to others: its view, and whether a command of the agent's left it unsettled. */
+  private viewOf(s: LiveTerminal): TerminalSession {
+    return { ...s.view, ...(s.unsettled ? { unsettled: true } : {}) };
+  }
+
+  /**
+   * A person connects a terminal again by hand: the command that was stopped or let go of before its
+   * end was seen is over, they say, and the shell's prompt is back. Their word opens it as the end
+   * marker would; the prompt is still looked for when sshs3 connects to it. Never at a question for a
+   * password: that is a program still reading the terminal.
+   */
+  settleByPerson(id: string): void {
+    const s = this.require(id);
+    if (!s.unsettled) return;
+    if (atSecretPrompt(s.tail ?? ""))
+      throw new Error("This terminal asks for a password: the command that was let go of still runs. Answer it or stop it there, then connect the terminal again.");
+    s.unsettled = undefined;
+    s.armFailedAt = undefined;
+    this.emit("changed");
   }
   context(id: string): string {
     return boundedContext(this.sessions.get(id)?.output ?? "");

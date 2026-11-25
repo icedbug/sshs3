@@ -57,6 +57,37 @@ async function claimed(terminals: TerminalRegistry): Promise<string> {
   return generation;
 }
 
+describe("a terminal whose command was stopped before sshs3 saw it end", () => {
+  // Found by an exploring tester: after Stop sent ^C, the terminal never became ready again. Its
+  // command's end marker never came, the shell sends no prompt markers, and a person had no way to
+  // connect it again, though the docs say a person connects it by hand.
+  it("is said to be waiting, and is used again once a person says so at a shell prompt", async () => {
+    const { terminals, written, hang } = fake();
+    const generation = await claimed(terminals);
+    hang("tick-1\r\n");
+    await terminals.execute("t1", generation, "task-1", "for i in 1 2 3; do echo tick-$i; sleep 5; done", 60).catch(() => undefined);
+    // Stopped: ^C, and the shell's own prompt is back. No end marker comes for the stopped command.
+    terminals.feed("t1", "^C\r\nops@web-01:~$ ");
+    await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
+    expect(terminals.list().find((t) => t.id === "t1")).toMatchObject({ unsettled: true });
+
+    const before = written.length;
+    terminals.settleByPerson("t1");
+    expect(terminals.list().find((t) => t.id === "t1")?.unsettled).toBeFalsy();
+    await expect(terminals.ensureReady("t1")).resolves.toMatchObject({ state: "ready" });
+    expect(written.length).toBe(before + 1);
+  });
+
+  it("is not used again on a person's word while it shows a question for a password", async () => {
+    const { terminals, hang } = fake();
+    const generation = await claimed(terminals);
+    hang("[sudo] password for ops: ");
+    await terminals.execute("t1", generation, "task-1", "sudo systemctl restart nginx", 60).catch(() => undefined);
+    expect(() => terminals.settleByPerson("t1")).toThrow(/asks for a password/);
+    await expect(terminals.ensureReady("t1")).rejects.toThrow(STILL_RUNNING);
+  });
+});
+
 describe("after a command ran out of time", () => {
   it("leaves the command running, says so, and types nothing more until it has ended", async () => {
     // sudo asks for a password and nothing answers it.
