@@ -483,7 +483,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                               });
                             }}
                           >
-                            Decline
+                            Deny
                           </button>
                         </div>
                       )}

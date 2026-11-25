@@ -229,7 +229,9 @@ describe("persistent AI chat", () => {
     render(<Harness />);
     openPreviousChat();
     fireEvent.change(screen.getByLabelText("Note for the agent"), { target: { value: " reload instead " } });
-    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    // The card's own Deny: the bar of the run waiting above the composer has one too.
+    const card = screen.getByLabelText("Note for the agent").closest(".ai-change") as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: "Deny" }));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith({
         action: "approve",

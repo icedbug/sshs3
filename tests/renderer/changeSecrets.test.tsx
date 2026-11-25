@@ -134,7 +134,7 @@ describe("a setting that takes a token", () => {
     fireEvent.click(await screen.findByText("Connect the agent bot to Slack", { selector: "button *, button" }));
     const card = await screen.findByTestId("ai-change-secrets-c1");
     fireEvent.change(within(card).getByLabelText("Type the agent bot's token"), { target: { value: TOKEN } });
-    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     await waitFor(() => expect(sent("approve")).toHaveLength(1));
     expect(sent("approve")[0]).toMatchObject({ approved: false });
     expect(sent("approve")[0]).not.toHaveProperty("secrets");
