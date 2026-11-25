@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -44,7 +45,8 @@ export async function labTls(): Promise<{ key: string; cert: string; caPath: str
     // Not made yet.
   }
   // Made beside the place it goes and moved in whole, so a second lab process never reads half of it.
-  const tmp = `${DIR}.tmp-${process.pid}`;
+  // Named for this call alone: two runs of one process may make it at the same moment.
+  const tmp = `${DIR}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   await fs.rm(tmp, { recursive: true, force: true });
   await fs.mkdir(tmp, { recursive: true, mode: 0o700 });
   await make(tmp);
@@ -65,7 +67,8 @@ export async function trustBundle(): Promise<string> {
   const { caPath } = await labTls();
   const extra = process.env.NODE_EXTRA_CA_CERTS ? await fs.readFile(process.env.NODE_EXTRA_CA_CERTS, 'utf8').catch(() => '') : '';
   const bundle = path.join(DIR, 'trust.pem');
-  const tmp = `${bundle}.tmp-${process.pid}`;
+  // Named for this call alone: two runs of one campaign start their web servers at the same moment.
+  const tmp = `${bundle}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   await fs.writeFile(tmp, `${(await fs.readFile(caPath, 'utf8')).trim()}\n${extra.trim() ? `${extra.trim()}\n` : ''}`);
   await fs.rename(tmp, bundle);
   return bundle;
