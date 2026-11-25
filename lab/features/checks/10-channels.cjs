@@ -5,12 +5,26 @@
  * on this machine, and the alerts are posted the way Alertmanager posts them.
  */
 const http = require('node:http');
+const os = require('node:os');
 
 const AREA = '10 Channels in and out';
 const word = () => `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
 
-/** A web server on this machine that keeps what is posted to it. */
-async function receiver() {
+/**
+ * This machine's own address on the lab's private network, where a team's receiver would be. A shared
+ * server never calls its own loopback, so the receiver does not listen there.
+ */
+function labAddress(ws) {
+  const net = (ip) => ip.split('.').slice(0, 3).join('.');
+  const nets = new Set(ws.servers.map((s) => net(s.ip)));
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) if (a.family === 'IPv4' && !a.internal && nets.has(net(a.address))) return a.address;
+  }
+  throw new Error('This machine has no address on the lab network.');
+}
+
+/** A web server on this machine, on the lab's network, that keeps what is posted to it. */
+async function receiver(ws) {
   const got = [];
   const server = http.createServer((req, res) => {
     let body = '';
@@ -21,8 +35,9 @@ async function receiver() {
       res.end('{"ok":true}');
     });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { url: `http://127.0.0.1:${server.address().port}/hook`, got, close: () => new Promise((r) => server.close(r)) };
+  const host = labAddress(ws);
+  await new Promise((resolve) => server.listen(0, host, resolve));
+  return { url: `http://${host}:${server.address().port}/hook`, got, close: () => new Promise((r) => server.close(r)) };
 }
 
 const alertBody = (status, name, instance, summary) => ({
@@ -110,7 +125,7 @@ module.exports = [
       'Maria adds a JSON webhook channel for "A command waits for approval"; when her agent\'s change waits, the channel gets one message with where it waits and a link, and, as "Include the command text" is off, not the command.',
     timeoutMs: 900_000,
     async run(ctx) {
-      const hook = await receiver();
+      const hook = await receiver(ctx.ws);
       const m = await ctx.as('maria');
       const name = `lab hook ${word()}`;
       const w = word();
@@ -136,7 +151,7 @@ module.exports = [
         await m.page.waitForTimeout(1500);
         await ctx.shot('maria', 'channel-added');
         const listed = await m.page.getByTestId('notifications-card').innerText();
-        ctx.expect(listed.includes(name), 'the channel is listed', listed.slice(0, 400));
+        if (!ctx.expect(listed.includes(name), 'the channel is listed', listed.slice(0, 400))) return;
         await m.page.keyboard.press('Escape');
 
         await m.terminal('web-02');
@@ -153,7 +168,21 @@ module.exports = [
         const first = hook.got[0];
         ctx.note(`Headers: ${Object.keys(first.headers).join(', ')}`);
         ctx.expect(/web-02/.test(first.body), 'the message says where it waits', first.body.slice(0, 400));
-        ctx.expect(!first.body.includes(`/tmp/${w}`), 'the message leaves the command out', first.body.slice(0, 400));
+        // The agent's own description of the change may name the file; the command itself stays home.
+        const waiting = ((await m.read(task.id)).changes || []).find((c) => c.status === 'pending' || c.command);
+        const command = (waiting && waiting.command) || '';
+        let sent = {};
+        try {
+          sent = JSON.parse(first.body);
+        } catch {
+          // Not JSON: the expectation below says so.
+        }
+        ctx.note(`The command waiting: ${command.length} characters.`);
+        ctx.expect(
+          command && !first.body.includes(command.trim()) && !(sent.items || []).some((i) => i.command || (i.detail && i.detail.includes(command.trim()))),
+          'the message leaves the command out',
+          first.body.slice(0, 400),
+        );
         await ctx.sleep(10_000);
         ctx.expect(hook.got.length === 1, 'it is told once', String(hook.got.length));
         await m.denyInTerminal().catch(() => {});

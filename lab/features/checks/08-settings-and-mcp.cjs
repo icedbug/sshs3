@@ -45,7 +45,9 @@ async function makeKey(p, ctx, { name, run }) {
   await p.page.waitForTimeout(1500);
   const text = await panel.innerText();
   await ctx.shot(p.who, `key-${name.replace(/\W+/g, '-')}`);
-  const token = (text.match(/Bearer\s+([A-Za-z0-9._~+/=-]{24,})/) || [])[1] || (text.match(/\b([A-Za-z0-9]{8,}\.[A-Za-z0-9_-]{30,})\b/) || [])[1];
+  // The new key shows once in its own box, written s3k_<user>.<id>.<secret>.
+  const shown = await panel.getByTestId('mcp-new-key').innerText().catch(() => '');
+  const token = (shown.match(/\bs3k_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{20,}/) || [])[0];
   await p.page.keyboard.press('Escape');
   await p.page.waitForTimeout(400);
   return { token, shownOnce: /shown once|only time it is shown|will not be shown again/i.test(text) };

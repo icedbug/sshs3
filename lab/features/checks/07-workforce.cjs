@@ -20,8 +20,16 @@ module.exports = [
       await lina.open('Workforce');
       const before = await lina.snapshot();
       ctx.note(`Before: ${(before.agents || []).length} agents, ${(before.workTickets || []).length} tickets, ${(before.goals || before.workGoals || []).length} goals.`);
-      // The template's "Set up this team" button carries the template's test id.
-      await lina.page.getByTestId('workforce-template-operate-system').click();
+      // The template's "Set up this team" button carries the template's test id. The templates show
+      // only on an empty board; on a board the team already uses, the check sends the request the button
+      // sends, and says so.
+      const button = lina.page.getByTestId('workforce-template-operate-system');
+      if (await button.isVisible().catch(() => false)) {
+        await button.click();
+      } else {
+        ctx.note('The board is not empty, so the templates do not show; the check sends the request their button sends.');
+        await lina.hub({ action: 'workforce-template-apply', templateId: 'operate-system' });
+      }
       await lina.page.waitForTimeout(2500);
       await ctx.shot('lina', 'after');
       const after = await lina.snapshot();

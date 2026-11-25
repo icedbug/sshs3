@@ -43,7 +43,11 @@ async function signIn(browser, ws, who, opts = {}) {
 /** The errors the page reports from now on: uncaught ones and those written to its console. */
 function watchErrors(page) {
   const errors = [];
-  page.on('pageerror', (e) => errors.push(`page error: ${String(e).slice(0, 400)}`));
+  // An uncaught error with where it was thrown: the first frames of its stack say whose code it is.
+  page.on('pageerror', (e) => {
+    const frames = String(e.stack || '').split('\n').slice(1, 4).map((l) => l.trim().replace(/https?:\/\/[^/]+/g, '')).join(' < ');
+    errors.push(`page error: ${String(e).slice(0, 300)}${frames ? ` at ${frames.slice(0, 400)}` : ''}`);
+  });
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(`console error: ${m.text().slice(0, 400)}`);
   });
