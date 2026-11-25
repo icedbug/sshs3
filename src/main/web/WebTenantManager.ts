@@ -9,6 +9,8 @@ import { IpcBridge } from '../IpcBridge';
 import type { WindowRouter } from '../windows/WindowManager';
 import { createHub } from '../ai/hub/createHub';
 import type { HubService } from '../ai/hub/HubService';
+import type { HubHost } from '../ai/hub/hubHost';
+import type { McpTokenStore } from './McpTokenStore';
 import type {
   ChatAnsweringRequest,
   ChatAnsweringSnapshot,
@@ -368,6 +370,8 @@ export class WebTenantManager {
   private readonly chatAgentRestrictedKeys = new Set<string>();
   /** The agent bot in chat, once the server has set it up. */
   private chatAnswering?: ChatAnsweringBackend;
+  /** The server's MCP keys, once the server has given them. */
+  private mcpKeyStore?: McpTokenStore;
 
   constructor(
     private readonly baseDataDir: string,
@@ -417,6 +421,22 @@ export class WebTenantManager {
   /** The server sets up the agent bot in chat after the stores it needs are read. */
   setChatAnswering(backend: ChatAnsweringBackend | undefined): void {
     this.chatAnswering = backend;
+  }
+
+  /** The server's MCP keys: the ones its MCP address checks. Given before any account signs in. */
+  setMcpKeys(store: McpTokenStore): void {
+    this.mcpKeyStore = store;
+  }
+
+  /** One account's keys in the server's store. A key asked for in that account's workspace is one of these. */
+  private mcpKeysFor(userId: string): HubHost["mcpKeys"] {
+    const store = this.mcpKeyStore;
+    if (!store) return undefined;
+    return {
+      list: () => store.list(userId),
+      create: (input) => store.create({ ...input, userId }),
+      revoke: (id) => store.revoke(userId, id),
+    };
   }
 
   /**
@@ -1003,6 +1023,12 @@ export class WebTenantManager {
               read: () => this.teamRules,
               write: () => Promise.reject(new Error('Only an active administrator can change team rules.')),
             },
+            // Nobody signs in as it, so there is nobody whose own agent a key would be for.
+            mcpKeys: {
+              list: () => [],
+              create: () => Promise.reject(new Error('The chat agent makes no MCP keys.')),
+              revoke: async () => false,
+            },
           }
         : {
             ...shared,
@@ -1016,6 +1042,8 @@ export class WebTenantManager {
             peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
             // The rules for everyone on this server: one set, read by every account's hub.
             teamRules: { read: () => this.teamRules, write: (next, previous) => this.saveTeamRules(user.id, next, previous) },
+            // A key asked for in this workspace is this account's key on the server, the one its MCP address checks.
+            mcpKeys: this.mcpKeysFor(user.id),
             // The agent bot is the server's: asked with this account's id, which the request cannot change.
             chatAnswering: {
               view: async () => this.chatAnswering?.view(user.id),

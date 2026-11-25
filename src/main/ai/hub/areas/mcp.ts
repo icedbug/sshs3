@@ -4,8 +4,9 @@ import { guardUrl, type GuardedTarget } from "../Notifier";
 import { deleteDemoMcpServer, getDemoMcpServers, isDemoMode, mcpCatalog, saveDemoMcpServer } from "../demoWorkspace";
 import { DEMO_MCP_REFUSAL, isDemoTarget } from "../../../demo/demoMode";
 import { LocalMcpServer } from "../LocalMcpServer";
-import { McpTokenStore } from "../../../web/McpTokenStore";
+import { McpTokenStore, type McpScope, type McpTokenView } from "../../../web/McpTokenStore";
 import { clip, safeError } from "../privacy";
+import { log } from "../hubShared";
 import { keepSecrets, requiredText } from "../hubHelpers";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
@@ -225,6 +226,32 @@ export class McpPart {
     }
   }
 
+  /**
+   * The keys a person's own agents use. On a team server they are the server's keys for this account, which its
+   * MCP address checks; the hub's own store would make keys nothing on the server reads.
+   */
+  async mcpKeyList(this: HubService): Promise<{ where: "server" | "app"; keys: McpTokenView[] }> {
+    if (this.host.mcpKeys) return { where: "server", keys: this.host.mcpKeys.list() };
+    await this.mcpTokens().initialize();
+    return { where: "app", keys: this.mcpTokens().list("local") };
+  }
+
+  /** A key made or taken back is written down with who did it, whether in Settings or from a conversation. */
+  async noteMcpKey(this: HubService, event: { made: McpTokenView } | { revoked: string }, actor?: string): Promise<void> {
+    let what: string;
+    if ("made" in event) {
+      const key = event.made;
+      const may = key.scopes.join(", ") + (key.tools?.length ? `; only ${key.tools.join(", ")}` : "");
+      const life = key.expiresAt ? `working for ${Math.max(1, Math.round((key.expiresAt - key.createdAt) / 86_400_000))} days` : "never expiring";
+      what = `Made the MCP key "${key.name}" (${may}), ${life}`;
+    } else {
+      what = `Took back the MCP key "${event.revoked}"`;
+    }
+    await this.audit()
+      .append({ kind: "setting", actor: actor ?? (await this.resolveActorName()), target: "MCP keys", what: clip(what, 400), outcome: "completed" })
+      .catch((e) => log.warn("Could not write the audit log", safeError(e)));
+  }
+
   /** What the settings screen shows about the local listener. */
   localMcpView(this: HubService): { enabled: boolean; address?: string; keys: unknown[]; error?: string } {
     return {
@@ -394,27 +421,33 @@ export class McpPart {
         break;
       }
       case "mcp-key-list":
-        await this.mcpTokens().initialize();
+        reply = { mcpKeys: await this.mcpKeyList() };
         break;
       case "mcp-key-create": {
-        const made = await this.mcpTokens().create({
-          userId: "local",
+        const input = {
           name: requiredText(request.name),
           createdBy: await this.resolveActorName(),
-          scopes: (request.scopes ?? []).filter((x): x is "read" | "tickets" | "run" => ["read", "tickets", "run"].includes(x)),
+          scopes: (request.scopes ?? []).filter((x): x is McpScope => ["read", "tickets", "run"].includes(x)),
           serverId: request.serverId,
           expiresInDays: request.expiresInDays,
           // Never only when the request says so: the field for it, or 0 days, which is what "Never" in the settings sends.
           neverExpires: request.neverExpires === true || request.expiresInDays === 0,
           tools: request.tools,
-        });
+        };
+        const made = this.host.mcpKeys ? await this.host.mcpKeys.create(input) : await this.mcpTokens().create({ userId: "local", ...input });
+        await this.noteMcpKey({ made: made.view });
         // The only time the key itself leaves this process.
-        reply = { mcpKey: { token: made.token, key: made.view } };
+        reply = { mcpKey: { token: made.token, key: made.view }, mcpKeys: await this.mcpKeyList() };
         break;
       }
-      case "mcp-key-revoke":
-        await this.mcpTokens().revoke("local", requiredText(request.id));
+      case "mcp-key-revoke": {
+        const id = requiredText(request.id);
+        const named = (await this.mcpKeyList()).keys.find((k) => k.id === id)?.name ?? id;
+        const gone = this.host.mcpKeys ? await this.host.mcpKeys.revoke(id) : await this.mcpTokens().revoke("local", id);
+        if (gone) await this.noteMcpKey({ revoked: named });
+        reply = { mcpKeys: await this.mcpKeyList() };
         break;
+      }
       case "mcp-local-set": {
         // The listener is a port on the machine sshs3 runs on. On a shared server that machine is not a member's to open ports on.
         if (request.enabled && this.sharedServer() && !this.host.teamAdmin?.())

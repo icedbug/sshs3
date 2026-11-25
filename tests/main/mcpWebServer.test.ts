@@ -204,3 +204,64 @@ describe("narrower keys, and every call in the owner's audit log", () => {
     });
   });
 });
+
+type TenantHub = { request: (r: unknown) => Promise<{ reply?: Record<string, any> }> };
+const hubOf = async (server: Sshs3WebServer): Promise<TenantHub> => {
+  const user = (await server.auth.listUsers())[0];
+  const tenants = (server as unknown as { tenants: { getOrCreateTenant: (u: unknown) => Promise<{ hub: TenantHub }> } }).tenants;
+  return (await tenants.getOrCreateTenant(user)).hub;
+};
+
+// Found by the security lead tester: on the team server, the conversation's key tool made a key in the
+// app's own local store, which the server's MCP address never reads, and listed only that store.
+describe("keys asked for from the AI workspace on the team server", () => {
+  it("are the server's keys for the account: made, listed and taken back where the MCP address checks them", async () => {
+    const { base, cookie, server } = await serve();
+    const hub = await hubOf(server);
+    await fetch(`${base}/api/mcp-keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "From settings", scopes: ["read"] }),
+    });
+    const made = await hub.request({ action: "mcp-key-create", name: "From the workspace", scopes: ["read"] });
+    const token = made.reply?.mcpKey?.token as string;
+    expect(token).toMatch(/^s3k_/);
+    const ask = () =>
+      fetch(`${base}/api/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: rpc("tools/list"),
+      });
+    expect((await ask()).status).toBe(200);
+    const inSettings = (await (await fetch(`${base}/api/mcp-keys`, { headers: { cookie } })).json()) as { keys: Array<{ id: string; name: string }> };
+    expect(inSettings.keys.map((k) => k.name).sort()).toEqual(["From settings", "From the workspace"]);
+    const listed = await hub.request({ action: "mcp-key-list" });
+    expect(listed.reply?.mcpKeys?.where).toBe("server");
+    expect((listed.reply?.mcpKeys?.keys as Array<{ name: string }>).map((k) => k.name).sort()).toEqual(["From settings", "From the workspace"]);
+    const id = inSettings.keys.find((k) => k.name === "From the workspace")!.id;
+    await hub.request({ action: "mcp-key-revoke", id });
+    expect((await ask()).status).toBe(401);
+    const left = await hub.request({ action: "mcp-key-list" });
+    expect((left.reply?.mcpKeys?.keys as Array<{ name: string }>).map((k) => k.name)).toEqual(["From settings"]);
+  });
+
+  // Also found by the security lead tester: a key made in the conversation was written down, one made in
+  // Settings was not.
+  it("writes a key made and taken back in Settings in the person's audit log", async () => {
+    const { base, cookie, server } = await serve();
+    const made = await fetch(`${base}/api/mcp-keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "Laptop agent", scopes: ["read"] }),
+    });
+    const { key } = (await made.json()) as { key: { id: string } };
+    await fetch(`${base}/api/mcp-keys/${key.id}`, { method: "DELETE", headers: { cookie } });
+    const hub = await hubOf(server);
+    await vi.waitFor(async () => {
+      const log = await hub.request({ action: "audit-read" });
+      const keys = ((log.reply?.audit?.entries ?? []) as Array<{ kind: string; actor: string; target: string; what: string }>).filter((e) => e.target === "MCP keys");
+      expect(keys.map((e) => e.what).sort()).toEqual(['Made the MCP key "Laptop agent" (read), working for 30 days', 'Took back the MCP key "Laptop agent"']);
+      expect(keys.every((e) => e.kind === "setting" && e.actor === "Jacob")).toBe(true);
+    });
+  });
+});

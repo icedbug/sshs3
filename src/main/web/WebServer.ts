@@ -9,7 +9,7 @@ import { setWebDataDir } from './electronShim';
 import { SERVICE_ACCOUNT_PREFIX, TooManySignInAttempts, WebAuthService, type SessionsEnded, type WebUserPublic } from './WebAuthService';
 import { SignInJournal } from './SignInJournal';
 import { WebTenantManager } from './WebTenantManager';
-import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
+import { MCP_SCOPES, McpTokenStore, type McpScope, type McpTokenView } from './McpTokenStore';
 import { ChatAgentStore } from './chatAgent/ChatAgentStore';
 import { ChatAnswering, type ChatAnsweringOptions } from './chatAgent/ChatAnswering';
 import type { AgentBotApi } from './chatAgent/AgentBotApi';
@@ -490,6 +490,8 @@ export class Sshs3WebServer {
       () => this.auth.accountsBrief(),
     );
     this.mcpTokens = new McpTokenStore(options.dataDir);
+    // A key asked for in an account's workspace is that account's key here, the one /api/mcp checks.
+    this.tenants.setMcpKeys(this.mcpTokens);
     // An account that is turned off or removed is never linked in chat, whatever asks the store.
     this.chatAgent = new ChatAgentStore(options.dataDir, {
       usable: (accountId) => this.auth.accountsBrief().some((a) => a.id === accountId && !a.disabled),
@@ -1045,6 +1047,7 @@ export class Sshs3WebServer {
           neverExpires: body.neverExpires === true,
           tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
         });
+        await this.noteMcpKey(user, { made: made.view });
         // The only time the key itself is ever sent anywhere.
         sendJson(res, 200, { key: made.view, token: made.token });
       } catch (err) {
@@ -1054,11 +1057,23 @@ export class Sshs3WebServer {
     }
     if (method === 'DELETE') {
       const id = decodeURIComponent(pathname.slice('/api/mcp-keys/'.length));
+      const named = this.mcpTokens.list(user.id).find((k) => k.id === id)?.name;
       const gone = await this.mcpTokens.revoke(user.id, id);
+      if (gone) await this.noteMcpKey(user, { revoked: named ?? id });
       sendJson(res, gone ? 200 : 404, gone ? { ok: true } : { error: 'No such key' });
       return;
     }
     sendJson(res, 405, { error: 'Use GET, POST or DELETE.' });
+  }
+
+  /** A key made or taken back in Settings is written in the person's audit log, as one asked for from a conversation is. */
+  private async noteMcpKey(user: WebUserPublic, event: { made: McpTokenView } | { revoked: string }): Promise<void> {
+    try {
+      const tenant = await this.tenants.getOrCreateTenant(user);
+      await tenant.hub.noteMcpKey(event, user.displayName || user.username);
+    } catch (error) {
+      log.warn('Could not write an MCP key in the audit log', error);
+    }
   }
 
   private extractSessionToken(req: http.IncomingMessage): string | null {

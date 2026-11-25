@@ -1422,6 +1422,11 @@ is made. It works for ever only when the request says so (`neverExpires`, or
 gets 30 days, also when the assistant makes the key (`create_mcp_key`). A
 request that carries an `Origin` header is refused before the key is
 read, which is what keeps a web page on the same machine from reaching it.
+On the team server a key the assistant makes, lists or takes back is one of
+the person's keys on the server, the ones `/api/mcp` checks (`HubHost.mcpKeys`),
+never a key of the app's own listener. Every key made or taken back, in
+Settings or from a conversation, is written in the person's audit log
+(target "MCP keys") with what it may do and how long it works.
 
 A key says what it may do: read, write tickets, or ask for a command on one
 named server. A command asked for this way waits for the person in the

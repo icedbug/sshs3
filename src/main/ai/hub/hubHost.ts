@@ -15,8 +15,27 @@ import { ChatBridge } from "./ChatBridge";
 import { type ToolDependencies } from "./ToolBroker";
 import { type InventoryTarget } from "./ContextService";
 import { type ConditionalQueueStore } from "./WorkSync";
+import type { McpScope, McpTokenView } from "../../web/McpTokenStore";
 
 export interface HubHost {
+  /**
+   * The server's MCP keys for this account: the ones the server's own MCP address checks. A key asked for in
+   * this workspace, in Settings or from a conversation, is one of these. Left out in the desktop app, whose
+   * keys belong to its local listener.
+   */
+  mcpKeys?: {
+    list(): McpTokenView[];
+    create(input: {
+      name: string;
+      createdBy: string;
+      scopes: McpScope[];
+      serverId?: string;
+      expiresInDays?: number;
+      neverExpires?: boolean;
+      tools?: string[];
+    }): Promise<{ token: string; view: McpTokenView }>;
+    revoke(id: string): Promise<boolean>;
+  };
   /**
    * On a web server: the account's own kubeconfig. When it is set, a Kubernetes tool reads this file and
    * nothing a request or the model names instead.

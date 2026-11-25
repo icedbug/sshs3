@@ -69,6 +69,8 @@ export interface CreateHubOptions {
   serviceAccount?: boolean;
   /** On the web server: the agent bot in chat, answered by the server (see HubHost). */
   chatAnswering?: HubHost["chatAnswering"];
+  /** On the web server: this account's MCP keys in the server's store (see HubHost). */
+  mcpKeys?: HubHost["mcpKeys"];
 }
 
 export function createHub(
@@ -410,6 +412,7 @@ export function createHub(
     teamChat: options?.teamChat,
     serviceAccount: options?.serviceAccount,
     chatAnswering: options?.chatAnswering,
+    mcpKeys: options?.mcpKeys,
     file: (...args) => files.invoke(...args),
     restoreCheckpoint: (change, opts) => files.restoreCheckpoint(change, opts),
     delta: (delta) => {

@@ -2216,6 +2216,11 @@ export interface HubReply {
   kbPage?: KbPage;
   /** A key as it is shown once, when it is made, and never again. */
   mcpKey?: { token: string; key: unknown };
+  /**
+   * The keys a person's own agents use to reach sshs3. On a team server ("server"): the server's keys for this
+   * account, which its MCP address checks. In the desktop app ("app"): the keys of its local listener.
+   */
+  mcpKeys?: { where: "server" | "app"; keys: unknown[] };
   audit?: { entries: AuditEntryView[]; verification: AuditVerificationView };
   /** `sealed`: it matches the hash the audit log kept when it was finished; false: it does not; absent: no seal (still being made, or older). */
   recording?: { id: string; cast: string; sealed?: boolean };

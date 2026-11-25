@@ -141,7 +141,7 @@ async function startRun(hub: HubService, mode: AgentMode = "assisted", id = `run
   return { task, call, pending, approve };
 }
 
-async function makeHub(servers: Array<{ id: string; name: string; host: string }> = []) {
+async function makeHub(servers: Array<{ id: string; name: string; host: string }> = [], host: Record<string, unknown> = {}) {
   const { HubService: Hub } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
@@ -155,6 +155,7 @@ async function makeHub(servers: Array<{ id: string; name: string; host: string }
       show: () => {},
       aiConfigFilePath: path.join(dir, "ai.json"),
       workspaceServers: async () => servers.map((x) => ({ ...x, port: 22, username: "ops", shared: true })),
+      ...host,
     } as never,
     dir,
   );
@@ -518,6 +519,36 @@ describe("a secret a setting makes", () => {
     await revoke;
     // A change with nothing to show says so.
     await expect(hub.request({ action: "change-reveal", taskId: task.id, changeId: task.changes.at(-1)!.id })).rejects.toThrow("There is nothing to show");
+  });
+});
+
+// Found by the security lead tester: on a team server the assistant made keys in the app's own local store,
+// which the server's MCP address never reads, listed only those, and said none were left.
+describe("keys the assistant makes on a team server", () => {
+  it("are the account's keys in the server's store: listed and taken back there", async () => {
+    const { McpTokenStore } = await import("../../src/main/web/McpTokenStore");
+    const storeDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-server-keys-"));
+    disposals.push(() => fs.rm(storeDir, { recursive: true, force: true }));
+    const store = new McpTokenStore(storeDir);
+    await store.create({ userId: "u1", name: "From settings", createdBy: "Jacob", scopes: ["read"] });
+    const mcpKeys = {
+      list: () => store.list("u1"),
+      create: (input: Parameters<typeof store.create>[0]) => store.create({ ...input, userId: "u1" }),
+      revoke: (id: string) => store.revoke("u1", id),
+    };
+    const { hub } = await makeHub([], { mcpKeys });
+    const { call, pending, approve } = await startRun(hub);
+    const made = call("sshs3_agent_and_mcp_manage", { operation: "create_mcp_key", name: "From the workspace", scopes: ["read"] });
+    await approve((await pending()).id);
+    await made;
+    expect(store.list("u1").map((k) => k.name).sort()).toEqual(["From settings", "From the workspace"]);
+    const listed = (await call("sshs3_agent_and_mcp_manage", { operation: "list_mcp_keys" })) as { keys: Array<{ name: string }>; note: string };
+    expect(listed.keys.map((k) => k.name).sort()).toEqual(["From settings", "From the workspace"]);
+    expect(listed.note).toContain("/api/mcp");
+    const revoke = call("sshs3_agent_and_mcp_manage", { operation: "revoke_mcp_key", idOrName: "From the workspace" });
+    await approve((await pending()).id);
+    expect(await revoke).toEqual({ ok: true, revoked: "From the workspace" });
+    expect(store.list("u1").map((k) => k.name)).toEqual(["From settings"]);
   });
 });
 
