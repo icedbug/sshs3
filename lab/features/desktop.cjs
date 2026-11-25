@@ -14,6 +14,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const os = require('node:os');
 const { _electron: electron } = require('playwright');
 const { readWorkspace, personOn, watchErrors, onServer, sleep } = require('../ui/person.cjs');
 
@@ -76,6 +77,63 @@ async function startApp(home, ws) {
   return { app, page, errors };
 }
 
+/**
+ * The fingerprints of a lab server's host keys, as `ssh-keygen -lf` shows them. OpenSSH in the app asks
+ * about a host it has not seen and shows one of these: a careful person compares them before saying yes.
+ */
+function fingerprints(ws, ip) {
+  const lines = ws.hostKeys.split('\n').filter((l) => l.split(/\s+/)[0].split(',').includes(ip));
+  if (!lines.length) return [];
+  const file = path.join(os.tmpdir(), `lab-hostkeys-${process.pid}`);
+  fs.writeFileSync(file, `${lines.join('\n')}\n`);
+  try {
+    return execFileSync('ssh-keygen', ['-lf', file]).toString().match(/SHA256:[A-Za-z0-9+/]+/g) || [];
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+}
+
+/**
+ * The app's ssh asks once whether to trust a server's host key: OpenSSH keeps it in the account's own
+ * ~/.ssh/known_hosts, which it finds through the account, not through $HOME. The person reads the
+ * fingerprint, compares it with the server's own, and types yes. Returns whether it was asked.
+ */
+async function answerHostKey(p, ws, server) {
+  const s = ws.servers.find((x) => x.name === server);
+  const until = Date.now() + 20_000;
+  while (Date.now() < until) {
+    // The terminal that shows must be this server's: the strip over it names the server.
+    const strip = await p.page.getByTestId('terminal-control-bar').filter({ visible: true }).first().innerText().catch(() => '');
+    if (!strip.includes(`· ${server}`)) {
+      await sleep(500);
+      continue;
+    }
+    const rows = await p.page.locator('.xterm-rows').filter({ visible: true }).first().innerText().catch(() => '');
+    // Only a question about this server's own address, asked after the last one answered.
+    const at = rows.lastIndexOf(`host '${s.ip}`);
+    const shown = at >= 0 ? rows.slice(at) : '';
+    // Unanswered: the question is the last thing on the screen.
+    const question = shown.slice(shown.lastIndexOf('continue connecting'));
+    if (shown.includes('continue connecting') && /^continue connecting \(yes\/no[^)]*\)\?\s*$/.test(question)) {
+      const fingerprint = (shown.match(/SHA256:[A-Za-z0-9+/]+/) || [])[0];
+      if (!fingerprint || !fingerprints(ws, s.ip).includes(fingerprint)) throw new Error(`${server} showed a host key the lab does not have: ${fingerprint}`);
+      await p.page.locator('.xterm-helper-textarea').filter({ visible: true }).first().focus();
+      await p.page.keyboard.type('yes');
+      await p.page.keyboard.press('Enter');
+      await p.page.waitForTimeout(2500);
+      return true;
+    }
+    if (/\$\s*$/m.test(rows) && at < 0) return false;
+    await sleep(500);
+  }
+  return false;
+}
+
+/** Takes the lab's servers out of the account's known_hosts again, as they were before the run. */
+function forgetHostKeys(ws) {
+  for (const s of ws.servers) execFileSync('ssh-keygen', ['-R', s.ip], { stdio: 'ignore' });
+}
+
 /** The person at the desktop app: the model through the lab's proxy, and the lab's servers saved. */
 async function setUp(page, ws, runId, key) {
   await page.evaluate((config) => window.multissh.aiHubRequest({ action: 'configure', config }), {
@@ -86,7 +144,7 @@ async function setUp(page, ws, runId, key) {
     apiKey: `lab-${runId}`,
   });
   for (const s of ws.servers.filter((x) => x.role !== 's3')) {
-    await page.evaluate((profile) => window.multissh.invoke('profiles:save-ssh', profile), {
+    await page.evaluate((profile) => window.multissh.profilesSaveSSH(profile), {
       id: s.name,
       name: s.name,
       host: s.ip,
@@ -94,12 +152,23 @@ async function setUp(page, ws, runId, key) {
       username: 'ops',
       authType: 'privateKey',
       privateKeyPath: key,
-      description: s.description,
     });
   }
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
   await page.waitForTimeout(4000);
+  // The notice that saved passwords are not encrypted (this machine has no keyring) is read and closed.
+  const dismiss = page.getByTestId('credential-encryption-warning-banner').getByRole('button', { name: 'Dismiss' });
+  if (await dismiss.isVisible().catch(() => false)) await dismiss.click();
+}
+
+/** A terminal on the server, the host key question answered the careful way when it is asked. */
+async function openTerminal(ctx, server) {
+  const asked = ctx.p.terminal(server).then(() => 'open', (e) => e);
+  const answered = await answerHostKey(ctx.p, ctx.ws, server);
+  if (answered) ctx.note(`ssh asked whether to trust ${server}'s host key; its fingerprint matched the server's own, and the person said yes.`);
+  const result = await asked;
+  if (result !== 'open') throw result;
 }
 
 const CHECKS = [
@@ -123,7 +192,7 @@ const CHECKS = [
     expected: 'In Ask first on web-01, "how long has this server been up" runs a command that only looks, unasked, and answers with what it showed.',
     async run(ctx) {
       const p = ctx.p;
-      await p.terminal('web-01');
+      await openTerminal(ctx, 'web-01');
       await p.newChat();
       await p.mode('assisted');
       const t0 = Date.now();
@@ -147,7 +216,7 @@ const CHECKS = [
       const w = word();
       const file = `/tmp/${w}`;
       try {
-        await p.terminal('web-02');
+        await openTerminal(ctx, 'web-02');
         await p.newChat();
         await p.mode('assisted');
         const t0 = Date.now();
@@ -231,6 +300,11 @@ async function main() {
   } finally {
     await app?.close().catch(() => {});
     await forget(ws, publicKey).catch(() => {});
+    try {
+      forgetHostKeys(ws);
+    } catch {
+      // Nothing to take out.
+    }
     const calls = fs.existsSync(callsFile) ? fs.readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).length : 0;
     fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ results, modelCalls: calls, callsFile: path.relative(REPO, callsFile) }, null, 2));
     console.log(`${calls} model calls. Results: ${out}`);

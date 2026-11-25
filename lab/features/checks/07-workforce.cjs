@@ -20,7 +20,8 @@ module.exports = [
       await lina.open('Workforce');
       const before = await lina.snapshot();
       ctx.note(`Before: ${(before.agents || []).length} agents, ${(before.workTickets || []).length} tickets, ${(before.goals || before.workGoals || []).length} goals.`);
-      await lina.page.getByTestId('workforce-template-operate-system').getByRole('button', { name: 'Set up this team' }).click();
+      // The template's "Set up this team" button carries the template's test id.
+      await lina.page.getByTestId('workforce-template-operate-system').click();
       await lina.page.waitForTimeout(2500);
       await ctx.shot('lina', 'after');
       const after = await lina.snapshot();
