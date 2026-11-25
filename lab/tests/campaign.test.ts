@@ -389,4 +389,23 @@ describe('a campaign', () => {
     expect(report.runs).toBe(2);
     expect(report.replaced).toEqual([{ id: 'task-a/sol/1', why: 'The lab could not open a terminal on another server.' }]);
   });
+
+  it('a task run again a second time gets runs of new names, and only the last counts', async () => {
+    const first = fakeDeps([{ outcome: 'not-solved' }]);
+    await runCampaign({ name: 'c15', models: ['sol'], times: 1, labs: [1], deps: first.deps, create: true, scenarios: ['task-a'] });
+    // The first rerun went wrong for the lab's own reasons: the task runs again once more.
+    const broken = fakeDeps([{ status: 'harness-error' }]);
+    await runCampaign({ name: 'c15', models: ['sol'], times: 1, labs: [1], deps: broken.deps, rerun: { scenarios: ['task-a'], why: 'The check was wrong.' } });
+    const again = fakeDeps([{ outcome: 'solved' }]);
+    await runCampaign({ name: 'c15', models: ['sol'], times: 1, labs: [1], deps: again.deps, rerun: { scenarios: ['task-a'], why: 'A test took the lab during the rerun.' } });
+    const q = await loadQueue('c15');
+    expect(q.entries.map((e) => [e.id, e.status, e.replacedBecause ?? ''])).toEqual([
+      ['task-a/sol/1', 'completed', 'The check was wrong.'],
+      ['task-a/sol/1/rerun', 'harness-error', 'A test took the lab during the rerun.'],
+      ['task-a/sol/1/rerun-2', 'completed', ''],
+    ]);
+    expect(new Set(q.entries.map((e) => e.id)).size).toBe(q.entries.length);
+    const report = await buildReport('c15');
+    expect(report.byTask['task-a']).toMatchObject({ counted: 1, solved: 1 });
+  });
 });

@@ -173,7 +173,11 @@ function rerunTasks(q: Queue, rerun: { scenarios: string[]; why: string }): void
   }
   for (const [key, e] of lastTry) {
     const at = q.entries.indexOf(e);
-    q.entries.splice(at + 1, 0, { id: `${key}/rerun`, scenario: e.scenario, model: e.model, repeat: e.repeat, status: 'queued' });
+    // A task run again a second time (its rerun went wrong for the lab's own reasons) gets a new name.
+    const taken = new Set(q.entries.map((x) => x.id));
+    let id = `${key}/rerun`;
+    for (let n = 2; taken.has(id); n++) id = `${key}/rerun-${n}`;
+    q.entries.splice(at + 1, 0, { id, scenario: e.scenario, model: e.model, repeat: e.repeat, status: 'queued' });
   }
 }
 

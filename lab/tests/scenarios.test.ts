@@ -7,6 +7,7 @@ import { labDown, labUp } from '../src/lab';
 import { placeholdersIn, VALUE_NAMES } from '../src/scenario';
 import { STATE_DIR } from '../src/ssh';
 import { validateScenario } from '../src/validate';
+import { takeLabForTests } from './labLock';
 
 // Lab 9 is the tests' own: the campaigns use 1 and 2.
 const N = 9;
@@ -45,12 +46,15 @@ describe('the tasks', () => {
   });
 
   describe('in a lab', () => {
+    let unlock: (() => Promise<void>) | undefined;
     beforeAll(async () => {
+      unlock = await takeLabForTests(N, 'scenarios');
       await labUp(N);
     });
 
     afterAll(async () => {
-      await labDown(N);
+      if (unlock) await labDown(N);
+      await unlock?.();
     });
 
     it('nginx-bad-config validates in a lab', async () => {

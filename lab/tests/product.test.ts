@@ -9,6 +9,7 @@ import { startModelProxy, type ModelProxy } from '../src/modelProxy';
 import { lastSourceCommit, productBuild, startProduct, type Account, type Product } from '../src/product';
 import { exec } from '../src/ssh';
 import { labTls } from '../src/tls';
+import { takeLabForTests } from './labLock';
 
 // Lab 9 is the tests' own: the campaigns use 1 and 2.
 const N = 9;
@@ -17,6 +18,7 @@ let model: FakeOpenAi;
 let proxy: ModelProxy;
 let product: Product;
 let tmp: string;
+let unlock: (() => Promise<void>) | undefined;
 
 async function settled(account: Account, taskId: string, timeoutMs = 120_000): Promise<AgentTask> {
   const until = Date.now() + timeoutMs;
@@ -30,6 +32,7 @@ async function settled(account: Account, taskId: string, timeoutMs = 120_000): P
 
 describe('the product driver', () => {
   beforeAll(async () => {
+    unlock = await takeLabForTests(N, 'product');
     lab = await labUp(N);
     // The model: asks to run `hostname`, then answers with a word the test looks for.
     model = await fakeOpenAi([{ tool: 'terminal_command', args: { command: 'hostname', description: 'Which server this terminal is on' } }, { text: 'HOSTNAME-SEEN' }], { responses: true });
@@ -44,7 +47,8 @@ describe('the product driver', () => {
     await product?.stop();
     await proxy?.stop();
     await model?.close();
-    await labDown(N);
+    if (unlock) await labDown(N);
+    await unlock?.();
     if (tmp) await fs.rm(tmp, { recursive: true, force: true });
   });
 

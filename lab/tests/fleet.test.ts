@@ -3,19 +3,23 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { labDown, labHealthy, labReset, labUp, type LabState } from '../src/lab';
 import { HOST_DISK_CHECKS } from '../src/scenario';
 import { exec } from '../src/ssh';
+import { takeLabForTests } from './labLock';
 
 // Lab 9 is the tests' own: the campaigns use 1 and 2.
 const N = 9;
 let lab: LabState;
+let unlock: (() => Promise<void>) | undefined;
 const ip = (name: string): string => lab.servers.find((s) => s.name === name)!.ip;
 
 describe('the lab fleet', () => {
   beforeAll(async () => {
+    unlock = await takeLabForTests(N, 'fleet');
     lab = await labUp(N);
   });
 
   afterAll(async () => {
-    await labDown(N);
+    if (unlock) await labDown(N);
+    await unlock?.();
   });
 
   it('every server answers on SSH and its services are healthy', async () => {
