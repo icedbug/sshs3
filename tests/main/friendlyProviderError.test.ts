@@ -44,6 +44,21 @@ describe("friendlyProviderError", () => {
     );
     expect(friendlyProviderError("plain text", remote)).toBe("plain text");
   });
+  it("says in its own words when the provider's filter refused to go on, and how to go on", () => {
+    // In the lab a run about backups ended with this text as its error, and the person got no answer.
+    const refused = new UpstreamHttpError(
+      400,
+      "https://api.openai.com/v1/responses",
+      'Model API (400): {"error":{"message":"Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt.","type":"invalid_request_error","param":null,"code":"invalid_prompt"}}',
+    );
+    const said = "The model provider refused to go on (400): its filter took the conversation to be against its usage policy. The run stopped here, after what is shown above. To go on, ask again in other words, or choose another model in AI settings.";
+    expect(friendlyProviderError(refused, remote)).toBe(said);
+    // Azure's content filter says it in its own way.
+    const azure = new UpstreamHttpError(400, "x", "Model API (400): The response was filtered due to the prompt triggering Azure OpenAI's content management policy. code: content_filter");
+    expect(friendlyProviderError(azure, remote)).toBe(said);
+    // Another 400 is the provider's own text, as before.
+    expect(friendlyProviderError(new UpstreamHttpError(400, "x", "Model API (400): Unsupported parameter: 'top_k'"), remote)).toBe("Model API (400): Unsupported parameter: 'top_k'");
+  });
   it("gives a text the chat recognises as about the model", () => {
     const hint = /AI settings|settings first|API key|No model answered|endpoint missing|key was refused/i;
     expect(friendlyProviderError(new TypeError("fetch failed"), ollama)).toMatch(hint);

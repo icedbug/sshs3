@@ -1961,6 +1961,10 @@ export function friendlyProviderError(error: unknown, config: HermesModelConfig)
         : `The API key was refused${where} (${status}). Enter a valid key in AI settings.`;
   } else if (status === 404 && /\bmodel\b.{0,120}(not found|does not exist|not exist|unknown)|model_not_found/i.test(said)) {
     text = `The model "${config.model}" was not found${where}. Choose another model in AI settings.`;
+  } else if (status === 400 && /invalid_prompt|flagged as potentially violating|content_filter|content management policy/i.test(said)) {
+    // The provider's own filter refused the request: in the lab, now and then on talk of backups and
+    // databases. Its raw text ended the run and the person got no answer.
+    text = `The model provider refused to go on (${status}): its filter took the conversation to be against its usage policy. The run stopped here, after what is shown above. To go on, ask again in other words, or choose another model in AI settings.`;
   }
   return text === raw ? raw : safeError(new Error(text));
 }
