@@ -49,7 +49,8 @@ const labDir = (n: number): string => path.join(STATE_DIR, `lab-${n}`);
 const statePath = (n: number): string => path.join(STATE_DIR, `lab-${n}.json`);
 const container = (n: number, name: string): string => `lab${n}-${name}`;
 const golden = (n: number, name: string): string => `sshs3lab/lab${n}-${name}:golden`;
-const BASE_IMAGE = `sshs3lab/base:${IMAGE_TAG}`;
+/** The image every server is built on (the lab's own tests start one too). */
+export const BASE_IMAGE = `sshs3lab/base:${IMAGE_TAG}`;
 const roleImage = (s: LabServerSpec): string =>
   s.role === 's3' ? S3_IMAGE : s.role === 'bastion' ? BASE_IMAGE : `sshs3lab/role-${s.role}:${IMAGE_TAG}`;
 

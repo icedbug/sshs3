@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { BASE_IMAGE } from '../src/lab';
 import { controlKey, exec, waitForSsh } from '../src/ssh';
 
 // One container from the base image, on a network of its own, reached over the lab's control channel.
@@ -29,7 +30,7 @@ describe('the base server image', () => {
   });
 
   it('a base container boots systemd and takes the control key', async () => {
-    docker('run', '-d', '--privileged', '--name', NAME, '--hostname', NAME, '--network', NET, '--ip', IP, 'sshs3lab/base:1');
+    docker('run', '-d', '--privileged', '--name', NAME, '--hostname', NAME, '--network', NET, '--ip', IP, BASE_IMAGE);
     const key = await controlKey();
     docker('exec', NAME, 'sh', '-c', `mkdir -p /root/.ssh && echo '${key.publicKey}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
 
