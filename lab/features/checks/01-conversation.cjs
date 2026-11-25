@@ -85,8 +85,15 @@ module.exports = [
       await ctx.shot('maria', 'follow-up');
       const tasksNow = (await m.tasks()).filter((t) => (t.createdAt || 0) >= t0 - 2000 && !t.workforceRunId && !t.distillSourceId);
       ctx.expect(tasksNow.length === 1, 'the reply stays in the same conversation, no new one is started', tasksNow.map((t) => t.title).join(' | '));
-      const last = (await m.read(after.id)).messages.filter((x) => x.role === 'assistant').at(-1);
-      ctx.expect(last && /(more|less|half)/i.test(last.text || ''), 'the second answer says more or less than half', last && last.text.slice(0, 500));
+      const answers = (await m.read(after.id)).messages.filter((x) => x.role === 'assistant');
+      const last = answers.at(-1);
+      // The number the first answer gave (as "14G" or "14 GB"). The second answer uses what was found the
+      // first time when it compares with half of the disk, or when it names that number and says the first
+      // look did not show the disk's size: an honest "cannot tell from that" uses it as well.
+      const firstText = answers.length > 1 ? answers[0].text || '' : '';
+      const found = (firstText.match(/\b\d+(?:[.,]\d+)?\s?(?:[KMGT]i?B?|[KMGT])\b/i) || [])[0];
+      const usesIt = Boolean(last) && (/(more|less|half)/i.test(last.text || '') || (found !== undefined && (last.text || '').replace(/\s/g, '').includes(found.replace(/\s/g, ''))));
+      ctx.expect(usesIt, 'the second answer uses what the first one found: it compares with half, or names the number it found', `first: ${firstText.slice(0, 200)} | second: ${(last && last.text || '').slice(0, 500)}`);
       ctx.expect(after.status === 'completed', 'the conversation ends completed again', after.status);
     },
   },
