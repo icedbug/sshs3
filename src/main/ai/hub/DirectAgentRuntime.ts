@@ -195,20 +195,47 @@ export interface ModelPricing {
   cacheReadPerM: number;
   cacheWritePerM: number;
   cacheWrite12hPerM?: number;
+  /** Above this many tokens of prompt, the prompt and the answer are billed at the higher rates below. */
   longContextAt?: number;
+  /** How many times the prompt's price above `longContextAt` (2 when not set). */
+  longInputFactor?: number;
+  /** How many times the answer's price above `longContextAt` (1.5 when not set). */
+  longOutputFactor?: number;
 }
 
+/** Anthropic's price of a model: in, out, read from the cache and written to it (5 minutes), USD per 1M tokens. */
+const claude = (inputPerM: number, outputPerM: number, cacheReadPerM: number, extra: Partial<ModelPricing> = {}): ModelPricing => ({
+  inputPerM,
+  outputPerM,
+  cacheReadPerM,
+  cacheWritePerM: inputPerM * 1.25,
+  ...extra,
+});
+
+/** The first prefix a model's name starts with gives its price, so a longer name comes before a shorter one. */
 export const MODEL_PRICING_USD_PER_M: ReadonlyArray<{ prefix: string; pricing: ModelPricing }> = [
   // Anthropic models (USD per 1M tokens)
-  { prefix: "claude-opus-5", pricing: { inputPerM: 15, outputPerM: 75, cacheReadPerM: 1.5, cacheWritePerM: 18.75 } },
+  { prefix: "claude-fable-5-2", pricing: claude(8, 40, 0.2) },
+  { prefix: "claude-mythos-5-2", pricing: claude(8, 40, 0.2) },
+  { prefix: "claude-fable-5-1", pricing: claude(10, 50, 0.25) },
+  { prefix: "claude-mythos-5-1", pricing: claude(10, 50, 0.25) },
+  { prefix: "claude-fable-5", pricing: claude(10, 50, 1) },
+  { prefix: "claude-mythos-5", pricing: claude(10, 50, 1) },
+  { prefix: "claude-opus-5-5", pricing: claude(4, 20, 0.2) },
+  { prefix: "claude-opus-5", pricing: claude(5, 25, 0.5) },
+  { prefix: "claude-opus-4-8", pricing: claude(5, 25, 0.5) },
+  { prefix: "claude-opus-4-7", pricing: claude(5, 25, 0.5) },
+  { prefix: "claude-opus-4-6", pricing: claude(5, 25, 0.5) },
+  { prefix: "claude-opus-4-5", pricing: claude(5, 25, 0.5) },
   { prefix: "claude-opus-4", pricing: { inputPerM: 15, outputPerM: 75, cacheReadPerM: 1.5, cacheWritePerM: 18.75 } },
-  { prefix: "claude-sonnet-5", pricing: { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
+  { prefix: "claude-sonnet-5-5", pricing: claude(2, 10, 0.1) },
+  { prefix: "claude-sonnet-5", pricing: claude(2, 10, 0.2) },
   { prefix: "claude-sonnet-4", pricing: { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
   { prefix: "claude-3-7-sonnet", pricing: { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
   { prefix: "claude-3-5-sonnet", pricing: { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
-  { prefix: "claude-fable-5", pricing: { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
-  { prefix: "claude-haiku-5", pricing: { inputPerM: 0.8, outputPerM: 4, cacheReadPerM: 0.08, cacheWritePerM: 1 } },
-  { prefix: "claude-haiku-4", pricing: { inputPerM: 0.8, outputPerM: 4, cacheReadPerM: 0.08, cacheWritePerM: 1 } },
+  // Claude Haiku 5.5 costs five times as much once the prompt is over 100K tokens.
+  { prefix: "claude-haiku-5", pricing: claude(0.1, 0.5, 0.01, { longContextAt: 100_000, longInputFactor: 5, longOutputFactor: 5 }) },
+  { prefix: "claude-haiku-4", pricing: claude(1, 5, 0.1) },
   { prefix: "claude-3-5-haiku", pricing: { inputPerM: 0.8, outputPerM: 4, cacheReadPerM: 0.08, cacheWritePerM: 1 } },
   { prefix: "claude-3-haiku", pricing: { inputPerM: 0.25, outputPerM: 1.25, cacheReadPerM: 0.03, cacheWritePerM: 0.3 } },
   // OpenAI / Codex models (USD per 1M tokens)
@@ -266,7 +293,7 @@ export function computeUsageCostUsd(
   const inputCost = input * pricing.inputPerM + cacheRead * pricing.cacheReadPerM +
     (cacheWrite - extendedWrites) * pricing.cacheWritePerM + extendedWrites * (pricing.cacheWrite12hPerM ?? pricing.cacheWritePerM);
   const outputCost = Math.max(0, usage.output_tokens) * pricing.outputPerM;
-  const usd = (inputCost * (long ? 2 : 1) + outputCost * (long ? 1.5 : 1)) / 1_000_000;
+  const usd = (inputCost * (long ? pricing.longInputFactor ?? 2 : 1) + outputCost * (long ? pricing.longOutputFactor ?? 1.5 : 1)) / 1_000_000;
   return Number(usd.toFixed(8));
 }
 

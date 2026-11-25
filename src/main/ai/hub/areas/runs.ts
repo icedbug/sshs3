@@ -10,6 +10,7 @@ import { HermesManager, type HermesModelConfig } from "../../HermesManager";
 import { isProdTag } from "../safetyPolicy";
 import { AcpRuntime } from "../AcpRuntime";
 import { lowerMode } from "../AppGuard";
+import { stepTerminal } from "../PlanMode";
 import { CHAT_NOT_EXTERNAL, reachMode } from "../chatFence";
 import { Replay } from "../EvalSuite";
 import { getDemoTasks, isDemoMode } from "../demoWorkspace";
@@ -1146,11 +1147,10 @@ export class RunsPart {
     const session = this.terminals.get(sessionId);
     if (!plan || plan.status === "rejected" || !session) return;
     const key = JSON.stringify([session.id, session.generation]);
-    const server = this.getKnownServers().find((s) => s.id === profileId);
-    const names = (name: string | undefined): boolean => {
-      const wanted = name?.trim().toLowerCase();
-      return Boolean(wanted && server && [server.id, server.name, server.host].some((n) => n.toLowerCase() === wanted));
-    };
+    const servers = this.getKnownServers();
+    // The step's target names this server and no other one, as it names a server when the plan is proposed.
+    const names = (target: string | undefined): boolean =>
+      servers.some((s) => s.id === profileId) && stepTerminal(target, [session], servers, undefined) === session;
     for (const step of plan.steps) {
       if (step.ranAt || !step.approvedTarget || step.approvedTarget === key) continue;
       let boundTo: string | undefined;

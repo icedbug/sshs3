@@ -106,7 +106,8 @@ describe("DirectAgentRuntime Wave 1 Overhaul", () => {
     });
 
     it("separates cache writes from cached reads and ordinary input", () => {
-      const { prefix, pricing } = MODEL_PRICING_USD_PER_M.find((entry) => entry.pricing.longContextAt !== undefined)!;
+      // An OpenAI model: its long prompts cost twice as much, its answers one and a half times.
+      const { prefix, pricing } = MODEL_PRICING_USD_PER_M.find((entry) => entry.pricing.longContextAt !== undefined && entry.pricing.cacheWrite12hPerM !== undefined)!;
       const usage = normalizeProviderUsage("openai-compatible", {
         input_tokens: 10_000,
         output_tokens: 400,

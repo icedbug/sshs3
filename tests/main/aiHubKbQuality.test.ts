@@ -20,7 +20,7 @@ import {
 import { checkPageText, commandLines, citedSources, stillUnverified } from "../../src/main/ai/hub/KbCheck";
 import { lintKnowledgeBase, pairsToCompare } from "../../src/main/ai/hub/KbLint";
 import { alertName, alertTicketText } from "../../src/main/ai/hub/AlertIntake";
-import { confirmedSomething } from "../../src/main/ai/hub/MemoryDistiller";
+import { confirmedSomething, taskTranscript } from "../../src/main/ai/hub/MemoryDistiller";
 import { clip } from "../../src/main/ai/hub/privacy";
 import type { IncomingAlert } from "../../src/main/ai/hub/AlertIntake";
 import type { AgentTask, KbDocument, KbPage } from "../../src/shared/types/aiHub";
@@ -312,6 +312,21 @@ describe("what a record has to show before it teaches a page", () => {
     expect(confirmedSomething("Command on db01: df -h /var → exit 0\nCommand on db01: cat /x → exit 1\n  output: No such file")).toBe(false);
     expect(confirmedSomething("Hypotheses at the end of the run:\n- [confirmed] The quota was full")).toBe(true);
     expect(confirmedSomething("Hypotheses at the end of the run:\n- [open] Maybe the quota")).toBe(false);
+  });
+
+  it("counts a command whose output starts with spaces or a blank line, as ps and other columns do", () => {
+    // In the lab, `ps -C nginx` showed 2 workers where the page said 4; its output starts with the
+    // right-aligned PIDs, the run was taken to have shown nothing, and the page was never put right.
+    const ran = (output: string) =>
+      taskTranscript({
+        target: { sessionId: "s", generation: "g", label: "web-01" },
+        messages: [{ id: "u", role: "user", text: "How many nginx workers run now?", at: 1 }],
+        changes: [{ id: "c", kind: "command", target: "web-01", description: "look", command: "ps -C nginx -o pid,ppid,user,cmd --no-headers", status: "completed", exitCode: 0, output, at: 2 }],
+      } as unknown as AgentTask);
+    expect(confirmedSomething(ran("     88       1 root     nginx: master process\n   1733      88 www-data nginx: worker process\n"))).toBe(true);
+    expect(confirmedSomething(ran("\n\n   ok\n"))).toBe(true);
+    // A first line of nothing but spaces, and then the next command, still showed nothing.
+    expect(confirmedSomething("Command on db01: df -h /var → exit 0\n  output:    \nCommand on db01: cat /x → exit 1\n  output: No such file")).toBe(false);
   });
 });
 

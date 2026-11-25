@@ -9,6 +9,7 @@ import { ChangeProof } from "../ChangeProof";
 import { ConfirmButton } from "../ConfirmButton";
 import { ChangeReveal, ChangeSecretInputs } from "../ChangeSecrets";
 import { lastUserMessageId } from "./panelHelpers";
+import { memoryFromAnswer } from "./memoryFromAnswer";
 import type { PanelState } from "./usePanelState";
 
 /** What a message row can ask of the panel. One object for the whole conversation, the same on every render. */
@@ -254,12 +255,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
       saveToMemory(text) {
         void live.current.act({
           action: "memory-save",
-          entry: {
-            kind: "memory",
-            scope: "workspace",
-            title: live.current.task?.title?.slice(0, 60) || "From an AI conversation",
-            text: text.slice(0, 1200),
-          },
+          entry: { kind: "memory", scope: "workspace", ...memoryFromAnswer(live.current.task?.title, text) },
         });
       },
       followUp() {

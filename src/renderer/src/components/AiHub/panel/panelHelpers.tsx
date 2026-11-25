@@ -138,16 +138,22 @@ export function getActiveProfileSummary(hub?: HubSnapshot): {
   };
 }
 
-export function getTaskUsageSummary(task?: AgentTask): { totalTokens: number; costUsd: number } {
-  if (!task) return { totalTokens: 0, costUsd: 0 };
+/**
+ * The tokens a conversation used and what they cost, the run going on included: every token sent and
+ * answered, the ones read from or written to the prompt cache too (most of a long conversation is read
+ * from it, and the cost counts them), and how many of them were the cache's.
+ */
+export function getTaskUsageSummary(task?: AgentTask): { totalTokens: number; cachedTokens: number; costUsd: number } {
+  if (!task) return { totalTokens: 0, cachedTokens: 0, costUsd: 0 };
   const isRunning = ["queued", "running", "waiting"].includes(task.status);
   const run = isRunning ? task.runUsage : undefined;
-  const inputTokens = (task.usage?.inputTokens ?? 0) + (run?.inputTokens ?? 0);
-  const outputTokens = (task.usage?.outputTokens ?? 0) + (run?.outputTokens ?? 0);
-  const costUsd = (task.usage?.costUsd ?? 0) + (run?.costUsd ?? 0);
+  const sum = (pick: (u: NonNullable<AgentTask["usage"]>) => number | undefined): number =>
+    (task.usage ? pick(task.usage) ?? 0 : 0) + (run ? pick(run) ?? 0 : 0);
+  const cachedTokens = sum((u) => u.cacheReadTokens) + sum((u) => u.cacheCreationTokens);
   return {
-    totalTokens: inputTokens + outputTokens,
-    costUsd,
+    totalTokens: sum((u) => u.inputTokens) + sum((u) => u.outputTokens) + cachedTokens,
+    cachedTokens,
+    costUsd: sum((u) => u.costUsd),
   };
 }
 

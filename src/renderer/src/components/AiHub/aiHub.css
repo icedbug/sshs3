@@ -3875,6 +3875,15 @@
   color: var(--ok-fg);
 }
 
+/* The label, the command and what it must show, each on a line of its own rather than run together. */
+.ai-proof > [data-testid="post-check-block"],
+.ai-proof > [data-ran] {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
 .ai-eval-checks {
   list-style: none;
   margin: 0;

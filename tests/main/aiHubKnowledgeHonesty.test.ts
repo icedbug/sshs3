@@ -346,6 +346,23 @@ describe("skills learned from what was run", () => {
     expect(reflected.memories.filter((m) => m.title.startsWith("Playbook"))).toEqual([]);
   });
 
+  it("titles a playbook by its task, cut at a whole word", () => {
+    // In the lab the skill was called "Playbook: … how many nginx worker proce".
+    const task = {
+      id: "t2",
+      title: "Which nginx version runs on this server, and how many nginx worker processes are running right now?",
+      status: "completed",
+      verification: "not-verified",
+      changes: [{ id: "c", kind: "command", command: "nginx -v 2>&1; ps -C nginx -o pid,cmd --no-headers", status: "completed", exitCode: 0, target: "web-01", description: "", at: 1 }],
+      messages: [],
+      sources: [],
+    };
+    const reflected = learning.reflectOnCompletedTask({ task: task as never, memories: [], infraEdges: [], servers: [] });
+    expect(reflected.memories.find((m) => m.title.startsWith("Playbook"))?.title).toBe(
+      "Playbook: Which nginx version runs on this server, and how many nginx worker…",
+    );
+  });
+
   it("does not offer a skill for a request it shares two everyday words with, and still offers the one that answers it", () => {
     const skill = (extra: Partial<MemoryEntry>): MemoryEntry =>
       ({ id: "s", kind: "skill", scope: "server:web-01", title: "Fixed a failure (web-01): systemd service failed", text: "x", confidence: 0.92, updatedAt: 1, ...extra }) as MemoryEntry;

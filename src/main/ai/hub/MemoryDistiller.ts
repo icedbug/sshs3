@@ -474,8 +474,9 @@ export function taskTranscript(task: AgentTask): string {
       lines.push(
         `Command on ${change.target}: ${clip(change.command, 600)} → ${result}`,
       );
+      // From its first line that shows something: the lines before it are blank.
       if (change.output?.trim())
-        lines.push(`  output: ${boundedContext(change.output, 500)}`);
+        lines.push(`  output: ${boundedContext(change.output.replace(/^(?:[ \t]*\r?\n)+/, ""), 500)}`);
     } else if (change.kind === "file") {
       lines.push(
         `File change on ${change.target}: ${clip(change.description, 300)} (${change.status})`,
@@ -501,8 +502,9 @@ export function taskTranscript(task: AgentTask): string {
  */
 export function confirmedSomething(transcript: string): boolean {
   // A command that exited 0 and printed nothing showed nothing (a scheduled run whose output was lost
-  // looks like that): only one whose output is in the record counts.
-  return /^Command on .* → exit 0\n {2}output: \S/m.test(transcript) || /^- \[confirmed\] /m.test(transcript);
+  // looks like that): only one whose output is in the record counts. Output may start with spaces, as
+  // the right-aligned columns of `ps` or `df` do.
+  return /^Command on .* → exit 0\n {2}output: [ \t]*\S/m.test(transcript) || /^- \[confirmed\] /m.test(transcript);
 }
 
 /**

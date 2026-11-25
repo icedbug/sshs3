@@ -77,12 +77,13 @@ describe("Anthropic agent loop: prompt caching and token accounting", () => {
     expect(done.output).toBe("Erik raised the timeout.");
     // Uncached input: 40+60; cache writes: 3000+200; cache reads: 0+3000; output: 25+12.
     // context_tokens is what the last call was sent (60+200+3000): how full the window is, not the sum.
+    // Claude Opus 5.5 per million tokens: $4 in, $20 out, $0.20 read from the cache, $5 written to it.
     expect(done.usage).toEqual({
       input_tokens: 100,
       output_tokens: 37,
       cache_read_input_tokens: 3000,
       cache_creation_input_tokens: 3200,
-      cost_usd: 0.068775,
+      cost_usd: (100 * 4 + 37 * 20 + 3000 * 0.2 + 3200 * 5) / 1e6,
       context_tokens: 3260,
     });
   });
@@ -102,7 +103,7 @@ describe("Anthropic agent loop: prompt caching and token accounting", () => {
       output_tokens: 10,
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
-      cost_usd: 0.0015,
+      cost_usd: (50 * 4 + 10 * 20) / 1e6,
       context_tokens: 50,
     });
   });

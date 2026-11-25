@@ -55,7 +55,7 @@ export const PLAN_TOOL = {
           type: "object",
           properties: {
             action: { type: "string", description: "What is done, in one sentence." },
-            target: { type: "string", description: "The server, cluster, file or service." },
+            target: { type: "string", description: "The server the step runs on, by the name its terminal shows, then the file or service on it if that helps: \"web-02: /etc/nginx/nginx.conf\". Leave it out, or give only a path, for a step on the server of this conversation. The approval covers the step only on the server named here." },
             command: { type: "string", description: "The exact command, when the step is one. Made with sshs3_change exactly as listed here, it runs without asking again once the plan is approved." },
             risk: { type: "string", enum: ["low", "medium", "high"] },
             check: { type: "string", description: "The command and expected output that show the step worked. The command must exit with code 0 when the step worked: a check whose last command exits non-zero on success (a `diff` that finds the change, a `grep` that should match nothing) counts as failed and the step is rolled back." },
@@ -424,6 +424,66 @@ export function planGate(
     return "This conversation is in Plan mode. Propose a plan with sshs3_plan_propose and wait for the user's approval before changing anything. Commands still run; make no change.";
   }
   return "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything. Commands still run; make no change.";
+}
+
+/**
+ * Whether a name stands in a text as a whole word, as a server's name or address does in a plan
+ * step's target: "web-02" does in "web-02 (staging): /tmp/x" and in "ops@web-02:/etc", not in
+ * "web-020" or in the other host "web-02.example.com". Letters are compared without case.
+ */
+export function namesWhole(text: string, name: string | undefined): boolean {
+  const t = text.toLowerCase();
+  const n = name?.trim().toLowerCase();
+  if (!n) return false;
+  for (let i = t.indexOf(n); i >= 0; i = t.indexOf(n, i + 1)) {
+    const before = i > 0 ? t[i - 1] : "";
+    const after = t.slice(i + n.length, i + n.length + 2);
+    if (!/[a-z0-9_.-]/.test(before) && !/^(?:[a-z0-9_-]|\.[a-z0-9_-])/.test(after)) return true;
+  }
+  return false;
+}
+
+/** What a terminal is to a plan step: where it is open, and which server, when the workspace knows it. */
+export interface StepTerminal {
+  id: string;
+  generation: string;
+  label: string;
+  profileId?: string;
+}
+
+/**
+ * The terminal a plan step runs on, from what its target says. A change card the approved plan lists
+ * runs without a second question only on that terminal (`planCoversCommand`), so a step that gets none
+ * is asked about again, which is the safe way to be wrong.
+ *
+ * - The server the target names, by a known server's name, address or id, or a terminal's label or id,
+ *   standing in it as a whole word ("web-02 (staging): /etc/nginx/nginx.conf" names web-02). That
+ *   server's terminal, or the conversation's own one when that server is open in several.
+ * - No target, or a target that is only a path: the conversation's own terminal, which is where the
+ *   person who approves the plan sees it working.
+ * - None when the target names more than one server, a server with no terminal open, a server open in
+ *   several terminals none of which is the conversation's, or nothing a server is told by (a service).
+ */
+export function stepTerminal<T extends StepTerminal>(
+  target: string | undefined,
+  terminals: readonly T[],
+  servers: ReadonlyArray<{ id: string; name?: string; host?: string }>,
+  own: { sessionId: string; generation: string } | undefined,
+): T | undefined {
+  const mine = own ? terminals.find((s) => s.id === own.sessionId && s.generation === own.generation) : undefined;
+  const text = target?.trim();
+  if (!text) return mine;
+  const known = new Set(servers.map((s) => s.id));
+  // A terminal on a known server is that server; one the workspace does not know is told by its label.
+  const serverOf = (s: T): string => (s.profileId && known.has(s.profileId) ? s.profileId : s.profileId ? `profile:${s.profileId}` : `label:${s.label.toLowerCase()}`);
+  const named = new Set<string>();
+  for (const server of servers) if ([server.id, server.name, server.host].some((n) => namesWhole(text, n))) named.add(server.id);
+  for (const s of terminals) if ([s.id, s.label, s.profileId].some((n) => namesWhole(text, n))) named.add(serverOf(s));
+  if (named.size === 0) return /^[~/]\S*$/.test(text) ? mine : undefined;
+  if (named.size > 1) return undefined;
+  const [server] = named;
+  const open = terminals.filter((s) => serverOf(s) === server);
+  return open.length === 1 ? open[0] : open.find((s) => s === mine);
 }
 
 /** Whether a plan step without a command names this file: in what it does, or as its target. */

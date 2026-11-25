@@ -28,7 +28,7 @@ import {
 } from "../demoWorkspace";
 import { boundedContext, boundedPrompt, clip, PERSON_PROMPT_MAX, safeError, secretLine } from "../privacy";
 import { resolveTargetSelector } from "../WorkforceRunner";
-import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, todosFromPlan } from "../PlanMode";
+import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, stepTerminal, todosFromPlan } from "../PlanMode";
 import { requiredText, integer } from "../hubHelpers";
 import { log, BOOLEAN_POLICY_NAMES, active, fromHub, REVEAL_KEPT_MS } from "../hubShared";
 import { chatServiceLabel } from "../chatFence";
@@ -208,13 +208,10 @@ export class SafetyPart {
     // same server is not where its plan runs.
     const fence = this.chatFence(task);
     const sessions = this.terminals.list().filter((s) => s.state !== "disconnected" && (!fence || fence.own(s.id)));
+    const servers = this.getKnownServers();
     for (const step of plan.steps) {
-      const name = step.target?.trim().toLowerCase();
-      const matches = sessions.filter((s) => name
-        ? s.id.toLowerCase() === name || s.profileId?.toLowerCase() === name || s.label.toLowerCase() === name
-        : s.id === task.target?.sessionId && s.generation === task.target.generation);
-      if (matches.length === 1) {
-        const session = matches[0];
+      const session = stepTerminal(step.target, sessions, servers, task.target);
+      if (session) {
         step.approvedTarget = JSON.stringify([session.id, session.generation]);
         step.target ??= session.label;
       }

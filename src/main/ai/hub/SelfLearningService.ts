@@ -25,6 +25,7 @@ import {
   type MemorySourceTrust,
 } from "./MemoryDistiller";
 import { containsSecrets, maskContext } from "./privacy";
+import { clipAtWord } from "../../../shared/clipAtWord";
 
 export interface FailureCritique {
   taskId: string;
@@ -861,10 +862,7 @@ export class SelfLearningService {
       const primaryCmd = uniqueCmds[0];
       const targetLabel =
         succeededCommands[0]?.target || task.target?.label || "workspace";
-      const cleanTitle = maskContext(task.title)
-        .replace(/^(AI|Run|Task):\s*/i, "")
-        .trim()
-        .slice(0, 72);
+      const cleanTitle = clipAtWord(maskContext(task.title).replace(/^(AI|Run|Task):\s*/i, "").trim(), 72);
       const playbookTitle = `Playbook: ${cleanTitle || primaryCmd}`;
       const playbookScope = cluster ? `cluster:${cluster}` : `server:${targetLabel}`;
       const playbookText = `Commands that completed on ${targetLabel} (${task.verification === "verified" ? "the task was verified" : "each exited 0; the result was not checked"}): ${uniqueCmds.map((cmd) => `\`${cmd}\``).join(" → ")}.`;

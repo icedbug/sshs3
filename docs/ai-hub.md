@@ -280,7 +280,15 @@ explicitly enabled presentation on top of the same terminal authority.
     declining without a note drops the plan.
   - *What approval covers* (`planCoversCommand`, in `ToolBroker.authorize`):
     a change card made exactly as a step lists it (command, check, expected
-    text, rollback) and that has not run yet is not asked about again. Any
+    text, rollback), on the terminal the step runs on, and that has not run
+    yet is not asked about again. The terminal is read from the step's
+    target when the plan is proposed (`stepTerminal`): the server it names,
+    by a known server's name, address or id standing in it as a whole word
+    (`web-02 (staging): /etc/nginx/nginx.conf` names web-02, `web-020` and
+    `web-02.example.com` do not), and the conversation's own terminal for a
+    step with no target or only a path. A step whose target names two
+    servers, a server with no terminal open, or only a service gets no
+    terminal, and its change card is asked about again. Any
     other change card, a second run of the same one, and every file write are
     asked about as usual. A plain command a plan lists runs like any other
     command, and its step is ticked as run. A step is also ticked when its

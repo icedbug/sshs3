@@ -60,7 +60,7 @@ export function PanelHeader({ p }: { p: PanelState }): JSX.Element {
               data-testid="ai-usage-pill"
               className="ai-badge"
               style={{ ...TABULAR_NUMS_STYLE, fontSize: 10.5, padding: "3px 8px" }}
-              title="Live token usage and estimated USD cost for this task"
+              title={`Tokens this conversation used and their estimated cost in USD${taskUsage.cachedTokens > 0 ? `: ${formatCompactTokens(taskUsage.cachedTokens)} of them read from or written to the prompt cache, which costs less` : ""}`}
             >
               {formatCompactTokens(taskUsage.totalTokens)} tok
               {taskUsage.costUsd > 0 ? ` · ${formatUsdCost(taskUsage.costUsd)}` : " · $0.00"}
