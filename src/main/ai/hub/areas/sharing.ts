@@ -372,7 +372,7 @@ export class SharingPart {
         !t.deleted &&
         t.status === "in_progress" &&
         t.claim?.client === client &&
-        (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId));
+        (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId || (x.ticketId === t.id && active(x))));
       const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
       const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun, { now, retired: retiredTicket });
       // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.

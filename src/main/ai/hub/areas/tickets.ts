@@ -282,7 +282,9 @@ export class TicketsPart {
       claim: { by, client, at: now, seenAt: now },
       taskId: task.id,
       result: undefined,
-      updatedAt: now,
+      // Newer than the copy written when the ticket was taken: two copies with the same time are settled
+      // by their text, and the one without the run could win.
+      updatedAt: Math.max(Date.now(), now + 1),
     });
     return task;
   }
@@ -387,6 +389,23 @@ export class TicketsPart {
   }
 
   /**
+   * The run working a ticket this app has taken: the one the ticket names, or else the newest run of the
+   * ticket here since it was taken. A copy of the ticket merged from teammates' copies of the start can
+   * come back with the claim and without the run's id; the run is found all the same, and the ticket is
+   * given its id again, so that it is neither freed while the run goes on nor left without its report.
+   */
+  ticketRun(this: HubService, ticket: WorkTicket): AgentTask | undefined {
+    const named = ticket.taskId ? this.store.data.tasks.find((t) => t.id === ticket.taskId) : undefined;
+    if (named) return named;
+    const since = ticket.claim?.at ?? 0;
+    const run = this.store.data.tasks
+      .filter((t) => t.ticketId === ticket.id && (t.createdAt ?? 0) >= since)
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+    if (run) this.putTicket({ ...ticket, taskId: run.id, updatedAt: Date.now() });
+    return run;
+  }
+
+  /**
    * Tickets this app is running whose run has ended: the report goes on the
    * ticket, the tokens on the agent's budget, and the ticket to review.
    */
@@ -394,7 +413,7 @@ export class TicketsPart {
     const client = this.clientId();
     for (const ticket of live(this.store.data.workTickets)) {
       if (ticket.status !== "in_progress" || ticket.claim?.client !== client || this.ticketStarts.has(ticket.id)) continue;
-      const task = this.store.data.tasks.find((t) => t.id === ticket.taskId);
+      const task = this.ticketRun(ticket);
       if (task && active(task)) continue;
       if (!task) {
         // The conversation is gone (history was deleted): the ticket goes back.
@@ -402,7 +421,7 @@ export class TicketsPart {
       } else {
         // Only what was not counted when the run ended (a run that carries the agent has been).
         this.countAgentUsage(task, ticket.assigneeAgentId ?? task.agentId);
-        this.putTicket(withUnanswered(ticketAfterRun(ticket, task), task, ticket.claim?.at ?? 0));
+        this.putTicket(withUnanswered(ticketAfterRun({ ...ticket, taskId: task.id }, task), task, ticket.claim?.at ?? 0));
       }
       void this.work()
         ?.release(ticket.id, client)
@@ -433,7 +452,9 @@ export class TicketsPart {
     for (const t of live(this.store.data.workTickets)) {
       if (t.status !== "in_progress") continue;
       if (t.claim?.client === client) {
-        if (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId && active(x))) continue;
+        if (this.ticketStarts.has(t.id)) continue;
+        const run = this.ticketRun(t);
+        if (run && active(run)) continue;
       } else if (t.claim && (sync ? this.claimAlive(t.id, t.claim.seenAt, now) : claimIsFresh(t, now))) continue;
       this.putTicket({
         ...withComment(t, "sshS3", `The run by ${t.claim?.by ?? "somebody"} stopped reporting; the ticket is free again.`),

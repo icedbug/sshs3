@@ -720,3 +720,70 @@ describe("the rest", () => {
     expect(state().status).toBe("review");
   });
 });
+
+describe("a ticket started on a board the team shares", () => {
+  it("keeps a ticket whose copy lost its run's id while that run goes on here, and puts the run's report on it", async () => {
+    // In the lab: Lina started a ticket on the team's web server. The teammates' hubs merged the copies
+    // of the start, and the copy that came back to Lina's hub had her claim but not her run's id. Her own
+    // hub then freed the ticket ("stopped reporting") 0.8 seconds after the start, while the run went on,
+    // and the run's report, 17 seconds later, never reached the ticket: it stayed "to do".
+    const bucket = memoryBucket();
+    const lina = await makeHub({ defaultActorName: "Lina" }, bucket);
+    const client = lina.inner.clientId();
+    const now = Date.now();
+    // The run was made just after the ticket was taken.
+    const run = running("run1", { ticketId: "t1", createdAt: now - 900 });
+    lina.hub.store.data.tasks.push(run);
+    lina.hub.store.data.workTickets = [
+      ticket("t1", { status: "in_progress", claim: { by: "Lina", client, at: now - 1000, seenAt: now - 1000 }, updatedAt: now - 1000 }),
+    ];
+    await lina.inner.workSyncStore!.claim("t1", { by: "Lina", client }, now - 1000);
+
+    await sync(lina.inner);
+    let held = lina.hub.store.data.workTickets!.find((t) => t.id === "t1")!;
+    expect(held.comments ?? []).toEqual([]);
+    expect(held).toMatchObject({ status: "in_progress", taskId: "run1", claim: { client } });
+
+    // The run ends: its report reaches the ticket, which waits for a person.
+    run.status = "completed";
+    run.messages.push({ id: "m1", role: "assistant", text: "web-01's disk is 63% full.", at: Date.now() });
+    lina.inner.settleTickets();
+    held = lina.hub.store.data.workTickets!.find((t) => t.id === "t1")!;
+    expect(held).toMatchObject({ status: "review", result: "web-01's disk is 63% full." });
+  });
+});
+
+describe("starting a ticket", () => {
+  it("writes the copy that names the run as newer than the one written before the run", async () => {
+    // Two copies with the same time are settled by their text, not by which came last: the copy that
+    // names the run has to be the newer one.
+    const writes: WorkTicket[] = [];
+    const bucket = memoryBucket();
+    const write = bucket.write.bind(bucket);
+    bucket.write = async (p, c) => {
+      if (p.startsWith("work/tickets/")) writes.push(JSON.parse(c.toString("utf8")) as WorkTicket);
+      await write(p, c);
+    };
+    const lina = await makeHub({ defaultActorName: "Lina" }, bucket);
+    await lina.hub.request({
+      action: "configure",
+      config: { enabled: true, provider: "anthropic", model: "claude-opus-5-5", apiKey: "sk-ant-test" }, // pragma: allowlist secret
+      preferences: { proposeMemories: false },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 1000));
+        return new Response('data: {"type":"message_stop"}\n\n', { status: 200 });
+      }),
+    );
+    lina.hub.store.data.workTickets = [ticket("t1", { assigneeAgentId: "builtin-agent-general", updatedAt: Date.now() - 60_000 })];
+    await lina.hub.request({ action: "ticket-start", id: "t1" });
+    await waitFor(() => writes.some((w) => w.status === "in_progress" && w.taskId));
+    const taken = writes.find((w) => w.status === "in_progress" && !w.taskId)!;
+    const withRun = writes.find((w) => w.status === "in_progress" && w.taskId)!;
+    expect(withRun.updatedAt).toBeGreaterThan(taken.updatedAt);
+    // When it was taken stays the time of the start.
+    expect(withRun.claim!.at).toBe(taken.claim!.at);
+  });
+});
