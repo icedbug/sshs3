@@ -9,6 +9,10 @@ export interface FunctionToolDef {
   parameters: Record<string, unknown>;
 }
 
+/** The terminal a command or a change runs in, and how an agent reaches another server's. */
+const TERMINAL_SESSION_ID =
+  "The terminal to run it in, by its sessionId (workspace_context lists the open ones). Without it, this conversation's terminal. For another server, open a terminal there first with sshs3_workspace_layout (open_terminal), then give that terminal's sessionId.";
+
 /**
  * The app's own tools as the direct runtime offers them to a model. Which of them a run is
  * given is decided in DirectAgentRuntime (`toolsForTask`), which also adds the task list, the
@@ -49,11 +53,7 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
           type: "string",
           description: "Brief human-readable explanation of what this command looks at or checks.",
         },
-        sessionId: {
-          type: "string",
-          description:
-            "Optional terminal sessionId when working across multiple open terminals. Defaults to the task's active terminal.",
-        },
+        sessionId: { type: "string", description: TERMINAL_SESSION_ID },
       },
       required: ["command", "description"],
       additionalProperties: false,
@@ -78,7 +78,7 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
         },
         rollback: { type: "string", description: "The command that takes the change back." },
         observeSeconds: { type: "number", description: "How long the check must keep passing (0 to 180). Use more for things that fail late, like a service that starts and then crashes." },
-        sessionId: { type: "string", description: "Optional terminal sessionId." },
+        sessionId: { type: "string", description: TERMINAL_SESSION_ID },
       },
       required: ["command", "description", "check", "rollback"],
       additionalProperties: false,
@@ -94,7 +94,7 @@ export const AGENT_TOOLS: FunctionToolDef[] = [
         command: { type: "string", description: "Verification command to run." },
         expected: { type: "string", description: "Substring expected in the command output." },
         description: { type: "string", description: "What this verification proves." },
-        sessionId: { type: "string", description: "Optional terminal sessionId." },
+        sessionId: { type: "string", description: TERMINAL_SESSION_ID },
       },
       required: ["command", "expected", "description"],
       additionalProperties: false,
