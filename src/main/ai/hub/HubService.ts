@@ -461,7 +461,11 @@ export class HubService {
         void this.recordTerminalCommandActivity(session, commandLine, classified);
       },
     );
-    this.terminals.on("invalidated", (owner: string, reason: string) => {
+    // A terminal that is closed, lost or taken over ends the run that held it. A command that ran out of
+    // time does not: it is left running, and its answer tells the agent to use another terminal or to
+    // ask the person to look. The run goes on so that it can, and the person gets an answer.
+    this.terminals.on("invalidated", (owner: string, reason: string, how?: { commandLeftRunning?: boolean }) => {
+      if (how?.commandLeftRunning) return;
       const task = this.store.data.tasks.find((t) => t.id === owner);
       if (task && active(task)) void this.stop(task, reason);
     });

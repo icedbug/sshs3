@@ -3414,6 +3414,12 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
   told that the command is still running, with the last line the terminal
   showed. The command is not run again, and a change card says its rollback
   did not run. A person who wants it stopped presses Ctrl-C in the terminal.
+  The run goes on: the agent can use another terminal or tell the person what
+  is waiting there, and the person gets an answer. (It used to be stopped at
+  that moment, so the lab's runs ended with no answer when psql asked for a
+  password or an agent waited with `sleep 150`.) A terminal that is closed,
+  lost or taken back by a person still ends the run that held it. Covered by
+  `tests/main/runAfterTimeout.test.ts`.
 - A pager that a command's output opens (less, or more) waits for a key that
   nobody would press: systemctl and journalctl start one by themselves (and
   less stays open on a line wider than the terminal even when the text fits),

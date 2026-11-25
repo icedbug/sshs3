@@ -1091,6 +1091,8 @@ export class TerminalRegistry extends EventEmitter {
     this.invalidate(
       id,
       `The command did not finish within ${seconds} seconds. It was left running in this terminal: sshs3 does not stop a command by itself. Nothing more is typed there until it has ended. It was not run again. Use another terminal, or ask the person to look at this one.${last ? ` It last showed: ${last}` : ""}`,
+      false,
+      { commandLeftRunning: true },
     );
   }
 
@@ -1125,7 +1127,12 @@ export class TerminalRegistry extends EventEmitter {
     if (owner) this.emit("takeover", owner);
   }
 
-  invalidate(id: string, reason: string, disconnected = false): void {
+  /**
+   * The terminal can no longer be trusted to be where it was: closed, lost, taken over, or still busy
+   * with a command that ran out of time. Whatever held it lets go. `commandLeftRunning` says it is the
+   * last of these: the run that typed the command is told so by the command's own answer, and goes on.
+   */
+  invalidate(id: string, reason: string, disconnected = false, how: { commandLeftRunning?: boolean } = {}): void {
     const s = this.sessions.get(id);
     if (!s) return;
     const owner = s.view.owner;
@@ -1161,7 +1168,7 @@ export class TerminalRegistry extends EventEmitter {
       s.reconnectGrace = undefined;
     }
     s.view.updatedAt = Date.now();
-    if (owner) this.emit("invalidated", owner, reason);
+    if (owner) this.emit("invalidated", owner, reason, { commandLeftRunning: how.commandLeftRunning === true });
     this.emit("changed");
   }
 
