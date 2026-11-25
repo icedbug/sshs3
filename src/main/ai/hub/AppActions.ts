@@ -1444,9 +1444,18 @@ export async function handleAppAction(
         ]);
         if (op === "get_state") {
           const extra = await hub.collectExtraContext();
-          const aiConfig = await hub.config.getView();
+          // What is set up, with no address, key file or account in it: where a server's SSH key lies on
+          // the server, the model endpoint's address and the signed-in account's e-mail were shown on
+          // screen and given to the model. That one is set is still said.
+          const { baseUrl, codexAccountEmail, ...aiConfig } = await hub.config.getView();
+          void codexAccountEmail;
+          const workspaceServers = (extra.workspaceServers ?? []).map(({ privateKeyPath, pkcs11LibPath, ...server }) => ({
+            ...server,
+            ...(privateKeyPath ? { privateKeySaved: true } : {}),
+            ...(pkcs11LibPath ? { smartcardLibrarySaved: true } : {}),
+          }));
           return {
-            aiConfig,
+            aiConfig: { ...aiConfig, ...(baseUrl ? { baseUrlSet: true } : {}) },
             safetyPolicy: hub.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
             appSettings: extra.appSettings,
             folders: extra.folders,
@@ -1460,8 +1469,8 @@ export async function handleAppAction(
             agents: extra.agents,
             mcpServers: extra.mcpServers,
             kbDocuments: extra.kbDocuments,
-            workspaceServersCount: (extra.workspaceServers ?? []).length,
-            workspaceServers: extra.workspaceServers,
+            workspaceServersCount: workspaceServers.length,
+            workspaceServers,
             openTerminals: hub.terminals.list(),
           };
         }

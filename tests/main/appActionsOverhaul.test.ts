@@ -589,6 +589,32 @@ describe("AppActions overhaul", () => {
     });
   });
 
+  // Found by two exploring testers: the state the agent reads named where every server's SSH key file
+  // lies on the server, and the model endpoint's internal address, on screen and to the model.
+  describe("the app's state as an agent reads it", () => {
+    it("names no key file, no model address and no account e-mail", async () => {
+      const { hub } = createHarness({
+        servers: [makeServer({ authType: "privateKey", privateKeyPath: "/srv/sshs3/users/usr_1/.ssh/id_ed25519", pkcs11LibPath: "/usr/lib/opensc-pkcs11.so" })],
+      });
+      (hub.config.getView as ReturnType<typeof vi.fn>).mockResolvedValue({
+        provider: "anthropic",
+        model: "claude-opus-5-5",
+        baseUrl: "https://10.77.9.1:42937",
+        codexAccountEmail: "someone@example.com",
+        hasApiKey: true,
+      });
+      const state = (await handleAppAction(hub, makeTask(), { action: "sshs3_manage_app_and_settings", payload: { operation: "get_state" } }, vi.fn())) as Record<string, unknown>;
+      const text = JSON.stringify(state);
+      expect(text).not.toContain("id_ed25519");
+      expect(text).not.toContain("opensc-pkcs11");
+      expect(text).not.toContain("10.77.9.1");
+      expect(text).not.toContain("someone@example.com");
+      // What is set up is still said: that there is a key file, and an endpoint of its own.
+      expect((state.workspaceServers as Array<Record<string, unknown>>)[0]).toMatchObject({ name: "web-01", authType: "privateKey", privateKeySaved: true });
+      expect(state.aiConfig).toMatchObject({ provider: "anthropic", model: "claude-opus-5-5", hasApiKey: true, baseUrlSet: true });
+    });
+  });
+
   describe("3. sshs3_cluster_exec staged execution & prod role/count reporting", () => {
     // Found by an exploring tester: a look across one server read "1 nodes (unspecified:1)".
     it("says one node in the singular, and leaves out roles no server has", async () => {
