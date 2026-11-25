@@ -38,13 +38,15 @@ export function ComposerFooter({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                           aria-pressed={activeMode}
                           disabled={!!task}
                           title={
-                            value === "advice"
+                            (value === "advice"
                               ? "Advice: talk it through. Nothing is run."
                               : value === "plan"
                                 ? "Plan: The agent looks around, then proposes a plan. Change cards and file writes wait until you approve it."
                                 : value === "assisted"
                                   ? "Ask first: Commands run without asking. A change card or a file write waits for you."
-                                  : "Auto: Commands and change cards run without asking. On production a change card still waits for a person."
+                                  : "Auto: Commands and change cards run without asking. On production a change card still waits for a person.") +
+                            // Grey inside a conversation: said why, not left to guess.
+                            (task ? " A conversation keeps the mode it was started in. Start a new chat for another mode." : "")
                           }
                           onClick={() => {
                             setAutonomy(value);

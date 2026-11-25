@@ -102,6 +102,16 @@ describe("the demo lab's example conversation", () => {
     expect(screen.getByTestId("ai-mode-pill-advice")).toHaveTextContent("Advice");
     expect(screen.getByTestId("ai-mode-pill-assisted")).toHaveTextContent("Ask first");
   });
+  // Found by the new on-call tester: the mode buttons turned grey once a conversation existed, and
+  // nothing said why.
+  it("says why the mode cannot be changed inside a conversation", () => {
+    fixture.tasks = [makeTask({ status: "completed" })];
+    render(<Harness />);
+    openTask();
+    const pill = screen.getByTestId("ai-mode-pill-advice");
+    expect(pill).toBeDisabled();
+    expect(pill.getAttribute("title")).toMatch(/A conversation keeps the mode it was started in\. Start a new chat for another mode\./);
+  });
 });
 
 describe("fork and restore", () => {
